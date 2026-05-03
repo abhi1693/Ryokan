@@ -1,0 +1,8 @@
+# Pinned MkDocs deps for the docs site build. Major-version pins
+# only — `pip install -r` resolves to the latest minor + patch on
+# every CI run so security fixes land without a manual bump, but
+# a Material breaking change can't smuggle itself in via a v9.x
+# release. Bump the major when you've reviewed the release notes.
+mkdocs>=1.6,<2
+mkdocs-material>=9.5,<10
+pymdown-extensions>=10,<11

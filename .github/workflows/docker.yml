@@ -74,18 +74,48 @@ jobs:
             -e LISTEN_ADDR=0.0.0.0:8978 \
             -p 8978:8978 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          # poll for readiness rather than sleeping
+          # Probe /login (matches the production HEALTHCHECK). 200 means
+          # the auth UI rendered; anything else fails. Polling loop
+          # rather than fixed sleep so a fast cold-boot doesn't waste a
+          # full minute on every CI run.
+          #
+          # `|| code=000` is load-bearing: GitHub Actions runs `run`
+          # blocks under `set -eo pipefail`, so a curl error inside a
+          # command substitution (connection refused = 7, broken
+          # response = 56, etc.) propagates through and kills the
+          # whole loop before the next sleep. Cold-boot races
+          # naturally produce both — the kernel accepts the TCP
+          # connection the moment Axum binds, but a few hundred ms
+          # before the router is actually serving, curl can get an
+          # incomplete response. Without the swallow we observed exit
+          # 56 on run 25254999207 even though the container came up
+          # fine ~2-3s later. The `000` sentinel keeps the loop
+          # iterating; a real "never came up" still falls out the
+          # bottom and reports the last code.
+          # Accept 200 OR 303 as "up": a fresh container with no
+          # users yet redirects `/login` → `/setup` (303), which is
+          # correct behavior on first boot. The previous strict
+          # 200-only check failed every fresh-image smoke test and
+          # masked the actual question we want to answer ("did
+          # Ryokan boot and start serving?"). 4xx/5xx still fall
+          # through to the failure path.
           for i in {1..30}; do
-            if curl -sf http://localhost:8978/ >/dev/null 2>&1 \
-               || [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8978/)" = "302" ]; then
-              echo "Ryokan responded"
-              exit 0
-            fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8978/login || echo 000)
+            case "$code" in
+              200|303)
+                echo "Ryokan /login responded $code (Ryokan is up)"
+                exit 0
+                ;;
+            esac
             sleep 1
           done
-          echo "Ryokan never came up"
+          echo "Ryokan never came up (last code: $code)"
           docker logs ryokan-smoke
           exit 1
+
+      - name: Tear down smoke-test container
+        if: always() && matrix.platform == 'linux/amd64'
+        run: docker rm -f ryokan-smoke || true
 
       - name: Export digest
         run: |
@@ -114,7 +144,11 @@ jobs:
 
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v8
+        # Pinned to v7 to match `upload-artifact@v7` above. v8 of
+        # download-artifact exists but there's no v8 of upload-artifact
+        # yet, and v7↔v8 mixing has produced ambiguous archives in the
+        # past (compression-default change between majors).
+        uses: actions/download-artifact@v7
         with:
           path: ${{ runner.temp }}/digests
           pattern: digests-*

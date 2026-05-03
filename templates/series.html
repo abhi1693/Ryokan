@@ -76,7 +76,7 @@
 
         <div class="detail-actions">
             <button class="btn btn-primary" id="btn-auto-search" onclick="autoSearchSeries(this)">
-                <span class="btn-label">Search Missing Episodes</span>
+                <span class="btn-label">Search Monitored Episodes</span>
             </button>
             {% if is_tracked %}
                 {% if let Some(id) = db_id %}
@@ -263,9 +263,14 @@
             {% else if downloaded_count > 0 %}
             <span class="season-badge season-badge-partial">{{ downloaded_count }} files</span>
             {% endif %}
-            {% if !size_display.is_empty() %}
+            {# Always render the span, even when size_display is empty
+               on first load (no files yet). JS's `updateSeasonSummary`
+               targets `.season-size` to keep this in sync after a
+               poller import lands; if we hid the span on an empty-size
+               first paint, the JS would have nothing to update and
+               the user would only see the size after the next full
+               page reload. Empty textContent renders invisibly. #}
             <span class="season-size">{{ size_display }}</span>
-            {% endif %}
         </div>
         {% if is_tracked %}
         {% if let Some(id) = db_id %}
@@ -334,7 +339,22 @@
                    the library — the latter is the post-processing-off
                    case. Mirrors Sonarr's Activity "downloaded" vs
                    library "HasFile" split. #}
-                <tr class="{% if ep.downloaded %}ep-row-have{% else %}ep-row-missing{% endif %}">
+                {# Row class mirrors what `patchEpisodeRows` would
+                   produce after one /api/series/<id>/episodes call,
+                   so the post-refresh state matches the live state.
+                   Without the `quality_state == "grabbed"` branch,
+                   an in-flight grab rendered as `ep-row-missing` on
+                   first paint (full opacity, modal-footer Cancel
+                   Pending button hidden) and only got the
+                   `ep-row-queued` styling once the JS poller's
+                   first patch landed — visible as a brief flash on
+                   open and as a "button reappeared after I refreshed"
+                   inconsistency on a series with active downloads.
+                   The `ep.downloaded` branch wins over `grabbed`
+                   because the post-processing-off case
+                   (`downloaded=true, on_disk=false, quality_state="completed"`)
+                   should render as on-hand, not queued. #}
+                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else %}ep-row-missing{% endif %}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">

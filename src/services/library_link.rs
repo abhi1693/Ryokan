@@ -44,6 +44,9 @@
 //! `grabbed_torrents.episode_numbers` immediately so the series page
 //! shows progress before post-processing finishes.
 
+use std::collections::HashSet;
+use std::sync::LazyLock;
+
 use anitomy::{Anitomy, ElementCategory};
 
 use crate::AppState;
@@ -167,18 +170,43 @@ pub fn extract_anime_title(release_title: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// 3-char tokens that are never show identity — release-form markers,
+/// codecs/containers, source labels, common English fillers, quality
+/// fields. Without this set, `share_substantive_token` accepted
+/// pairings like `[Group] Show OVA - 01` ↔ `OVA Anthology` because
+/// `ova` (4 chars) cleared the length filter and was the only shared
+/// token. Same shape for `amv`/`raw`/`bdmv`/`web`/`1080p` and the
+/// English fillers below.
+static SUBSTANTIVE_STOPWORDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    HashSet::from([
+        // Anime-form markers.
+        "ova", "ona", "oad", "oav", "amv", "ncop", "nced", "raw", "dub", "sub", "subs",
+        // Source / encode / container.
+        "web", "bdmv", "bluray", "dvdrip", "hdtv", "webrip", "bdrip", "hdrip", "mkv", "mp4", "m4v",
+        "avc", "hevc", "h264", "h265", "x264", "x265", "aac", "flac", "opus", "ass", "srt",
+        // Resolution / quality fields.
+        "1080", "1080p", "2160", "2160p", "720p", "480p",
+        // English fillers that survive the 3-char filter.
+        "the", "and", "for", "with", "from", "but", "you", "all", "any", "are", "was", "has",
+        "have", "had", "her", "his", "him", "she", "they", "them", "our", "out", "who", "not",
+        "its",
+    ])
+});
+
 /// True when `parsed` and `candidate` share at least one substantive
-/// alphanumeric token (≥3 chars, lowercase). Catches AL search
-/// returning a totally unrelated #1 result for very short or
-/// anitomy-mangled parsed titles. The threshold of 3 chars drops
-/// articles ("the", "of", "a") and metadata fragments ("OP", "ED",
-/// "BD") that would generate spurious matches; numeric tokens like
-/// "100" or "2nd" still count if they're 3+ chars.
+/// alphanumeric token (≥3 chars, lowercase, not in the stop-word set).
+/// Catches AL search returning a totally unrelated #1 result for very
+/// short or anitomy-mangled parsed titles. The 3-char threshold drops
+/// articles ("the", "of", "a"); the stop-word set drops 3+-char tokens
+/// that would produce spurious matches between unrelated shows
+/// ("ova", "amv", "raw", "1080p", and common English fillers). Numeric
+/// tokens like "100" or "2nd" still count — they're show-identity
+/// signals when 3+ chars.
 pub fn share_substantive_token(parsed: &str, candidate: &str) -> bool {
     fn tokens(s: &str) -> Vec<String> {
         s.to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| t.chars().count() >= 3)
+            .filter(|t| t.chars().count() >= 3 && !SUBSTANTIVE_STOPWORDS.contains(t))
             .map(|t| t.to_string())
             .collect()
     }
@@ -547,6 +575,30 @@ mod tests {
         // "OP" and "ED" are 2 chars — should not produce a spurious
         // match between unrelated openings.
         assert!(!share_substantive_token("OP NCOP", "ED NCED"));
+    }
+
+    #[test]
+    fn share_substantive_token_rejects_stopword_only_overlap() {
+        // The function gets parsed (anitomy-extracted) titles, not raw
+        // filenames — so realistic inputs are short title strings, not
+        // full release lines.
+        //
+        // Anime-form-marker overlap. Pre-stopword, "ova" cleared the
+        // 3-char length filter and was the only shared token; stop-word
+        // filter rejects it.
+        assert!(!share_substantive_token("Show OVA", "OVA Anthology"));
+        // English-filler overlap. Pre-stopword, "the" cleared the
+        // length filter and matched between completely unrelated shows.
+        assert!(!share_substantive_token(
+            "The Eminence in Shadow",
+            "The Quintessential Quintuplets"
+        ));
+        // Sanity: a real shared identity token still matches even when
+        // surrounded by stop-words.
+        assert!(share_substantive_token(
+            "The Mob Psycho 100 OVA",
+            "Mob Psycho 100 III"
+        ));
     }
 
     #[test]

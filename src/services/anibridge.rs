@@ -23,8 +23,23 @@ const CACHE_TTL: Duration = REFRESH_INTERVAL;
 /// stays consistent with the artwork cache layout. `std::path::absolute`
 /// normalizes relative paths so the runtime CWD can't change which
 /// file the cache refers to between runs.
+///
+/// `RYOKAN_ANIBRIDGE_CACHE_DIR` overrides the parent directory.
+/// Docker sets it to `/data/cache/anibridge` so the cache lands on
+/// the persistent volume rather than `/app/data/cache/anibridge`,
+/// which is root-owned and unwritable by the runtime ryokan user
+/// (the same CWD-relative footgun that bit `services::crypto`'s
+/// key-file path on first boot — see `RYOKAN_KEY_FILE_PATH`).
+/// Without the override, every container restart re-downloads the
+/// ~9MB mappings blob because the disk cache write silently fails
+/// with `Permission denied (os error 13)` and falls through to a
+/// fresh fetch.
 fn cache_file_path() -> PathBuf {
-    let base = PathBuf::from("data/cache/anibridge/mappings.json");
+    let base = std::env::var("RYOKAN_ANIBRIDGE_CACHE_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|d| PathBuf::from(d).join("mappings.json"))
+        .unwrap_or_else(|| PathBuf::from("data/cache/anibridge/mappings.json"));
     std::path::absolute(&base).unwrap_or(base)
 }
 

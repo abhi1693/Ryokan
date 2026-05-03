@@ -16,9 +16,14 @@
 //!     normalized state enum.
 //!   * `control.rs` — `pause` / `resume` / `delete` (queue-then-
 //!     history fallback for delete).
+//!   * `category_create.rs` — `test()`'s auto-create of the
+//!     configured SAB category via `mode=get_cats` + `mode=set_config`,
+//!     including the warning paths when the read-only `nzb_key`
+//!     can't write config.
 
 mod add;
 mod auth_test;
+mod category_create;
 mod control;
 mod fixture;
 mod list;

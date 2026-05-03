@@ -76,11 +76,17 @@ use rand::Rng;
 /// Nonce length for ChaCha20-Poly1305: 96 bits = 12 bytes.
 const NONCE_LEN: usize = 12;
 
-/// Location of the auto-generated / user-provided key file when the
-/// `RYOKAN_ENCRYPTION_KEY` env var isn't set. Relative to the process
-/// CWD because `data/ryokan.db` is also CWD-relative (matches the
-/// existing sqlite bind pattern).
-const KEY_FILE_PATH: &str = "data/.ryokan-key";
+/// Default location of the auto-generated / user-provided key file
+/// when the `RYOKAN_ENCRYPTION_KEY` env var isn't set. Relative to
+/// the process CWD because `data/ryokan.db` is also CWD-relative on
+/// the local-dev `cargo run` path. Override with `RYOKAN_KEY_FILE_PATH`
+/// when CWD doesn't match the data volume — the Docker image sets
+/// `WORKDIR /app` and chowns `/data`, so `data/` would resolve to
+/// `/app/data/` (root-owned, ryokan user can't write) and key
+/// initialization would panic at boot. Setting the env var to
+/// `/data/.ryokan-key` makes the key co-locate with the SQLite DB
+/// at `/data/ryokan.db`.
+const KEY_FILE_PATH_DEFAULT: &str = "data/.ryokan-key";
 
 /// Process-lifetime AEAD key. Initialized lazily on first call to
 /// [`encrypt`] or [`decrypt`]. Panicking inside the initializer is
@@ -100,7 +106,19 @@ fn load_or_generate_key() -> Result<[u8; 32], String> {
                 .map_err(|e| format!("RYOKAN_ENCRYPTION_KEY: {e}"));
         }
     }
-    load_or_generate_key_file(Path::new(KEY_FILE_PATH))
+    load_or_generate_key_file(Path::new(&key_file_path_from_env()))
+}
+
+/// Resolve the key-file path, honoring `RYOKAN_KEY_FILE_PATH` env
+/// override and falling back to `KEY_FILE_PATH_DEFAULT`. Empty / unset
+/// env var returns the default. Read on every key-init attempt
+/// (LazyLock fires once per process) rather than cached, mirroring
+/// the rest of the env-var-driven config in `services::anilist`.
+fn key_file_path_from_env() -> String {
+    std::env::var("RYOKAN_KEY_FILE_PATH")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| KEY_FILE_PATH_DEFAULT.to_string())
 }
 
 fn decode_key_from_base64(s: &str) -> Result<[u8; 32], String> {

@@ -46,6 +46,19 @@ ENV RUST_LOG=ryokan=info
 # Persist the on-disk artwork blob cache alongside the SQLite database so
 # image_blobs rows keep matching real files across container restarts.
 ENV RYOKAN_MEDIA_CACHE_DIR=/data/cache/artwork
+# Encryption-key file lives next to the SQLite DB on the persistent
+# /data volume. The default `data/.ryokan-key` is CWD-relative
+# (matching `cargo run`'s working tree), but this image's WORKDIR is
+# /app and the entrypoint chowns /data not /app/data — so without
+# this override the ryokan user can't write the key file at boot
+# and `services::crypto` panics with `Permission denied (os error 13)`.
+ENV RYOKAN_KEY_FILE_PATH=/data/.ryokan-key
+# Anibridge mappings cache — same CWD-relative footgun as the key
+# file. Without this override the ~9MB mappings blob silently
+# fails to persist on every fetch (write to /app/data/... 13s),
+# meaning every container restart re-downloads from the upstream
+# GitHub-hosted JSON instead of using the conditional-GET cache.
+ENV RYOKAN_ANIBRIDGE_CACHE_DIR=/data/cache/anibridge
 # Default UID/GID for the ryokan user. Override via -e PUID=... / PGID=...
 # to match the ownership of host-mounted media and download directories.
 ENV PUID=1000
@@ -53,7 +66,12 @@ ENV PGID=1000
 
 EXPOSE 8978
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+# start-period covers cold first-boot work before axum::serve binds:
+# `models::migrate` (idempotent ALTER TABLEs across the schema),
+# `bcrypt::warm_timing_equalizer` spawn_blocking, `rebuild_clients_cache`,
+# optional Jellyfin client init. 10s was tight on a cold-data ARM64
+# first-run; 30s matches the CI smoke-test poll budget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl -fsS http://localhost:8978/login || exit 1
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

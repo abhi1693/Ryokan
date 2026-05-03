@@ -166,7 +166,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             title_language TEXT NOT NULL DEFAULT 'english',
             force_mal_fallback INTEGER NOT NULL DEFAULT 0,
             rss_enabled INTEGER NOT NULL DEFAULT 0,
-            rss_interval_minutes INTEGER NOT NULL DEFAULT 5,
+            rss_interval_minutes INTEGER NOT NULL DEFAULT 15,
             force_kitsu_fallback INTEGER NOT NULL DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
@@ -232,7 +232,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    sqlx::query("ALTER TABLE config ADD COLUMN rss_interval_minutes INTEGER NOT NULL DEFAULT 5")
+    // Default bumped from 5 → 15 minutes (2026-05-03). Five-minute
+    // polling rate-limited non-Nyaa RSS feeds (SubsPlease + similar
+    // direct-feed publishers) reliably enough that the conservative
+    // floor pays off — direct RSS sources tend to enforce stricter
+    // polling caps than Nyaa, and the 10-minute extra latency on
+    // catch-up doesn't matter for an anime PVR. Existing installs
+    // keep whatever value the column already holds; only a fresh-
+    // ALTER on a pre-column install picks up the new default.
+    sqlx::query("ALTER TABLE config ADD COLUMN rss_interval_minutes INTEGER NOT NULL DEFAULT 15")
         .execute(db)
         .await
         .ok();

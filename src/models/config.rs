@@ -3,10 +3,15 @@ use sqlx::{FromRow, SqlitePool};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Download-client discriminator — `"qbittorrent" | "deluge"` for
-    /// now; Phase 3+ adds `"transmission"` and `"rtorrent"`. Determines
-    /// which concrete trait impl `AppState.download_client` is
-    /// initialized with at startup and on settings save.
+    /// Legacy single-client discriminator. Pre-multi-client routing
+    /// this picked which concrete `DownloadClient` impl `AppState`
+    /// initialized at startup. Today the multi-client pool reads from
+    /// the `download_clients` table instead (see `main.rs:529` and
+    /// `services::download_client::rebuild_clients_cache`); this field
+    /// is kept persisted only so the legacy Settings → Connections form
+    /// can round-trip a value during the migration window. Accepts
+    /// `"qbittorrent" | "deluge" | "transmission" | "rtorrent" | "sabnzbd"`;
+    /// unknown strings coerce to `qbittorrent` on save.
     pub active_client: String,
     pub qbit_url: String,
     pub qbit_user: String,
@@ -207,7 +212,7 @@ impl Default for Config {
             title_language: "english".to_string(),
             force_mal_fallback: false,
             rss_enabled: false,
-            rss_interval_minutes: 5,
+            rss_interval_minutes: 15,
             rss_master_enabled: true,
             disable_nyaa_rss: false,
             force_kitsu_fallback: false,

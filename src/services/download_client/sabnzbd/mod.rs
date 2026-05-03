@@ -168,6 +168,14 @@ pub struct SabClient {
     /// stamps). Mirrors `config.label` on the `download_clients` row.
     category: String,
     http: Client,
+    /// One-shot guard for the add-path category check. Set after the
+    /// first `ensure_category_cached_once` attempt of this client's
+    /// lifetime, regardless of outcome — on permanent failure
+    /// (read-only `nzb_key`, etc.) retrying every grab would just
+    /// spam the log, and on transient failure a process restart
+    /// re-attempts. Test-connection (`test()`) bypasses this and
+    /// always probes; the user clicked Test specifically.
+    category_ensured: std::sync::atomic::AtomicBool,
 }
 
 impl SabClient {
@@ -187,6 +195,7 @@ impl SabClient {
             api_key: api_key.to_string(),
             category: category.to_string(),
             http,
+            category_ensured: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -314,13 +323,29 @@ impl DownloadClient for SabClient {
             ));
         }
 
-        // Return just the version string, without the "SABnzbd "
-        // prefix. The status pill on the Settings → Download Clients
-        // tab prepends the client kind label itself, so the prefix
-        // would render as "SABnzbd SABnzbd 4.5.5"; the toast on the
-        // Test-connection button concatenates "Connected: <version>"
-        // and reads more naturally without the kind doubling either.
-        Ok(version)
+        // Auto-create the configured category if it's missing in
+        // SAB. Non-fatal: a get_cats parse failure or a set_config
+        // permission error surfaces as a parenthesized warning on
+        // the Test-connection toast rather than failing the test
+        // (the connection itself works; categories are a secondary
+        // concern). The created flag is true only on a successful
+        // create — a no-op when the category already exists is
+        // silent. Empty configured category short-circuits to a
+        // no-op silently too, since the user opted out of filtering.
+        let cat_msg = match self.ensure_category().await {
+            Ok(true) => format!(" (created category '{}' in SAB)", self.category),
+            Ok(false) => String::new(),
+            Err(e) => format!(" (warning: {e})"),
+        };
+
+        // Return the bare version string (plus optional category
+        // note). The status pill on the Settings → Download Clients
+        // tab prepends the client kind label itself, so a "SABnzbd "
+        // prefix here would render as "SABnzbd SABnzbd 4.5.5"; the
+        // toast on the Test-connection button concatenates
+        // "Connected: <version>" and reads more naturally without
+        // the kind doubling either.
+        Ok(format!("{version}{cat_msg}"))
     }
 
     async fn add_torrent(&self, url: &str, _info_hash: &str) -> Result<AddOutcome, String> {
@@ -339,6 +364,18 @@ impl DownloadClient for SabClient {
         url: &str,
         _info_hash: &str,
     ) -> Result<(AddOutcome, String), String> {
+        // First-grab safety net: ensure the configured category
+        // exists in SAB before issuing addurl. Without this, a user
+        // who saved their SAB row in Settings without clicking Test
+        // and then fired their first grab would have the addurl's
+        // `cat=anime` parameter silently fall back to SAB's default
+        // bucket — Ryokan's `list_scoped` would then filter the job
+        // out and "my SAB downloads aren't getting picked up" reports
+        // would persist in spite of the Test-time auto-create.
+        // Cached one-shot per process so the cost is paid by the
+        // first add only.
+        let just_created_category = self.ensure_category_cached_once().await;
+
         let resp = self
             .http
             .get(self.endpoint())
@@ -407,6 +444,22 @@ impl DownloadClient for SabClient {
             return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
+            // Defensive re-tag when we just created the category in
+            // this same call. SAB's `set_config` writes the category
+            // to its config; whether that change is visible to the
+            // very next addurl call is not guaranteed by SAB's docs.
+            // If our addurl fired before SAB's config reload
+            // propagated, the slot landed in the default bucket
+            // despite cat=…, and Ryokan's `list_scoped` filter would
+            // drop it on the very next poll. `change_cat` fixes the
+            // already-queued slot up so the category is correct.
+            // Failure is logged but doesn't fail the add — the
+            // worst case is the user sees the same vanish-from-view
+            // symptom for this one grab and next-process-restart
+            // self-heals because `ensure_category_cached_once`
+            // already flagged us as ensured.
+            self.maybe_change_cat_after_add(just_created_category, &id)
+                .await;
             return Ok((AddOutcome::Added, id));
         }
         // Empty nzo_ids on a status:true response is SAB's pre-queue
@@ -415,6 +468,12 @@ impl DownloadClient for SabClient {
         // the upstream grab path's idempotency check works the same
         // as it does for BT clients. If we can't find a match, treat
         // it as a real failure rather than papering over.
+        //
+        // No defensive change_cat on the AlreadyPresent path: the
+        // slot pre-existed this addurl call, so it's either already
+        // tagged correctly (added by Ryokan in a prior session) or
+        // was added by another tool (in which case re-tagging would
+        // overstep and clobber that tool's metadata).
         let already = self.find_id_for_url(url).await;
         match already {
             Some(id) => Ok((AddOutcome::AlreadyPresent, id)),
@@ -481,31 +540,41 @@ impl DownloadClient for SabClient {
             s.is_empty() || s.eq_ignore_ascii_case(&want_lower)
         };
 
-        for slot in queue.slots.into_iter().filter(|s| category_matches(&s.cat)) {
-            out.push(DownloadItem {
-                hash: slot.nzo_id,
-                name: slot.filename,
-                // SAB reports size as a free-form string ("1.2 GB"). The
-                // bytes field isn't in the public schema for queue
-                // slots, so we leave it 0 here — the post-processing
-                // path doesn't read size off DownloadItem; the
-                // imported file's stat is the source of truth.
-                size: 0,
-                progress: parse_percentage(&slot.percentage),
-                dlspeed: parse_speed_bytes(&slot.kbpersec),
-                state: slot.status.clone(),
-                category: slot.cat,
-                eta: parse_eta_seconds(&slot.timeleft),
-                save_path: String::new(),
-                content_path: String::new(),
-                state_kind: Self::map_state(&slot.status, false),
-            });
+        // Track categories of slots we drop so the diagnostic trace
+        // below can show the user the actual mismatch. Allocations
+        // here are cheap (one String per dropped slot, only when
+        // there's a mismatch) and zero on the happy path.
+        let mut dropped_cats: Vec<String> = Vec::new();
+
+        for slot in queue.slots {
+            if category_matches(&slot.cat) {
+                out.push(DownloadItem {
+                    hash: slot.nzo_id,
+                    name: slot.filename,
+                    // SAB reports size as a free-form string ("1.2 GB"). The
+                    // bytes field isn't in the public schema for queue
+                    // slots, so we leave it 0 here — the post-processing
+                    // path doesn't read size off DownloadItem; the
+                    // imported file's stat is the source of truth.
+                    size: 0,
+                    progress: parse_percentage(&slot.percentage),
+                    dlspeed: parse_speed_bytes(&slot.kbpersec),
+                    state: slot.status.clone(),
+                    category: slot.cat,
+                    eta: parse_eta_seconds(&slot.timeleft),
+                    save_path: String::new(),
+                    content_path: String::new(),
+                    state_kind: Self::map_state(&slot.status, false),
+                });
+            } else {
+                dropped_cats.push(slot.cat);
+            }
         }
-        for slot in history
-            .slots
-            .into_iter()
-            .filter(|s| category_matches(&s.category))
-        {
+        for slot in history.slots {
+            if !category_matches(&slot.category) {
+                dropped_cats.push(slot.category);
+                continue;
+            }
             // Title-matching ancestor walk, ported from Sonarr's
             // SAB client (`Sabnzbd.cs::GetHistory`). SAB's `storage`
             // field can be:
@@ -557,14 +626,22 @@ impl DownloadClient for SabClient {
         // every one of them got dropped by the category filter — i.e.
         // a user-reported "Ryokan can't see my SAB jobs" case. Avoids
         // spamming logs every 5s on the happy path (the queue-tab
-        // poll calls list_scoped on every refresh).
+        // poll calls list_scoped on every refresh). The seen-cats
+        // dump is the actionable bit: a user comparing
+        // `configured_category="anime"` against
+        // `seen_categories={"default", "tv"}` can fix the mismatch
+        // without having to ssh into the box and inspect SAB's API
+        // by hand.
         let total = queue_total + history_total;
         if total > 0 && out.is_empty() {
+            let unique: std::collections::BTreeSet<&str> =
+                dropped_cats.iter().map(String::as_str).collect();
             tracing::debug!(
-                "sab list_scoped: dropped every slot via category filter — configured_category={:?} queue_slots={} history_slots={}",
+                "sab list_scoped: dropped every slot via category filter — configured_category={:?} queue_slots={} history_slots={} seen_categories={:?}",
                 configured,
                 queue_total,
                 history_total,
+                unique,
             );
         }
 
@@ -621,31 +698,41 @@ impl DownloadClient for SabClient {
     }
 
     async fn delete(&self, info_hash: &str, delete_files: bool) -> Result<(), String> {
-        // SAB delete is split between queue and history. Critically,
-        // `mode=queue&name=delete` returns `status: true`
-        // unconditionally — `_handle_queue` calls `report(output)`
-        // after `remove_multiple` even if the nzo_id wasn't in the
-        // queue at all (live-checked against SAB 4.x source). So if
-        // we tried queue first, every completed-and-imported job
-        // (which lives in history, not queue) would "succeed" against
-        // the queue endpoint and never hit history with `del_files=1`,
-        // leaving the unpacked storage dir behind.
+        // SAB delete is split between queue and history. The two
+        // endpoints disagree about how they signal "nzo_id not
+        // present" — and the disagreement runs the opposite way to
+        // what an earlier version of this impl assumed (live-probed
+        // against SAB 5.0.1 source 2026-05-03):
         //
-        // Fix: try history first (covers post-import deletes — the
-        // common case), fall back to queue only if history reports
-        // not-found. Same shape Sonarr / Radarr's SAB clients use.
-        // `del_files=1` removes the unpacked output dir on history;
-        // queue delete removes the partial download.
+        //   * `mode=queue&name=delete` → `status: bool(removed)`
+        //     where `removed` is the list of nzo_ids actually pulled
+        //     from the queue. Unknown nzo_id → empty list →
+        //     `status: false`. **Honest signal.**
+        //   * `mode=history&name=delete` → `report()` regardless of
+        //     whether the nzo_id was found in the history DB. Even
+        //     a totally bogus nzo_id returns `status: true`.
+        //     **Phantom success.**
+        //
+        // The earlier impl tried history FIRST under the inverted
+        // assumption that queue was the phantom-success endpoint.
+        // For in-flight cancels (nzo_id in queue, not history) that
+        // history-first path always phantom-succeeded, returned Ok
+        // before queue was touched, and the SAB job kept
+        // downloading while Ryokan happily marked the grab as
+        // removed. Reported 2026-05-03 as "Cancel Pending isn't
+        // removing in-flight SAB jobs."
+        //
+        // Correct order: try queue first (honest signal) → if it
+        // says false, fall through to history with `del_files=1`
+        // to clean up the imported output dir. `del_files=1` is
+        // also passed on the queue call so a partial download's
+        // bytes are removed alongside the queue entry.
         let one = "1";
         let zero = "0";
         let del_value = if delete_files { one } else { zero };
 
-        // Check history first; queue's `report(output)` fires on every
-        // call, including unknown nzo_ids, so a queue-first lookup
-        // would phantom-succeed on every post-import delete and never
-        // hit history with `del_files=1`. See module-level docs.
         let mut q: Vec<(&str, &str)> = vec![
-            ("mode", "history"),
+            ("mode", "queue"),
             ("name", "delete"),
             ("value", info_hash),
             ("del_files", del_value),
@@ -655,9 +742,13 @@ impl DownloadClient for SabClient {
             return Ok(());
         }
 
-        // History didn't find it — try queue (covers in-flight cancel).
+        // Queue didn't have it — try history. Phantom-success here
+        // is fine for our purposes: the user asked for the item to
+        // be gone, history's `del_files=1` cleans up the unpacked
+        // output dir, and a phantom-true on a truly bogus nzo_id is
+        // a no-op (nothing to delete).
         q = vec![
-            ("mode", "queue"),
+            ("mode", "history"),
             ("name", "delete"),
             ("value", info_hash),
             ("del_files", del_value),
@@ -716,6 +807,13 @@ impl SabClient {
         url: &str,
         _info_hash: &str,
     ) -> Result<(AddOutcome, String), String> {
+        // Same first-grab category safety net as the unpaused add
+        // path. The picker flow goes through here too; without this
+        // the picker's first interactive grab against a fresh SAB
+        // would land in the default bucket and disappear from
+        // Ryokan's queue tab.
+        let just_created_category = self.ensure_category_cached_once().await;
+
         let resp = self
             .http
             .get(self.endpoint())
@@ -766,6 +864,9 @@ impl SabClient {
             return Err(format!("SAB rejected addurl: {raw_error}"));
         }
         if let Some(id) = body.nzo_ids.into_iter().next() {
+            // Same defensive change_cat as the non-paused path.
+            self.maybe_change_cat_after_add(just_created_category, &id)
+                .await;
             Ok((AddOutcome::Added, id))
         } else {
             let id = self
@@ -889,6 +990,231 @@ impl SabClient {
             ))
         }
     }
+
+    /// Probe SAB's configured category list. SAB returns
+    /// `{"categories":["*","books","movies",...]}` — the leading `"*"`
+    /// is the catch-all default bucket and is included in the list.
+    /// Empty list means SAB returned a malformed body (or auth was
+    /// stripped at a proxy); surfaced as an error rather than silently
+    /// reporting "no categories" so callers can distinguish it from a
+    /// genuine "user has no custom categories" reply (which still
+    /// includes `"*"`).
+    async fn get_cats(&self) -> Result<Vec<String>, String> {
+        let resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(&[("mode", "get_cats")]))
+            .send()
+            .await
+            .map_err(|e| format!("SAB get_cats failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("SAB get_cats HTTP {}", resp.status()));
+        }
+        let body: GetCatsResponse = resp
+            .json()
+            .await
+            .map_err(|e| format!("SAB get_cats parse failed: {e}"))?;
+        if body.categories.is_empty() {
+            return Err(
+                "SAB get_cats returned an empty list — likely a proxy stripping the apikey or a malformed response"
+                    .into(),
+            );
+        }
+        Ok(body.categories)
+    }
+
+    /// Ensure the configured category exists in SAB, creating it via
+    /// `mode=set_config` when missing. Returns `Ok(true)` when a new
+    /// category was created, `Ok(false)` when it already existed (or
+    /// when `self.category` is empty — the user opted out of
+    /// per-Ryokan filtering at the row level), `Err(...)` on any API
+    /// error.
+    ///
+    /// Why this exists: without it, a user who configures Ryokan with
+    /// category `"anime"` but whose SAB has no such category gets
+    /// jobs landing in SAB's default bucket with whatever category
+    /// SAB-side rules dictate (often `"default"` or the indexer's
+    /// pre-bound name). Ryokan's `list_scoped` then filters them out
+    /// and the user sees "my SAB grabs disappear" — exactly the
+    /// 2026-05-02 report. Auto-create makes the two ends agree by
+    /// default; the explicit Test-connection path surfaces what
+    /// happened in the toast so it isn't a silent mutation.
+    ///
+    /// Creates with `dir=<category>` so the new category gets its own
+    /// subfolder under SAB's complete dir; everything else (priority,
+    /// post-processing pipeline, scripts) inherits SAB's defaults.
+    /// Users who want a non-default folder can edit the category in
+    /// SAB's UI after creation — Ryokan won't overwrite it on
+    /// subsequent Test clicks because `get_cats` will then find it.
+    async fn ensure_category(&self) -> Result<bool, String> {
+        let configured = self.category.trim();
+        if configured.is_empty() {
+            return Ok(false);
+        }
+        let cats = self.get_cats().await?;
+        if cats.iter().any(|c| c.eq_ignore_ascii_case(configured)) {
+            return Ok(false);
+        }
+
+        // Category missing — create it. SAB's `set_config` requires
+        // the **full** API key (not the read-only `nzb_api_key`).
+        // 401/403 here surfaces with a hint so the user knows to
+        // swap keys instead of chasing a phantom permission bug.
+        //
+        // Pass both `keyword` and `name` for cross-version safety.
+        // SAB 5.x's API doc (live-probed 2026-05-02 against 5.0.1)
+        // uses `name=…` for the category identifier; older 4.x
+        // installs used `keyword=…`. SAB ignores unknown params,
+        // so passing both works on any current version. `dir`
+        // gets the same value so the new category gets its own
+        // subfolder under SAB's complete dir; everything else
+        // (priority, post-processing pipeline, scripts) inherits
+        // SAB's defaults.
+        let resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(&[
+                ("mode", "set_config"),
+                ("section", "categories"),
+                ("keyword", configured),
+                ("name", configured),
+                ("dir", configured),
+            ]))
+            .send()
+            .await
+            .map_err(|e| format!("SAB set_config failed: {e}"))?;
+        let status = resp.status();
+        if matches!(status.as_u16(), 401 | 403) {
+            let detail = resp.text().await.unwrap_or_default();
+            let trimmed = detail.trim();
+            return Err(format!(
+                "SAB rejected category creation (HTTP {}{}); the configured API key may be the read-only nzb_key. Use the full API key on the SABnzbd download-client row.",
+                status,
+                if trimmed.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {trimmed}")
+                },
+            ));
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "SAB set_config HTTP {} when creating category '{}'",
+                status, configured
+            ));
+        }
+        // Some SAB versions return `{"status":true}`, others echo back
+        // the new category config object directly. The HTTP success
+        // status was already verified above; don't gate on body shape.
+        Ok(true)
+    }
+
+    /// One-shot wrapper around [`ensure_category`] for the add path.
+    /// First call per `SabClient` lifetime probes SAB; subsequent
+    /// calls early-return. Returns `true` ONLY when this call
+    /// actually created the category — callers use that signal to
+    /// fire a defensive `change_cat` on the just-added job (see the
+    /// add-path comments for the SAB config-reload race motivation).
+    ///
+    /// Failure here is silent (logged, not propagated): the
+    /// connection works for adding, categories are a secondary
+    /// concern, and a permanent failure (read-only `nzb_key`)
+    /// shouldn't break every grab. The Test-connection toast is
+    /// the explicit user-facing surface for these errors.
+    async fn ensure_category_cached_once(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        if self.category_ensured.load(Ordering::Relaxed) {
+            return false;
+        }
+        let result = self.ensure_category().await;
+        // Set the flag regardless of outcome — on permanent failure
+        // (read-only key) retrying every grab would just spam the
+        // log; on transient failure (network blip mid-grab) a
+        // restart re-attempts. The user-facing fallback is to click
+        // Test in Settings, which bypasses this cache.
+        self.category_ensured.store(true, Ordering::Relaxed);
+        match result {
+            Ok(true) => {
+                tracing::info!(
+                    target: "ryokan::sabnzbd",
+                    category = %self.category,
+                    "SAB add path created missing category"
+                );
+                true
+            }
+            Ok(false) => false,
+            Err(e) => {
+                tracing::warn!(
+                    target: "ryokan::sabnzbd",
+                    category = %self.category,
+                    error = %e,
+                    "SAB ensure_category failed (will retry next process restart)"
+                );
+                false
+            }
+        }
+    }
+
+    /// Helper for the add path: fire `change_cat` against the
+    /// just-added job iff `ensure_category_cached_once` reported
+    /// that we created the category in this call. No-op otherwise
+    /// (already-present category, empty configured category, or
+    /// ensure_category errored — log already emitted at the source).
+    /// Failures here are also logged but never propagate; the add
+    /// itself succeeded and a vanish-from-view symptom for one grab
+    /// is preferable to crashing the grab path.
+    async fn maybe_change_cat_after_add(&self, just_created: bool, nzo_id: &str) {
+        if !just_created || nzo_id.is_empty() {
+            return;
+        }
+        if let Err(e) = self.change_cat(nzo_id, &self.category).await {
+            tracing::warn!(
+                target: "ryokan::sabnzbd",
+                category = %self.category,
+                nzo_id = %nzo_id,
+                error = %e,
+                "SAB change_cat after auto-create failed; the just-added job may be in SAB's default bucket. Manual fix: re-tag in SAB's UI, or restart Ryokan to retry."
+            );
+        }
+    }
+
+    /// Re-tag an existing queue job with the configured category.
+    /// Used by the add path right after `addurl` when we just
+    /// created the category in this same call: SAB's set_config
+    /// writes to its config file, and there's no documented
+    /// guarantee the change is visible to the very next addurl
+    /// call. Defensive `change_cat` ensures the just-added slot
+    /// actually carries the category — without it, a fresh
+    /// install's first grab might land in SAB's default bucket
+    /// despite passing `cat=anime` on the addurl, repeating the
+    /// exact failure mode we set out to fix.
+    ///
+    /// `mode=change_cat&value=<nzo_id>&value2=<cat>` is the
+    /// queue-only endpoint per SAB's 5.0 API docs (live-probed
+    /// 2026-05-02). History items can't be re-tagged through the
+    /// API; for the add-path use case the just-added job is in
+    /// queue, so this is the right tool.
+    async fn change_cat(&self, nzo_id: &str, cat: &str) -> Result<(), String> {
+        let resp = self
+            .http
+            .get(self.endpoint())
+            .query(&self.make_query(&[("mode", "change_cat"), ("value", nzo_id), ("value2", cat)]))
+            .send()
+            .await
+            .map_err(|e| format!("SAB change_cat failed: {e}"))?;
+        if !resp.status().is_success() {
+            return Err(format!("SAB change_cat HTTP {}", resp.status()));
+        }
+        let body: StatusResponse = resp.json().await.unwrap_or_default();
+        if body.status {
+            Ok(())
+        } else {
+            Err(format!(
+                "SAB change_cat: {}",
+                body.error.unwrap_or_else(|| "no error provided".into())
+            ))
+        }
+    }
 }
 
 // ── Wire-format response shapes ─────────────────────────────────────
@@ -896,6 +1222,12 @@ impl SabClient {
 #[derive(Deserialize)]
 struct VersionResponse {
     version: String,
+}
+
+#[derive(Deserialize, Default)]
+struct GetCatsResponse {
+    #[serde(default)]
+    categories: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]

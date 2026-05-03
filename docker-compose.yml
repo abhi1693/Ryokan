@@ -41,6 +41,12 @@ services:
       # troubleshooting, `ryokan=info` for normal operation.
       - RUST_LOG=ryokan=info
 
+      # Write-side floor for the DB-backed `logs` table (System → Logs).
+      # Distinct from RUST_LOG, which only filters the console stream.
+      # Defaults to `info`; set to `warn` if the logs table is growing
+      # faster than you want, or `debug` while diagnosing a regression.
+      # - RYOKAN_DB_LOG_LEVEL=info
+
       # Container timezone. Affects log timestamps and the anchoring of
       # RSS sync / metadata refresh schedules. Defaults to UTC.
       # - TZ=America/Los_Angeles
@@ -65,7 +71,10 @@ services:
       test: ["CMD", "curl", "-fsS", "http://localhost:8978/login"]
       interval: 30s
       timeout: 5s
-      start_period: 10s
+      # Cold first-boot runs DB migrations + bcrypt warmup + client-pool
+      # init before the listener binds; 30s is the headroom that matches
+      # the CI smoke-test poll budget. Mirrors the Dockerfile HEALTHCHECK.
+      start_period: 30s
       retries: 3
 
     restart: unless-stopped

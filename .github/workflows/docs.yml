@@ -1,0 +1,78 @@
+# Build the MkDocs site and deploy into the `docs/` subdirectory
+# of the `gh-pages` branch. The OAuth broker pages already living
+# at `gh-pages/auth/` are preserved by the `keep_files: true` flag
+# on `peaceiris/actions-gh-pages` — without it the action wipes
+# everything else under `gh-pages` on each deploy and breaks the
+# OAuth flow.
+#
+# Triggered only when the docs source actually changes so a code-
+# only commit doesn't churn gh-pages. Manual `workflow_dispatch`
+# stays available so you can force a rebuild after a Material /
+# pymdown-extensions release without committing.
+name: Build and deploy docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+# `peaceiris/actions-gh-pages` pushes to the gh-pages branch via
+# the workflow's GITHUB_TOKEN, which needs `contents: write`.
+# `pages: write` is for the GH Pages publish API; not strictly
+# required for the branch-source publish path the peaceiris action
+# uses, but doesn't hurt and keeps us future-compatible if we ever
+# migrate to the artifact-source mode.
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+# Only one docs deploy at a time — back-to-back pushes shouldn't
+# race each other on the gh-pages branch.
+concurrency:
+  group: docs-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+          cache: pip
+          cache-dependency-path: docs-requirements.txt
+
+      - name: Install MkDocs deps
+        run: pip install -r docs-requirements.txt
+
+      - name: Build site
+        # `--strict` upgrades broken internal links and other
+        # warnings to errors so a typo'd `[link](missing.md)` fails
+        # the workflow instead of shipping a 404.
+        run: mkdocs build --strict
+
+      - name: Deploy to gh-pages/docs
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./site
+          # `destination_dir` puts the built site under
+          # `gh-pages/docs/` instead of the branch root, so the
+          # OAuth broker at `gh-pages/auth/` is untouched.
+          destination_dir: docs
+          # Critical: without this the action wipes `gh-pages/auth/`
+          # on every deploy. With it, only `gh-pages/docs/` is
+          # rewritten.
+          keep_files: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
+          commit_message: 'docs: deploy from ${{ github.sha }}'

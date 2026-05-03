@@ -11,6 +11,15 @@ on:
   schedule:
     - cron: "0 9 * * 1"
 
+# Two rapid main pushes (or a main push that races a Cargo.lock PR
+# merge) used to spawn parallel audit jobs that posted duplicate
+# advisory comments. Cancel any in-flight audit on the same ref when a
+# new run starts. Doesn't apply across refs, so the weekly cron and a
+# main push can still run concurrently if they overlap.
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
 # `rustsec/audit-check@v2` posts advisory results via the Checks API
 # and opens issue comments on the PR it's running against. Without
 # these write scopes the action still runs the audit, but the final
@@ -26,6 +35,9 @@ permissions:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    # The advisory DB fetch + Cargo.lock walk runs in ~30s steady-state.
+    # 10 min is generous headroom against an advisory-DB clone hang.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: rustsec/audit-check@v2

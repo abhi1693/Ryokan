@@ -1155,8 +1155,25 @@ function submitExternalAccountPaste(provider) {
         body: JSON.stringify(body),
     })
     .then(async (r) => {
-        const data = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(data.error || data.message || `Link failed (${r.status})`);
+        // The handler returns plain-text error bodies via axum's
+        // `(StatusCode, String)` shape on every 400/409/502 path.
+        // Reading `r.json()` first would silently drop those — the
+        // user would see the unhelpful "Link failed (400)" fallback
+        // even when the server told them exactly which token / state
+        // / rate-limit issue caused it (e.g. AL 429'ing the Viewer
+        // probe under a per-account quota surfaces here as
+        // "AniList rejected the token: AniList rate-limited ..."
+        // and the user needs that detail to know it's the AL
+        // backend, not their paste). Read text first, parse JSON
+        // only on success responses where the handler returns a
+        // `LinkResponse` envelope.
+        const text = await r.text();
+        if (!r.ok) {
+            const trimmed = text && text.trim();
+            throw new Error(trimmed && trimmed.length > 0 ? trimmed : `Link failed (${r.status})`);
+        }
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) {}
         return data;
     })
     .then(() => {

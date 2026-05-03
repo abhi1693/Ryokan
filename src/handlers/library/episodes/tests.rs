@@ -554,3 +554,259 @@ mod episodes_ci {
         assert_eq!(v["state_kind"], "seeding-stalled");
     }
 }
+
+// ─── End-to-end: cancel-pending against a wiremocked SAB client ────
+//
+// CI-runnable companion to the env-gated `d2_d3_cancel_pending_deletes_from_client`
+// (which only runs against a live qBit). Pins the full handler →
+// `resolve_grab_client` → `SabClient::delete` → SAB-API path against
+// a mock SAB server, with two specific regressions guarded:
+//
+//   1. The 2026-05-03 "Cancel Pending isn't removing in-flight SAB
+//      jobs" report. Earlier impl tried `mode=history&name=delete`
+//      first, hit SAB's phantom-true response shape (history's
+//      `_api_history_delete` calls `report()` regardless of whether
+//      the nzo_id was found), returned Ok without ever touching
+//      queue, marked the grab removed in the DB, and SAB happily
+//      kept downloading. Pinned via `expect(0)` on the history
+//      mock — a regression to history-first would fail this test
+//      even if the wire-format pin in the SAB wiremock_tests still
+//      passed.
+//   2. The handler's `resolve_grab_client` correctly routing to a
+//      stamped `download_client_id`. A future refactor that drops
+//      the stamped-id path (e.g. always falls through to the
+//      hash-shape SAB heuristic) would still work for SAB nzo_ids
+//      but would break for any client whose hashes aren't
+//      identifiable. Test seeds the grab with a stamped client_id.
+mod cancel_pending_sab_e2e {
+    use super::super::cancel_pending_episode;
+    use crate::services::download_client::DownloadClient;
+    use crate::services::download_client::sabnzbd::SabClient;
+    use crate::test_support::seed_series;
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use sqlx::SqlitePool;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Single-connection in-memory pool. The shared
+    /// `test_support::in_memory_pool` builds a default `SqlitePool`
+    /// which can hold multiple connections to `:memory:` — and each
+    /// `:memory:` connection has its OWN database, so a row inserted
+    /// via connection A is invisible to connection B. Most tests in
+    /// the codebase happen to land all their queries on a single
+    /// connection by luck, but this test fans out across the seed
+    /// path, the handler's resolve+delete path, and a post-condition
+    /// read — that's enough connection churn to flake (`RowNotFound`
+    /// when the post-cancel grab-state read landed on a different
+    /// connection than the seed). Pinning `max_connections=1` keeps
+    /// every query on the same physical DB.
+    async fn single_connection_in_memory_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(":memory:")
+            .await
+            .expect("open :memory: SQLite");
+        crate::models::migrations::migrate(&pool)
+            .await
+            .expect("run migrations");
+        pool
+    }
+
+    /// Build an `AppState` with the supplied SAB client at id=1,
+    /// marked as the torrent default. We pin the grab's
+    /// `download_client_id = 1` in the seed below so the routing
+    /// goes through the stamped-id path; making the SAB client also
+    /// the torrent default just means the legacy fall-through (a
+    /// future bug that drops the stamped path) still lands here
+    /// rather than panicking on no-default. Mirrors what
+    /// `build_test_app_state` does, but inlined so this test can
+    /// hold the SabClient `Arc` for in-place verification (test
+    /// helpers don't return the client).
+    fn app_state_with_sab(db: sqlx::SqlitePool, sab: Arc<dyn DownloadClient>) -> crate::AppState {
+        let mut clients: HashMap<i64, Arc<dyn DownloadClient>> = HashMap::new();
+        clients.insert(1, sab);
+        let pool = crate::DownloadClientPool {
+            clients,
+            default_torrent_id: Some(1),
+            default_usenet_id: None,
+        };
+        crate::AppState {
+            db,
+            download_clients: Arc::new(RwLock::new(Arc::new(pool))),
+            jellyfin: Arc::new(RwLock::new(None)),
+            custom_formats: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            indexers: Arc::new(RwLock::new(Arc::new(Vec::new()))),
+            progress: crate::services::progress::ProgressRegistry::new(),
+            users_exist: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            interactive_search_cache: crate::services::interactive_search_cache::new(),
+            oauth_state: crate::services::oauth_state::new(),
+            start_time: chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 0)
+                .expect("epoch"),
+            tasks: crate::services::task_registry::TaskRegistry::new(),
+        }
+    }
+
+    /// Seed a `grabbed_torrents` row with a known SAB-shape nzo_id
+    /// hash, state='pending', episode_numbers=[1], and the supplied
+    /// `download_client_id` stamp (so resolve_grab_client routes
+    /// through the stamped-id path rather than the hash heuristic).
+    async fn seed_sab_grab(
+        db: &sqlx::SqlitePool,
+        series_id: i64,
+        nzo_id: &str,
+        download_client_id: i64,
+    ) -> i64 {
+        sqlx::query(
+            "INSERT INTO grabbed_torrents \
+                 (series_id, hash, torrent_name, episode_numbers, state, download_client_id) \
+             VALUES (?, ?, ?, '[1]', 'pending', ?)",
+        )
+        .bind(series_id)
+        .bind(nzo_id)
+        .bind("Test Show - 01.nzb")
+        .bind(download_client_id)
+        .execute(db)
+        .await
+        .expect("seed grab");
+        sqlx::query_scalar::<_, i64>("SELECT last_insert_rowid()")
+            .fetch_one(db)
+            .await
+            .expect("fetch grab id")
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_routes_through_sab_queue_delete_for_in_flight_nzb() {
+        // Wiremock: queue?delete = honest success, history?delete =
+        // phantom-true (the live SAB shape). With queue-first
+        // ordering, the impl must hit queue and never touch history.
+        let server = MockServer::start().await;
+        let queue_delete_mock = Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "queue"))
+            .and(query_param("name", "delete"))
+            .and(query_param("value", "SABnzbd_nzo_test123"))
+            .and(query_param("del_files", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": true,
+            })))
+            .expect(1);
+        server.register(queue_delete_mock).await;
+        // History MUST NOT be hit — `expect(0)` catches a regression
+        // to the history-first ordering that was the actual 2026-05-03
+        // bug. Wiremock validates `.expect(0)` on `server.verify()`.
+        let history_delete_mock = Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "history"))
+            .and(query_param("name", "delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": true,
+            })))
+            .expect(0);
+        server.register(history_delete_mock).await;
+
+        let sab: Arc<dyn DownloadClient> = Arc::new(SabClient::new(
+            &server.uri(),
+            "",
+            "test-api-key",
+            "ryokan-test",
+        ));
+        let db = single_connection_in_memory_pool().await;
+        let anilist_id: i64 = 12345;
+        let series_id = seed_series(&db, anilist_id, "Cancel-Pending SAB E2E").await;
+        let grab_id = seed_sab_grab(&db, series_id, "SABnzbd_nzo_test123", 1).await;
+        let state = app_state_with_sab(db.clone(), sab);
+
+        let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 1))).await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "handler returned non-OK: {status} body={}",
+            body.0
+        );
+        assert_eq!(
+            body.0["ok"], true,
+            "handler must report ok=true on successful cancel: body={}",
+            body.0
+        );
+        assert_eq!(
+            body.0["cancelled"], 1,
+            "exactly one grab must be cancelled: body={}",
+            body.0
+        );
+        // Wiremock validates queue.expect(1) AND history.expect(0)
+        // on this call — an extra `assert!(...)` here would just
+        // duplicate that contract.
+        server.verify().await;
+
+        // DB-side: the grab row must be marked removed so a
+        // subsequent re-grab attempt sees fresh state and doesn't
+        // dedup against this row.
+        let new_state: String =
+            sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+                .bind(grab_id)
+                .fetch_one(&db)
+                .await
+                .expect("read grab state");
+        assert_eq!(
+            new_state, "removed",
+            "grab row must transition to 'removed' after successful cancel; got {new_state}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_pending_falls_back_to_history_when_queue_reports_absent() {
+        // The post-import case: queue says false (nzo_id has aged
+        // out of the queue and lives only in history), history says
+        // true. The handler must succeed — the user clicked
+        // Cancel after import-but-before-grab-state-flip and
+        // expects the row gone either way. Pinned because the
+        // queue-first refactor must not have over-corrected into
+        // "queue-only" by accident.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "queue"))
+            .and(query_param("name", "delete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": false,
+            })))
+            .mount(&server)
+            .await;
+        // History gets called and succeeds with del_files=1 — the
+        // unpacked output dir cleanup pin from the SAB wiremock
+        // tests, end-to-end here.
+        let history_mock = Mock::given(method("GET"))
+            .and(path("/api"))
+            .and(query_param("mode", "history"))
+            .and(query_param("name", "delete"))
+            .and(query_param("del_files", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": true,
+            })))
+            .expect(1);
+        server.register(history_mock).await;
+
+        let sab: Arc<dyn DownloadClient> = Arc::new(SabClient::new(
+            &server.uri(),
+            "",
+            "test-api-key",
+            "ryokan-test",
+        ));
+        let db = single_connection_in_memory_pool().await;
+        let anilist_id: i64 = 12346;
+        let series_id = seed_series(&db, anilist_id, "Cancel-Pending SAB Hist Fallback").await;
+        seed_sab_grab(&db, series_id, "SABnzbd_nzo_imported456", 1).await;
+        let state = app_state_with_sab(db.clone(), sab);
+
+        let (status, body) = cancel_pending_episode(State(state), Path((anilist_id, 1))).await;
+
+        assert_eq!(status, StatusCode::OK, "body={}", body.0);
+        assert_eq!(body.0["cancelled"], 1);
+        server.verify().await;
+    }
+}
