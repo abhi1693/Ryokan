@@ -473,6 +473,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Get started">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#if-youd-rather-roll-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If you'd rather roll your own
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#if-somethings-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If something's wrong
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -759,6 +787,34 @@
     </span>
   </a>
   
+    <nav class="md-nav" aria-label="Get started">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#if-youd-rather-roll-your-own" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If you'd rather roll your own
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#if-somethings-wrong" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        If something's wrong
+      </span>
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
 </li>
       
     </ul>
@@ -795,16 +851,24 @@
 <li><strong>Acts as a Sonarr/Radarr API shim</strong> (anibridge) so Seerr can request anime through Ryokan.</li>
 </ul>
 <h2 id="get-started">Get started<a class="headerlink" href="#get-started" title="Anchor link">&para;</a></h2>
-<div class="grid cards">
-<ul>
-<li><strong><a href="install/">Install</a></strong>: <code>cargo run</code> for local dev, Docker Compose for prod.</li>
-<li><strong><a href="docker/">Docker setup</a></strong>: volumes, PUID/PGID, environment variables.</li>
-<li><strong><a href="configuration/">Configuration</a></strong>: quality profiles, Custom Formats, post-processing modes.</li>
-<li><strong><a href="download-clients/">Download clients</a></strong>: per-client setup notes and quirks.</li>
-<li><strong><a href="external-accounts/">External accounts</a></strong>: link AniList/MAL for watch-list sync.</li>
-<li><strong><a href="troubleshooting/">Troubleshooting</a></strong>: rate limits, missing categories, the "where did my grab go" cases.</li>
-</ul>
+<div class="admonition tip">
+<p class="admonition-title">Fastest path: the Stack builder</p>
+<p>The <strong><a href="stack-builder/">Stack builder</a></strong> generates a runnable <code>docker-compose.yml</code> from a checkbox form: pick your download client(s), media server (Jellyfin), request frontend (Seerr), VPN (Gluetun with port-forwarding), reverse proxy (Caddy / Traefik / nginx / Cloudflare Tunnel), and host paths. Paths line up so post-processing hardlinks work without fiddling, the per-protocol default download client is wired automatically, and the matching Ryokan settings are printed alongside so you know what to paste into Settings → Download Clients after first boot. <strong>Most users should start here.</strong></p>
 </div>
+<h3 id="if-youd-rather-roll-your-own">If you'd rather roll your own<a class="headerlink" href="#if-youd-rather-roll-your-own" title="Anchor link">&para;</a></h3>
+<p>Work through these in order; later steps assume the earlier ones are done.</p>
+<ol>
+<li><strong><a href="install/">Install</a></strong>: Docker pull (recommended) or build from source. Spin up Ryokan at <code>http://localhost:8978</code> and create the admin account.</li>
+<li><strong><a href="docker/">Docker setup</a></strong>: volume mounts, PUID/PGID, the full environment-variable reference. Worth skimming even if the Stack builder generated your compose, since it explains what each <code>RYOKAN_*</code> flag does.</li>
+<li><strong><a href="download-clients/">Download clients</a></strong>: point Ryokan at qBittorrent, Deluge, Transmission, rTorrent, or SABnzbd. Per-client wire quirks live here. Multiple clients are supported and route per-grab.</li>
+<li><strong><a href="configuration/">Configuration</a></strong>: quality profiles, Custom Formats, post-processing mode (default hardlink). The TRaSH-Guides anime CFs ship as one-click defaults; reach for custom ones once you have a feel for what gets grabbed.</li>
+<li><strong><a href="external-accounts/">External accounts</a></strong>: link AniList or MAL so your watch list pulls into Ryokan. Optional but the main reason most people self-host this.</li>
+</ol>
+<h3 id="if-somethings-wrong">If something's wrong<a class="headerlink" href="#if-somethings-wrong" title="Anchor link">&para;</a></h3>
+<ul>
+<li><strong><a href="troubleshooting/">Troubleshooting</a></strong>: rate limits, missing categories, "where did my grab go" cases.</li>
+<li><strong><a href="faq/">FAQ</a></strong>: common questions, including the Sonarr-comparison and "does it support X" answers.</li>
+</ul>
 
 
 
