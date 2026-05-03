@@ -433,8 +433,14 @@ services:
         lines.push(`${c.label}:`);
         lines.push(`  URL:           ${c.default_url}`);
         if (kind === 'qbittorrent') {
+          // qBit 4.6.1+ removed the hardcoded admin/adminadmin default
+          // and instead generates a random temporary password on first
+          // start, printed only to stdout. Direct users to docker logs.
           lines.push('  Username:      admin');
-          lines.push('  Password:      adminadmin   (change in qBit on first login)');
+          lines.push('  Password:      qBit 4.6.1+ generates a random temp password on first start.');
+          lines.push('                 Find it with:  docker logs qbittorrent | grep -i "temporary password"');
+          lines.push('                 Log in with that, set a permanent password under');
+          lines.push('                 Tools → Options → Web UI → Authentication, then paste it here.');
         } else if (kind === 'sabnzbd') {
           lines.push('  API Key:       (paste from SAB → Config → General → API Key)');
         }
@@ -455,10 +461,14 @@ services:
     }
 
     if (cfg.media_server === 'jellyfin') {
-      lines.push('--- Settings → Connections → Jellyfin ---');
+      // The API key is generated in Jellyfin and consumed by Ryokan —
+      // spelling out both ends so users don't get stuck looking for a
+      // key Ryokan would create itself.
+      lines.push('--- In Ryokan: Settings → Connections → Jellyfin ---');
       lines.push('');
-      lines.push('URL:     http://jellyfin:8096');
-      lines.push('API Key: (Jellyfin → Dashboard → API Keys → New API Key)');
+      lines.push('  URL:     http://jellyfin:8096');
+      lines.push('  API Key: First, in Jellyfin: Dashboard → API Keys → "+" → name it "Ryokan".');
+      lines.push('           Copy the generated key, then paste it here in Ryokan and Save.');
       lines.push('');
     }
 
@@ -469,12 +479,26 @@ services:
     lines.push('');
 
     if (cfg.requests === 'seerr') {
+      // Both shims live on the same Ryokan host:port — Sonarr at the
+      // root, Radarr at the /radarr URL base. Seerr only allows two
+      // Sonarr + two Radarr indexer slots; you need both for series
+      // (Sonarr-shim) and films (Radarr-shim) requests to route to
+      // Ryokan. Each shim has its own API key in Ryokan's settings.
       lines.push('--- Inside Seerr (after first-run setup at http://localhost:5055) ---');
       lines.push('');
-      lines.push('Add Sonarr server (anibridge shim):');
+      lines.push('Add Sonarr server (anibridge shim, for series):');
       lines.push('  Hostname:        ryokan');
       lines.push('  Port:            8978');
-      lines.push('  API Key:         (Ryokan → Settings → Connections → Sonarr/Radarr API → API Key)');
+      lines.push('  API Key:         (Ryokan → Settings → Connections → Sonarr API → API Key)');
+      lines.push('  Use SSL:         no');
+      lines.push('  Quality Profile: HD-1080p');
+      lines.push('  Root Folder:     /media/anime');
+      lines.push('');
+      lines.push('Add Radarr server (anibridge shim, for anime films; note the /radarr URL base):');
+      lines.push('  Hostname:        ryokan');
+      lines.push('  Port:            8978');
+      lines.push('  URL Base:        /radarr');
+      lines.push('  API Key:         (Ryokan → Settings → Connections → Radarr API → API Key)');
       lines.push('  Use SSL:         no');
       lines.push('  Quality Profile: HD-1080p');
       lines.push('  Root Folder:     /media/anime');
