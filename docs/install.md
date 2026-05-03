@@ -18,8 +18,8 @@ Open `http://localhost:8978` and run through the first-run setup. See the [Docke
 You'll need:
 
 - **Rust 1.95+** (enforced via `Cargo.toml`'s `package.rust-version`).
-- **C / C++ toolchain + `cmake`** — two crates compile native code at build time. `anitomy-sys` ships C++ source it builds via `cc` for anime title tokenization, and `aws-lc-sys` builds aws-lc via cmake (rustls' crypto provider since reqwest 0.13).
-- **`mold` + `clang`** — Ryokan pins `linker = "clang"` with `-fuse-ld=mold` for x86_64 + aarch64 Linux in `.cargo/config.toml`. Cuts incremental link time 3-5× vs ld/lld. Without them: `linker 'clang' not found` or `ld.mold not found` at first build.
+- **C / C++ toolchain + `cmake`**: two crates compile native code at build time. `anitomy-sys` ships C++ source it builds via `cc` for anime title tokenization, and `aws-lc-sys` builds aws-lc via cmake (rustls' crypto provider since reqwest 0.13).
+- **`mold` + `clang`**: Ryokan pins `linker = "clang"` with `-fuse-ld=mold` for x86_64 + aarch64 Linux in `.cargo/config.toml`. Cuts incremental link time 3-5× vs ld/lld. Without them: `linker 'clang' not found` or `ld.mold not found` at first build.
 - **`cargo-nextest`** for the canonical `cargo t` test alias. Falls through to plain `cargo test` if not installed.
 
 Install the toolchain bits on Arch:
@@ -44,7 +44,7 @@ cd Ryokan
 cargo run                # 0.0.0.0:8978, creates data/ryokan.db on first run
 ```
 
-The first build takes a while (aws-lc, anitomy C++, full dep tree). Subsequent rebuilds are fast — mold links the `ryokan` binary in under a second.
+The first build takes a while (aws-lc, anitomy C++, full dep tree). Subsequent rebuilds are fast; mold links the `ryokan` binary in under a second.
 
 ## Healthcheck and ports
 

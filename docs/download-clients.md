@@ -2,7 +2,7 @@
 
 Ryokan currently supports five download clients: qBittorrent, Deluge, Transmission, rTorrent, and SABnzbd. Multiple can be configured simultaneously and routed per-grab via indexer pins or per-protocol defaults.
 
-Add clients under **Settings → Connections → Downloads**. Each row needs a URL, credentials (where applicable), and a label / category Ryokan uses to scope its visibility into the client (so it can't see torrents added by other tools and vice versa).
+Add clients under **Settings → Download Clients**. Each row needs a URL, credentials (where applicable), and a label / category Ryokan uses to scope its visibility into the client (so it can't see torrents added by other tools and vice versa).
 
 ## qBittorrent
 
@@ -20,7 +20,7 @@ Add clients under **Settings → Connections → Downloads**. Each row needs a U
 
 ## Transmission
 
-- CSRF session handshake — Ryokan handles this transparently. Daemon restart rotates the session ID; mid-stream 409s are retried once automatically.
+- CSRF session handshake; Ryokan handles this transparently. Daemon restart rotates the session ID; mid-stream 409s are retried once automatically.
 - Auth is **HTTP Basic**, not RPC-level. Wrong credentials surface as 401, not as an RPC envelope error.
 - Native labels in 4.x.
 
@@ -29,20 +29,20 @@ Add clients under **Settings → Connections → Downloads**. Each row needs a U
 - Speaks XML-RPC over HTTP to `/RPC2`. Most installations expose this through ruTorrent's `httprpc` plugin or directly via SCGI fronted by nginx.
 - Scoping: the `custom1` field (the ruTorrent label convention).
 - **`d.erase` doesn't touch disk.** rTorrent's docs are explicit: removing a torrent leaves the data in place. Ryokan reads `content_path` first, calls `d.erase`, then recursively removes the FS path. There's a guard preventing a multi-file torrent dumped at the save root from nuking the entire download directory, but if you've configured rTorrent in an unusual way this is the bit to double-check.
-- **Cold-DHT metadata fetch is slow.** rTorrent's metadata-fetch budget is 60s here vs. 10s for the BT clients with trackers — the longer budget is real, not a Ryokan-side throttle.
+- **Cold-DHT metadata fetch is slow.** rTorrent's metadata-fetch budget is 60s here vs. 10s for the BT clients with trackers; the longer budget is real, not a Ryokan-side throttle.
 
 ## SABnzbd
 
-- **Endpoint shape**: `GET <base>/api?apikey=…&mode=…&output=json`. The user-configured base IS the base — Ryokan appends `/api`. Most SAB installs are at `http://host:8080`; the legacy `URL_BASE=/sabnzbd` configurations want `http://host:8080/sabnzbd` as the configured base.
+- **Endpoint shape**: `GET <base>/api?apikey=…&mode=…&output=json`. The user-configured base IS the base; Ryokan appends `/api`. Most SAB installs are at `http://host:8080`; the legacy `URL_BASE=/sabnzbd` configurations want `http://host:8080/sabnzbd` as the configured base.
 - **API key**: SAB has two: the **full API key** and the read-only `nzb_api_key`. Ryokan needs the full one for queue management (cancel, change_cat). The Test-connection probe catches a wrong/missing key at config time instead of at first grab.
-- **Auto-creates the configured category.** If the category Ryokan was configured with doesn't exist in SAB, the connection-test path creates it via `set_config`. Same auto-create runs on first grab as a safety net for users who skipped the Test button. Without this, NZBs land in SAB's default bucket, Ryokan's `list_scoped` filters them out, and grabs appear to vanish — see [Troubleshooting → SAB downloads vanish](troubleshooting.md#sab-downloads-disappear-from-ryokan-but-still-download-in-sab).
-- **No per-file selection.** NZBs are opaque blobs until SAB extracts them. Interactive picker still works (it shows the file list for selection if SAB has parsed the headers), but the actual file selection is no-op'd at the wire — SAB downloads the whole NZB, then post-processing imports the files Ryokan wanted.
+- **Auto-creates the configured category.** If the category Ryokan was configured with doesn't exist in SAB, the connection-test path creates it via `set_config`. Same auto-create runs on first grab as a safety net for users who skipped the Test button. Without this, NZBs land in SAB's default bucket, Ryokan's `list_scoped` filters them out, and grabs appear to vanish. See [Troubleshooting → SAB downloads vanish](troubleshooting.md#sab-downloads-disappear-from-ryokan-but-still-download-in-sab).
+- **No per-file selection.** NZBs are opaque blobs until SAB extracts them. Interactive picker still works (it shows the file list for selection if SAB has parsed the headers), but the actual file selection is no-op'd at the wire; SAB downloads the whole NZB, then post-processing imports the files Ryokan wanted.
 
 ## Per-client download paths
 
-Each client gets its own `*_download_path` config field for cases where Ryokan and the client see the filesystem differently — Docker volumes mounted at different host paths, seedboxes accessed over SSHFS, etc.
+Each client gets its own `*_download_path` config field for cases where Ryokan and the client see the filesystem differently: Docker volumes mounted at different host paths, seedboxes accessed over SSHFS, etc.
 
-The translation logic: when the client reports a path, Ryokan substitutes the client's `save_path` prefix with the configured `download_path` to get a path Ryokan itself can read. If the client-reported path doesn't start with the expected prefix, Ryokan returns it unchanged rather than silently rewriting — silent rewrite would mask misconfiguration as a "file not found" later.
+The translation logic: when the client reports a path, Ryokan substitutes the client's `save_path` prefix with the configured `download_path` to get a path Ryokan itself can read. If the client-reported path doesn't start with the expected prefix, Ryokan returns it unchanged rather than silently rewriting; silent rewrite would mask misconfiguration as a "file not found" later.
 
 ## Routing
 

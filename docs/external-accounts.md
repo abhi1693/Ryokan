@@ -2,7 +2,7 @@
 
 Ryokan can sync your watch-list from AniList or MyAnimeList. Linked accounts auto-add series to your library based on import preferences (Watching, Planning, Paused, Dropped, Completed).
 
-Configure under **Settings → Integrations → External Accounts**.
+Configure under **Settings → Connections** (the External Accounts card near the bottom of the tab).
 
 ## AniList
 
@@ -23,7 +23,7 @@ The supervised `external_sync` task ticks every `external_sync_interval_minutes`
 1. Fetches the watch-list since the last cursor (delta) or full-resync.
 2. Filters by your import preferences (Watching, Planning, etc.).
 3. Pre-fetches AnimeDetail for new ids in one batch.
-4. Merges into the library — creates new series rows, updates monitor mode on existing ones.
+4. Merges into the library; creates new series rows, updates monitor mode on existing ones.
 5. Detects removals on full-resync ticks (delta runs can't, by definition).
 
 Manual "Sync now" button on the External Accounts card forces an immediate tick.
@@ -31,9 +31,9 @@ Manual "Sync now" button on the External Accounts card forces an immediate tick.
 ## Failure modes
 
 - **Token expired / revoked**: AniList / MAL responds with a GraphQL error containing `"token"` or with HTTP 401. Ryokan logs the failure and surfaces "user may need to re-link" in the System logs. The supervised loop's exponential backoff defers retries.
-- **Rate limited**: AniList caps at 30 req/min in degraded mode (the current state). The sync hits its rate-limit machinery before firing the next request — see [Troubleshooting → AniList rate limits](troubleshooting.md#anilist-keeps-returning-429-too-many-requests).
+- **Rate limited**: AniList caps at 30 req/min in degraded mode (the current state). The sync hits its rate-limit machinery before firing the next request. See [Troubleshooting → AniList rate limits](troubleshooting.md#anilist-keeps-returning-429-too-many-requests).
 - **Token rejected on link** (the most common 400 on the link/submit flow): the Viewer probe Ryokan uses to validate the token shares the same per-account quota. If your account is in a rate-limit cooldown, *re-linking* hits the same wall as syncing. See [Troubleshooting → Per-account AniList cooldown](troubleshooting.md#anilist-per-account-cooldown-stuck-past-60s).
 
 ## Provider order is fixed for the Sonarr / Radarr shim
 
-The anibridge shim (Sonarr/Radarr API exposed for Seerr) does AL-first, MAL-on-AL-down. There's no user-facing toggle for this and no plan to add one — Seerr expects a stable provider behavior, and falling back inconsistently confuses its caching.
+The anibridge shim (Sonarr/Radarr API exposed for Seerr) does AL-first, MAL-on-AL-down. There's no user-facing toggle for this and no plan to add one; Seerr expects a stable provider behavior, and falling back inconsistently confuses its caching.
