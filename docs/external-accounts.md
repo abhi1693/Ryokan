@@ -7,13 +7,13 @@ Configure under **Settings → Integrations → External Accounts**.
 ## AniList
 
 - **OAuth flow**: Ryokan opens AL's authorize page in a new tab via `/start`. After you approve, AL redirects to a broker page hosted alongside Ryokan's docs at `johnthreekay.github.io/Ryokan/auth/anilist/`. Copy the access token + state from the broker page back into Ryokan's paste modal.
-- **Implicit grant** — token lasts a year; no refresh-token flow.
-- **Scoreformat-aware** — Ryokan reads your AL `mediaListOptions.scoreFormat` (POINT_10 / POINT_100 / etc.) on every sync, so flipping the format on AL takes effect on the next tick without unlinking.
+- **Implicit grant**: token lasts a year; no refresh-token flow.
+- **Scoreformat-aware**: Ryokan reads your AL `mediaListOptions.scoreFormat` (POINT_10 / POINT_100 / etc.) on every sync, so flipping the format on AL takes effect on the next tick without unlinking.
 
 ## MyAnimeList
 
 - **PKCE OAuth flow**. Same redirect-to-broker shape as AL, but with a code-for-token exchange and a refresh-token kept on the row.
-- **Refresh on 401** — the sync engine auto-refreshes the access token when MAL returns 401 mid-fetch and retries.
+- **Refresh on 401**: the sync engine auto-refreshes the access token when MAL returns 401 mid-fetch and retries.
 - **Token expires** every ~30 days; the refresh handles this transparently.
 
 ## Watch-list sync
