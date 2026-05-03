@@ -193,6 +193,12 @@ pub struct Episode {
     pub quality: String,
     pub quality_state: String, // "disk", "grabbed", "failed", or ""
     pub size_display: String,
+    /// Raw byte count for the on-disk file; 0 when the episode isn't
+    /// in the library root yet. Exposed alongside `size_display` so
+    /// JS callers can recompute aggregates (e.g. the season-size
+    /// span) live without re-fetching the page — `format_size` and
+    /// the JS `formatBytes` helper agree on the rendering.
+    pub size_bytes: i64,
     pub filename: String,
     pub can_auto_search: bool,
     pub monitored: bool,

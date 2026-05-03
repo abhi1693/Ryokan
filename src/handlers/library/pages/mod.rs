@@ -796,14 +796,15 @@ pub(super) async fn build_episodes(
             }
         });
 
-        let (on_disk, quality, size_display, filename) = match disk_match {
+        let (on_disk, quality, size_display, size_bytes, filename) = match disk_match {
             Some(f) => (
                 true,
                 f.quality.clone(),
                 f.size_display.clone(),
+                f.size_bytes as i64,
                 f.filename.clone(),
             ),
-            None => (false, String::new(), String::new(), String::new()),
+            None => (false, String::new(), String::new(), 0i64, String::new()),
         };
 
         if on_disk {
@@ -968,6 +969,7 @@ pub(super) async fn build_episodes(
             quality: display_quality,
             quality_state,
             size_display,
+            size_bytes,
             filename,
             can_auto_search: is_tracked,
             monitored,
@@ -1061,6 +1063,7 @@ pub(super) async fn build_episodes(
             quality: display_quality,
             quality_state,
             size_display: f.size_display.clone(),
+            size_bytes: f.size_bytes as i64,
             filename: f.filename.clone(),
             can_auto_search: is_tracked,
             monitored,
@@ -1114,6 +1117,7 @@ pub(super) async fn build_episodes(
                 quality: tag.quality_tag.clone(),
                 quality_state: tag.state.clone(),
                 size_display: String::new(),
+                size_bytes: 0,
                 filename: String::new(),
                 can_auto_search: is_tracked,
                 monitored,
