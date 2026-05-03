@@ -75,13 +75,13 @@ This is opinionated. Sane defaults beat a config matrix. If you need something t
 
 <button type="button" id="copy-compose" class="md-button md-button--primary">Copy</button>
 
-<pre id="compose-output" class="stack-output"><code class="language-yaml">Loading…</code></pre>
+<pre data-picker="compose" class="stack-output"><code class="language-yaml">Loading…</code></pre>
 
 ## Ryokan settings to paste in
 
 After the stack is up, log into Ryokan at `http://localhost:8978` and paste these values into the matching Settings panels.
 
-<pre id="settings-output" class="stack-output"><code>Loading…</code></pre>
+<pre data-picker="settings" class="stack-output"><code>Loading…</code></pre>
 
 ## Notes
 

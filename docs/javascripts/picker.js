@@ -520,17 +520,22 @@ services:
     return lines.join('\n');
   }
 
+  // The output `<pre>` blocks use `data-picker="..."` selectors rather
+  // than ids on purpose. MkDocs Material's `content.code.copy` rewrites
+  // any `<pre id="x">` to `<pre id="__code_x">` so its own copy-button
+  // wiring can find it — which makes `getElementById('compose-output')`
+  // return null at runtime. Data attributes survive Material's pass.
   function rerender() {
     const cfg = readForm();
     if (!cfg) return;
-    const composeEl = document.querySelector('#compose-output code');
-    const settingsEl = document.querySelector('#settings-output code');
+    const composeEl = document.querySelector('[data-picker="compose"] code');
+    const settingsEl = document.querySelector('[data-picker="settings"] code');
     if (composeEl) composeEl.textContent = renderCompose(cfg);
     if (settingsEl) settingsEl.textContent = renderSettings(cfg);
   }
 
   function copyCompose() {
-    const composeEl = document.querySelector('#compose-output code');
+    const composeEl = document.querySelector('[data-picker="compose"] code');
     if (!composeEl) return;
     const text = composeEl.textContent;
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -553,17 +558,50 @@ services:
     }, 1500);
   }
 
+  // Idempotent init. Material's `document$` observable can fire more
+  // than once (instant navigation, theme toggle, etc.) — guarding via
+  // a dataset flag so we don't stack duplicate listeners on the form.
   function init() {
-    const form = document.getElementById('stack-form');
-    if (!form) return;
-    form.addEventListener('input', rerender);
-    form.addEventListener('change', rerender);
-    const copyBtn = document.getElementById('copy-compose');
-    if (copyBtn) copyBtn.addEventListener('click', copyCompose);
-    rerender();
+    try {
+      const form = document.getElementById('stack-form');
+      if (!form) return;
+      if (form.dataset.pickerInit !== '1') {
+        form.dataset.pickerInit = '1';
+        form.addEventListener('input', rerender);
+        form.addEventListener('change', rerender);
+      }
+      const copyBtn = document.getElementById('copy-compose');
+      if (copyBtn && copyBtn.dataset.pickerInit !== '1') {
+        copyBtn.dataset.pickerInit = '1';
+        copyBtn.addEventListener('click', copyCompose);
+      }
+      rerender();
+    } catch (err) {
+      // Make failures visible without DevTools — the picker is the
+      // whole point of the page, a silent "Loading…" is worse than
+      // a stack trace in the output box.
+      const out = document.querySelector('[data-picker="compose"] code');
+      if (out) {
+        out.textContent =
+          '# picker.js init error: ' +
+          (err && err.message ? err.message : String(err)) +
+          '\n# Open DevTools console for the full stack.';
+      }
+      // Still surface to console for debugging.
+      // eslint-disable-next-line no-console
+      console.error('[picker.js]', err);
+    }
   }
 
-  if (document.readyState === 'loading') {
+  // MkDocs Material exposes a `document$` observable (its RxJS
+  // document-state subject) that fires once on initial load and
+  // again on instant-navigation transitions. Subscribing to it is
+  // the canonical Material integration pattern; falling back to
+  // DOMContentLoaded when Material's runtime isn't present.
+  if (typeof window !== 'undefined' && window.document$ &&
+      typeof window.document$.subscribe === 'function') {
+    window.document$.subscribe(init);
+  } else if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
     init();
