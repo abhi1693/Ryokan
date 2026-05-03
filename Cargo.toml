@@ -3,7 +3,7 @@ name = "ryokan"
 version = "1.6.5"
 edition = "2024"
 authors = ["John K"]
-license = "GPL-v3.0"
+license = "GPL-3.0-or-later"
 rust-version = "1.95"
 
 [features]
