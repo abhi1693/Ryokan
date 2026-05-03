@@ -13,11 +13,15 @@ use crate::services::download_client::DownloadClient;
 
 #[tokio::test]
 async fn test_returns_version_string_on_success() {
-    // `test()` is now a two-step probe — `mode=version` (public) for
-    // the version string, then `mode=queue` (auth-required) so a
+    // `test()` is now a three-step probe — `mode=version` (public)
+    // for the version string, `mode=queue` (auth-required) so a
     // missing/invalid API key surfaces at config time instead of
     // silently passing the public-endpoint check and then failing
-    // every grab with HTTP 403. Both mocks must be present.
+    // every grab with HTTP 403, and `mode=get_cats` for the category
+    // auto-create check. The `get_cats` mock here returns the fixture
+    // category as already-present so `ensure_category` is a no-op
+    // (no `set_config` mock needed) and `test()` returns just the
+    // version string.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
@@ -35,11 +39,19 @@ async fn test_returns_version_string_on_success() {
         )
         .mount(&server)
         .await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "get_cats"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "categories": ["*", "ryokan-test"],
+        })))
+        .mount(&server)
+        .await;
 
     let result = client.test().await.expect("test should succeed");
     assert_eq!(
         result, "4.3.2",
-        "test() returns the bare version string; the kind prefix is the UI's job (status pill prepends \"SABnzbd \" itself, the toast says \"Connected: <version>\"). Doubling the prefix here was the bug fix that motivated this regression test."
+        "test() returns the bare version string when the configured category already exists in SAB; the kind prefix is the UI's job (status pill prepends \"SABnzbd \" itself, the toast says \"Connected: <version>\"). Doubling the prefix here was the bug fix that motivated this regression test."
     );
 }
 
@@ -101,7 +113,7 @@ async fn test_sends_apikey_query_param() {
         })))
         .mount(&server)
         .await;
-    // Auth probe needs the same key — pin both calls to verify the
+    // Auth probe needs the same key — pin every call to verify the
     // apikey query param threads through every step of `test()`.
     Mock::given(method("GET"))
         .and(path("/api"))
@@ -110,6 +122,18 @@ async fn test_sends_apikey_query_param() {
         .respond_with(
             ResponseTemplate::new(200).set_body_json(serde_json::json!({"queue": {"slots": []}})),
         )
+        .mount(&server)
+        .await;
+    // Category auto-create probe: returns the configured category
+    // as already-present so ensure_category short-circuits without
+    // needing a set_config mock.
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "get_cats"))
+        .and(query_param("apikey", super::fixture::TEST_API_KEY))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "categories": ["*", "ryokan-test"],
+        })))
         .mount(&server)
         .await;
 

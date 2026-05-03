@@ -1,10 +1,17 @@
 //! `pause` / `resume` / `delete` against a mocked SAB. Verifies the
-//! wire-format query params for each op and the history-then-queue
-//! lookup order that `delete` uses. History is tried first because
-//! SAB's `mode=queue&name=delete` returns `status: true`
-//! unconditionally — even for a nzo_id that isn't in the queue —
-//! which would silently no-op every post-import delete if we tried
-//! queue first.
+//! wire-format query params for each op and the queue-then-history
+//! lookup order that `delete` uses.
+//!
+//! **Order is queue-first because SAB's history endpoint phantom-
+//! succeeds.** Live-probed against SAB 5.0.1 source: queue's
+//! `_api_queue_delete` returns `status: bool(removed)` (false on
+//! unknown nzo_id), but history's `_api_history_delete` calls
+//! `report()` regardless of whether the nzo_id was found in the
+//! history DB — bogus nzo_id returns `status: true`. A history-first
+//! impl thus phantom-succeeds on every in-flight cancel (queue items
+//! aren't in history) and Ryokan marks the grab removed while SAB
+//! keeps downloading. Queue-first uses queue's honest signal as the
+//! primary path; history is the fallback for the post-import case.
 
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
@@ -47,17 +54,22 @@ async fn resume_sends_queue_resume_with_nzo_id() {
 }
 
 #[tokio::test]
-async fn delete_tries_history_first_then_falls_back_to_queue() {
-    // Common case: a completed-and-imported job lives in SAB's
-    // history (not its queue). History-first gives the canonical
-    // path a clean win without ever pinging queue. If a refactor
-    // ever reverts the order, queue would silently "succeed" (see
-    // module-level comment) and `del_files=1` would never reach
-    // history, leaving the unpacked output dir behind.
+async fn delete_tries_queue_first_for_in_flight_cancel() {
+    // In-flight cancel: nzo_id is in queue. Queue's honest
+    // `status:true` is the canonical signal; history must NOT be
+    // touched, since history's phantom-success would have already
+    // claimed the delete in the previous (history-first) impl while
+    // the actual queue item kept downloading.
+    //
+    // The `.expect(0)` on history is the load-bearing assertion —
+    // `delete` returning Ok is necessary but not sufficient (a
+    // history-first impl would also return Ok off the phantom).
+    // Pinning that history was never called is what catches a
+    // regression.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("mode", "history"))
+        .and(query_param("mode", "queue"))
         .and(query_param("name", "delete"))
         .and(query_param("del_files", "1"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -65,62 +77,43 @@ async fn delete_tries_history_first_then_falls_back_to_queue() {
         })))
         .mount(&server)
         .await;
-    // Queue mock that would also "succeed" — if the impl ever asks
-    // queue first this test would still pass without exercising the
-    // history path. The unique-to-history `del_files=1` matcher above
-    // is what pins that history actually got hit.
+    let history_mock = Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .and(query_param("name", "delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": true,
+        })))
+        .expect(0);
+    server.register(history_mock).await;
 
     client
-        .delete("SABnzbd_nzo_done", true)
+        .delete("SABnzbd_nzo_pending", true)
         .await
-        .expect("delete must succeed via history (the common post-import case)");
+        .expect("delete must succeed via queue when the nzo_id is in flight");
+    // Wiremock validates `.expect(0)` on drop.
+    server.verify().await;
 }
 
 #[tokio::test]
-async fn delete_falls_through_to_queue_when_history_does_not_have_the_nzo_id() {
-    // In-flight cancel: the nzo_id is in the queue, not history yet.
-    // History returns `status:false`, queue returns `status:true`.
-    // Verifies the fallback works in the rarer-but-real direction.
+async fn delete_falls_through_to_history_when_queue_does_not_have_the_nzo_id() {
+    // Post-import cancel: nzo_id has aged out of queue and lives
+    // only in history. Queue returns honest `status:false`, history
+    // returns `status:true` (real or phantom — for our purposes both
+    // mean "user's view is clean"). The `del_files=1` matcher pins
+    // that the history call carries the cleanup flag so the
+    // unpacked output dir is removed; without it a "delete and
+    // remove files" click would leave artifacts on disk.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
-        .and(query_param("mode", "history"))
+        .and(query_param("mode", "queue"))
         .and(query_param("name", "delete"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "status": false,
-            "error": "nzo_id not in history",
         })))
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api"))
-        .and(query_param("mode", "queue"))
-        .and(query_param("name", "delete"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "status": true,
-        })))
-        .mount(&server)
-        .await;
-
-    client
-        .delete("SABnzbd_nzo_pending", false)
-        .await
-        .expect("delete must succeed via queue when history is empty");
-}
-
-#[tokio::test]
-async fn delete_does_not_short_circuit_on_queue_phantom_success() {
-    // Pin the actual bug fix: SAB's `mode=queue&name=delete` returns
-    // `status:true` even when the nzo_id is NOT in the queue (its
-    // `_handle_queue` calls `report(output)` after `remove_multiple`
-    // unconditionally). If we tried queue first we'd see that
-    // phantom success and never hit history with `del_files=1`.
-    //
-    // This test makes the queue mock return the "phantom success"
-    // shape and asserts the impl still succeeds via the history
-    // path AND specifically with `del_files=1` on the wire — the
-    // unpacked storage dir would not get cleaned up otherwise.
-    let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
         .and(query_param("mode", "history"))
@@ -131,6 +124,29 @@ async fn delete_does_not_short_circuit_on_queue_phantom_success() {
         })))
         .mount(&server)
         .await;
+
+    client
+        .delete("SABnzbd_nzo_done", true)
+        .await
+        .expect("delete must succeed via history when queue reports the nzo_id absent");
+}
+
+#[tokio::test]
+async fn delete_does_not_short_circuit_on_history_phantom_success() {
+    // Pin the actual bug fix (2026-05-03): SAB's
+    // `mode=history&name=delete` returns `status:true` regardless of
+    // whether the nzo_id is in the history DB. The earlier
+    // history-first impl saw that phantom success on every in-flight
+    // cancel (the nzo_id was in queue, not history) and Ryokan
+    // marked the grab removed while SAB kept downloading.
+    //
+    // This test mocks BOTH endpoints as `status:true` — the
+    // ambiguous live SAB shape — and asserts the impl took the
+    // queue path (using `.expect(0)` on the history mock). Without
+    // the queue-first ordering, history's phantom-true would
+    // satisfy the impl even when the queue item was real and
+    // active.
+    let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
         .and(query_param("mode", "queue"))
@@ -140,11 +156,21 @@ async fn delete_does_not_short_circuit_on_queue_phantom_success() {
         })))
         .mount(&server)
         .await;
+    let history_mock = Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("mode", "history"))
+        .and(query_param("name", "delete"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": true,
+        })))
+        .expect(0);
+    server.register(history_mock).await;
 
     client
         .delete("SABnzbd_nzo_done", true)
         .await
-        .expect("delete must hit history with del_files=1, not the queue phantom-success");
+        .expect("delete must succeed via queue without touching history's phantom-success");
+    server.verify().await;
 }
 
 #[tokio::test]
