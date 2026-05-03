@@ -31,7 +31,7 @@ This is opinionated. Sane defaults beat a config matrix. If you need something t
 
 <fieldset>
   <legend>Request frontend</legend>
-  <p class="hint">Seerr (the Jellyseerr + Overseerr merger, Feb 2026) requests anime through Ryokan via the Sonarr/Radarr API shim.</p>
+  <p class="hint">Seerr requests anime through Ryokan via the Sonarr/Radarr API shim.</p>
   <label><input type="radio" name="requests" value="seerr" checked> Seerr</label>
   <label><input type="radio" name="requests" value="none"> None</label>
 </fieldset>
