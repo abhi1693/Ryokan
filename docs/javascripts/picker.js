@@ -266,12 +266,33 @@ ${portsBlock}    volumes:
       # Pick your provider and protocol; gluetun's docs at
       # https://github.com/qdm12/gluetun-wiki list the env vars
       # each provider expects. Common shape:
-      VPN_SERVICE_PROVIDER: "mullvad"          # or protonvpn, pia, nordvpn, custom, etc.
+      VPN_SERVICE_PROVIDER: "protonvpn"        # or pia, privatevpn, airvpn, mullvad, nordvpn, custom, etc.
       VPN_TYPE: "wireguard"                    # or openvpn
       WIREGUARD_PRIVATE_KEY: "PASTE_KEY_HERE"
       WIREGUARD_ADDRESSES: "10.x.x.x/32"
       SERVER_CITIES: "Amsterdam"               # provider-specific filter
       TZ: "${cfg.tz}"
+      # ---- Port forwarding ----
+      # Without an open inbound port, torrent clients can only make
+      # outbound connections; peers can't dial in, which tanks leech
+      # speed and ratio-building on private trackers. Flip this on
+      # if your provider supports port forwarding.
+      #
+      # Provider support (as of 2026):
+      #   ProtonVPN  yes (auto-renews, 60s lease)
+      #   PIA        yes (single port, may rotate on reconnect)
+      #   PrivateVPN yes
+      #   AirVPN     yes (configure the port in their portal first)
+      #   Mullvad    NO. Dropped port forwarding in 2023; switch
+      #              providers if you need it.
+      #   NordVPN    no
+      VPN_PORT_FORWARDING: "on"
+      # Gluetun writes the assigned port number to this file inside
+      # its container. Read it with:
+      #   docker exec gluetun cat /tmp/gluetun/forwarded_port
+      # See the "Port forwarding" section in the settings snippet
+      # below for the qBittorrent / Deluge plumbing.
+      VPN_PORT_FORWARDING_STATUS_FILE: "/tmp/gluetun/forwarded_port"
     restart: unless-stopped
     # All torrent download clients in this stack share gluetun's
     # network namespace via \`network_mode: "service:gluetun"\` and
@@ -525,6 +546,83 @@ services:
         lines.push('SAB stays outside the VPN (Usenet talks TLS to your provider, not to peers).');
       }
       lines.push('');
+
+      // Port forwarding only matters when there's a torrent client.
+      // SAB-only stacks don't need inbound ports.
+      if (torrents.length > 0) {
+        lines.push('--- Port forwarding (open the inbound torrent port through gluetun) ---');
+        lines.push('');
+        lines.push('Why: without this, peers can\'t dial in to your torrent client. You\'ll still');
+        lines.push('download (outbound connections work) but uploads stall and private trackers');
+        lines.push('mark you "unconnectable", killing ratio.');
+        lines.push('');
+        lines.push('1. In the gluetun env block above, confirm VPN_PORT_FORWARDING="on" and that');
+        lines.push('   your provider supports it (ProtonVPN, PIA, PrivateVPN, AirVPN; NOT Mullvad).');
+        lines.push('');
+        lines.push('2. Bring the stack up. Once gluetun connects, find the assigned port:');
+        lines.push('');
+        lines.push('     docker exec gluetun cat /tmp/gluetun/forwarded_port');
+        lines.push('');
+        lines.push('   Or scan the logs:');
+        lines.push('');
+        lines.push('     docker logs gluetun 2>&1 | grep -i "port forward"');
+        lines.push('');
+        lines.push('3. Paste that port number into your torrent client AND bind it to the tun0');
+        lines.push('   interface (the VPN tunnel device). The interface bind is a belt-and-');
+        lines.push('   suspenders kill switch: even though gluetun\'s built-in firewall blocks');
+        lines.push('   non-VPN traffic at the namespace level, binding the client to tun0 means');
+        lines.push('   if the tunnel drops, the client refuses to send packets at all rather');
+        lines.push('   than potentially leaking through gluetun\'s upstream interface.');
+        lines.push('');
+        const qbit = torrents.includes('qbittorrent');
+        const deluge = torrents.includes('deluge');
+        const trans = torrents.includes('transmission');
+        const rt = torrents.includes('rtorrent');
+        if (qbit) {
+          lines.push('   qBittorrent:');
+          lines.push('     Tools → Options → Advanced → "Network Interface" = tun0');
+          lines.push('     Tools → Options → Connection →');
+          lines.push('       "Port used for incoming connections" = <forwarded port>');
+          lines.push('       Uncheck "Use UPnP / NAT-PMP port forwarding"');
+          lines.push('     The green/red icon next to "Connection status" in the bottom bar');
+          lines.push('     turns green once peers can reach you. If it stays red after a');
+          lines.push('     restart, the tun0 bind is wrong; double-check the interface name');
+          lines.push('     with `docker exec gluetun ip a` (look for the tunnel device).');
+        }
+        if (deluge) {
+          lines.push('   Deluge:');
+          lines.push('     Preferences → Network → Interface = tun0');
+          lines.push('     Preferences → Network → Incoming Port: pin to <forwarded port>');
+          lines.push('     Disable UPnP / NAT-PMP under the same panel.');
+        }
+        if (trans) {
+          lines.push('   Transmission:');
+          lines.push('     Edit → Preferences → Network → "Listening port" = <forwarded port>');
+          lines.push('     Uncheck "Use UPnP or NAT-PMP port forwarding".');
+          lines.push('     Transmission has no GUI option for binding to a specific interface;');
+          lines.push('     gluetun\'s firewall already provides the kill switch at the namespace');
+          lines.push('     level, so this is fine for most users. If you want a hard bind, edit');
+          lines.push('     settings.json: "bind-address-ipv4": "<tun0 ip>" (find with');
+          lines.push('     `docker exec gluetun ip -4 -o addr show dev tun0`).');
+        }
+        if (rt) {
+          lines.push('   rTorrent: edit your .rtorrent.rc:');
+          lines.push('     network.port_range.set = <forwarded port>-<forwarded port>');
+          lines.push('     network.port_random.set = no');
+          lines.push('     network.bind_address.set = <tun0 ip>');
+          lines.push('     (find tun0 ip with `docker exec gluetun ip -4 -o addr show dev tun0`.)');
+        }
+        lines.push('');
+        lines.push('4. Caveats:');
+        lines.push('   - The forwarded port can rotate (especially PIA, AirVPN). For stability,');
+        lines.push('     run a sidecar script that polls /tmp/gluetun/forwarded_port and updates');
+        lines.push('     the client via its API on change. "gluetun qbittorrent port forward"');
+        lines.push('     turns up several ready-made ones.');
+        lines.push('   - Empty status file = no port assigned yet. Check `docker logs gluetun`');
+        lines.push('     for "port forwarded" entries; handshake errors usually mean wrong');
+        lines.push('     credentials or a server that doesn\'t support PF.');
+        lines.push('');
+      }
     }
 
     if (cfg.proxy !== 'none') {
