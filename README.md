@@ -6,6 +6,8 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 
 This project's being actively developed. Expect some occasional bugs. See [Releases](https://github.com/johnthreekay/Ryokan/releases) for version-to-version changes.
 
+📚 **Documentation** — install, configure, troubleshoot at [johnthreekay.github.io/Ryokan/docs/](https://johnthreekay.github.io/Ryokan/docs/).
+
 ## Screenshots
 
 <img width="1920" height="1079" alt="image" src="https://github.com/user-attachments/assets/24d59ff2-0f12-4788-b06f-d7ba7ce57812" />

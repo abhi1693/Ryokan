@@ -34,6 +34,10 @@ mutants.out/
 .github/
 *.md
 !README.md
+# MkDocs source — published to GH Pages, not shipped in the image.
+docs/
+mkdocs.yml
+docs-requirements.txt
 
 # Build/dev tooling not needed in the image.
 .config/
