@@ -1,14 +1,18 @@
-# Build the MkDocs site and deploy into the `docs/` subdirectory
-# of the `gh-pages` branch. The OAuth broker pages already living
-# at `gh-pages/auth/` are preserved by the `keep_files: true` flag
-# on `peaceiris/actions-gh-pages` — without it the action wipes
-# everything else under `gh-pages` on each deploy and breaks the
-# OAuth flow.
+# Build the docs site with Zensical and deploy into the `docs/`
+# subdirectory of the `gh-pages` branch. The OAuth broker pages
+# already living at `gh-pages/auth/` are preserved by the
+# `keep_files: true` flag on `peaceiris/actions-gh-pages`; without
+# it the action wipes everything else under `gh-pages` on each
+# deploy and breaks the OAuth flow.
 #
 # Triggered only when the docs source actually changes so a code-
 # only commit doesn't churn gh-pages. Manual `workflow_dispatch`
-# stays available so you can force a rebuild after a Material /
+# stays available so you can force a rebuild after a zensical /
 # pymdown-extensions release without committing.
+#
+# Zensical reads our existing `mkdocs.yml` directly — no separate
+# `zensical.toml` is needed. The migration from mkdocs-material is
+# essentially this workflow + `docs-requirements.txt`.
 name: Build and deploy docs
 
 on:
@@ -51,14 +55,14 @@ jobs:
           cache: pip
           cache-dependency-path: docs-requirements.txt
 
-      - name: Install MkDocs deps
+      - name: Install Zensical
         run: pip install -r docs-requirements.txt
 
       - name: Build site
-        # `--strict` upgrades broken internal links and other
+        # `-s` (strict) upgrades broken internal links and other
         # warnings to errors so a typo'd `[link](missing.md)` fails
         # the workflow instead of shipping a 404.
-        run: mkdocs build --strict
+        run: zensical build -s
 
       - name: Deploy to gh-pages/docs
         uses: peaceiris/actions-gh-pages@v4
