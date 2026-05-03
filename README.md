@@ -28,5 +28,3 @@ Regenerate after any `Cargo.lock` change:
 cargo install cargo-about --locked --features cli   # one-time
 cargo about generate -c about.toml about.hbs -o THIRD_PARTY_LICENSES.html
 ```
-
-`about.toml` lists the SPDX identifiers we accept; if a new dep introduces a new identifier, `cargo about generate` fails loud and you decide whether to add it to the accepted list or swap the dep.
