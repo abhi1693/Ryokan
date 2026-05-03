@@ -1,10 +1,10 @@
 # Install
 
-Two paths: build from source for development, or pull the Docker image for prod.
+You have two options for installing Ryokan: pulling the Docker image or building from source.
 
-## Docker (recommended for prod)
+## Docker (Recommended)
 
-The Docker image is published to GHCR on every tag at `ghcr.io/johnthreekay/ryokan:latest`. The repo ships a `docker-compose.yml` you can copy verbatim:
+The Docker image is published to GHCR on every tag at `ghcr.io/johnthreekay/ryokan:latest`. The repo also provides a `docker-compose.yml` you can copy verbatim:
 
 ```sh
 curl -O https://raw.githubusercontent.com/johnthreekay/Ryokan/main/docker-compose.yml
@@ -48,10 +48,10 @@ The first build takes a while (aws-lc, anitomy C++, full dep tree). Subsequent r
 
 ## Healthcheck and ports
 
-Ryokan listens on `0.0.0.0:8978` by default (override with `LISTEN_ADDR`). The Docker image's healthcheck probes `GET /login` — that's the canonical "is Ryokan up" endpoint. There is no `/healthz`; `/login` returns 200 once the auth UI is live, or 303 redirecting to `/setup` on a fresh container with no users yet (both are valid "up" signals).
+Ryokan listens on `0.0.0.0:8978` by default (override with `LISTEN_ADDR`). The Docker image's healthcheck probes `GET /login` since that's the canonical "is Ryokan up" endpoint. There is no `/healthz`; `/login` returns 200 once the auth UI is live, or 303 redirecting to `/setup` on a fresh container with no users yet (both are valid "up" signals).
 
 ## First-run setup
 
 The first time Ryokan boots, navigating to `/` redirects to `/setup`. Create an admin account there. Once that's done, `/setup` is locked behind auth and won't accept further submissions.
 
-If you need to reset the admin account (forgot password, lost MFA, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart: see the `RYOKAN_RESET_AUTH` env var in the [Docker page](docker.md#environment-variables).
+If you need to reset the admin account (forgot password, username, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart: see the `RYOKAN_RESET_AUTH` env var in the [Docker page](docker.md#environment-variables).
