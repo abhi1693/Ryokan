@@ -272,17 +272,37 @@ pub async fn fetch_media_list_collection(
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok());
+        // Capture the rate-limit headers verbatim so a 429 surfaces
+        // AL's actual remaining/limit/reset alongside the body. The
+        // 2026-05-03 user report had `MediaListCollection` 429-ing
+        // while the unauthenticated search endpoint worked fine
+        // simultaneously — most likely a per-account limit that's
+        // stricter than the global 30/min, but without these
+        // headers in the log we can't distinguish that from a
+        // bad-token-misclassified-as-rate-limit case. A `Remaining: 0`
+        // confirms a real rate limit; a `Remaining: 80` confirms
+        // something else is going on (auth / per-endpoint quota /
+        // Cloudflare). Helper at the bottom of this file.
+        let rate_limit_summary = format_rate_limit_headers_for_log(resp.headers());
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
             set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
         }
         let body = resp.text().await.unwrap_or_default();
         return Err(match status.as_u16() {
-            429 => format!("AniList rate-limited (status 429): {}", excerpt(&body)),
-            401 | 403 => format!(
-                "AniList rejected the watch-list token (status {}); user may need to re-link",
-                status
+            429 => format!(
+                "AniList rate-limited (status 429): {} [{}]",
+                excerpt(&body),
+                rate_limit_summary
             ),
-            code => format!("AniList unavailable (status {code}): {}", excerpt(&body)),
+            401 | 403 => format!(
+                "AniList rejected the watch-list token (status {}); user may need to re-link [{}]",
+                status, rate_limit_summary
+            ),
+            code => format!(
+                "AniList unavailable (status {code}): {} [{}]",
+                excerpt(&body),
+                rate_limit_summary
+            ),
         });
     }
 
@@ -1484,9 +1504,85 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
     Ok(out)
 }
 
+/// Render AL's rate-limit response headers as a one-line summary
+/// suitable for inlining in error messages and System → Logs detail
+/// fields. Surfaces only the headers actually present — when AL
+/// strips a header the corresponding field is omitted rather than
+/// shown as "unknown" so a quick log read makes it obvious which
+/// headers AL chose to send.
+///
+/// Used to disambiguate "real rate limit" (Remaining: 0) from
+/// "something else returned 429" (Remaining: 80, no rate-limit
+/// headers at all, only Retry-After present, etc.). Without this,
+/// every 429 looked identical in the logs and a per-account or
+/// per-endpoint quota was indistinguishable from the global cap.
+fn format_rate_limit_headers_for_log(headers: &reqwest::header::HeaderMap) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let read = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+    };
+    if let Some(v) = read("x-ratelimit-limit") {
+        parts.push(format!("limit={v}"));
+    }
+    if let Some(v) = read("x-ratelimit-remaining") {
+        parts.push(format!("remaining={v}"));
+    }
+    if let Some(v) = read("x-ratelimit-reset") {
+        parts.push(format!("reset={v}"));
+    }
+    if let Some(v) = read("retry-after") {
+        parts.push(format!("retry_after={v}"));
+    }
+    if parts.is_empty() {
+        // No rate-limit headers at all — strong signal the response
+        // came from somewhere other than AL's normal rate-limiter
+        // (Cloudflare, an upstream proxy, an auth layer that
+        // misuses 429).
+        "no rate-limit headers".to_string()
+    } else {
+        parts.join(" ")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_rate_limit_headers_renders_present_fields_only() {
+        use reqwest::header::HeaderMap;
+        let mut h = HeaderMap::new();
+        h.insert("x-ratelimit-limit", "30".parse().unwrap());
+        h.insert("x-ratelimit-remaining", "0".parse().unwrap());
+        h.insert("retry-after", "5".parse().unwrap());
+        let out = format_rate_limit_headers_for_log(&h);
+        assert!(out.contains("limit=30"), "got: {out}");
+        assert!(out.contains("remaining=0"), "got: {out}");
+        assert!(out.contains("retry_after=5"), "got: {out}");
+        // `reset` was not present and must not appear as "unknown".
+        assert!(
+            !out.contains("reset"),
+            "absent fields must be omitted; got: {out}"
+        );
+    }
+
+    #[test]
+    fn format_rate_limit_headers_falls_back_when_no_headers_present() {
+        // When AL (or an intermediary) sends none of the rate-limit
+        // headers on a 429, the summary must say so explicitly —
+        // the "no rate-limit headers" string is a diagnostic hint
+        // that the 429 may have come from somewhere other than AL's
+        // normal rate-limiter (e.g. Cloudflare, an auth layer
+        // misusing 429). Without this fallback, an empty summary
+        // would render as `[]` in the error message and the
+        // distinction would be lost.
+        let h = reqwest::header::HeaderMap::new();
+        let out = format_rate_limit_headers_for_log(&h);
+        assert_eq!(out, "no rate-limit headers");
+    }
 
     #[test]
     fn media_selector_omits_unused_var() {
