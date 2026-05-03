@@ -1,18 +1,21 @@
-# MkDocs config for the user-facing Ryokan docs site.
+# Config for the user-facing Ryokan docs site. The file is named
+# `mkdocs.yml` for historical reasons but is consumed by Zensical,
+# which reads the MkDocs config format as-is (no separate
+# zensical.toml needed).
 #
 # Builds to `site/` (default) and the GH Actions workflow at
 # `.github/workflows/docs.yml` ships that into the `docs/`
-# subdirectory of the `gh-pages` branch — co-existing with the
+# subdirectory of the `gh-pages` branch, co-existing with the
 # pre-existing OAuth broker pages under `gh-pages/auth/` rather
 # than overwriting them. Final URL is
 # `https://johnthreekay.github.io/Ryokan/docs/`.
 #
-# `--strict` is set in the build step so a broken internal link
+# `-s` (strict) is set in the build step so a broken internal link
 # fails the workflow rather than shipping a 404 to users. Build
-# locally with `mkdocs serve` from the repo root.
+# locally with `zensical serve` from the repo root.
 
 site_name: Ryokan
-site_description: Self-hosted anime PVR — install, configure, troubleshoot.
+site_description: Self-hosted anime PVR; install, configure, troubleshoot.
 site_url: https://johnthreekay.github.io/Ryokan/docs/
 repo_url: https://github.com/johnthreekay/Ryokan
 repo_name: johnthreekay/Ryokan

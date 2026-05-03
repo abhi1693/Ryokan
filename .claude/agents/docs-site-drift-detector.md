@@ -27,7 +27,7 @@ User-facing docs make a different shape of claim than CLAUDE.md files. The categ
 | Env var name and effect (e.g. `RYOKAN_TRUSTED_PROXY`) | `grep -rn "RYOKAN_TRUSTED_PROXY" src/` — confirm the var name exists and the documented effect matches the code path. |
 | Route / endpoint claim (e.g. `/api-docs`, `/login`, `/api/webhook/autobrr`) | Find the route registration in `src/main.rs` and confirm the path. |
 | Numeric / string constant in user-visible behavior (e.g. "min 1, max 60 minutes" for RSS) | Find the `clamp` or validation site in the code; the numbers must match. |
-| Cross-page link (`[Troubleshooting](troubleshooting.md#some-anchor)`) | Confirm the file exists AND the anchor ID resolves. MkDocs slugs are derived from heading text; an `## Foo Bar` heading produces `#foo-bar`. Mismatch = broken link, fails `mkdocs build --strict`. |
+| Cross-page link (`[Troubleshooting](troubleshooting.md#some-anchor)`) | Confirm the file exists AND the anchor ID resolves. Slugs are derived from heading text; an `## Foo Bar` heading produces `#foo-bar`. Mismatch = broken link, fails `zensical build -s`. |
 | Sonarr-comparison claim (e.g. "Sonarr's classification is filename-only") | Verify against Sonarr's own docs at `https://raw.githubusercontent.com/Servarr/Wiki/master/sonarr/{faq,settings,supported}.md` via `Bash` `curl` or `WebFetch`. Quote what Sonarr's docs actually say. |
 | Version / release claim (e.g. "v2.0.0 will add manga support") | Check the milestone on GitHub if mentioned, or the `## Project status` section of `index.md`. |
 | Behavioral claim about a feature (e.g. "post-processing falls back to copy on cross-fs hardlink failure") | Trace the code path; confirm the fallback exists. |

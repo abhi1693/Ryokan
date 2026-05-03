@@ -1,8 +1,13 @@
-# Pinned MkDocs deps for the docs site build. Major-version pins
-# only — `pip install -r` resolves to the latest minor + patch on
-# every CI run so security fixes land without a manual bump, but
-# a Material breaking change can't smuggle itself in via a v9.x
-# release. Bump the major when you've reviewed the release notes.
-mkdocs>=1.6,<2
-mkdocs-material>=9.5,<10
-pymdown-extensions>=10,<11
+# Pinned docs-build deps. Zensical reads our existing mkdocs.yml as-is
+# (no zensical.toml needed) so this is a single-line dep file. Major-
+# version pin only; `pip install -r` resolves to the latest minor + patch
+# on every CI run so security fixes land without a manual bump.
+#
+# Why zensical and not mkdocs-material: the Material team put MkDocs
+# Material into maintenance-only mode (security + critical bugs through
+# Nov 2026) and is shipping zensical as the successor. Zensical is built
+# in Rust, matching Ryokan's stack, and runs ~2x faster on this site.
+#
+# Zensical is pre-1.0 (0.0.x) and ships on a fast cadence; the < 0.1
+# pin will need a re-evaluation when 1.0 drops.
+zensical>=0.0.39,<0.1
