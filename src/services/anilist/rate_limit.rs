@@ -35,10 +35,22 @@ const COOLDOWN_SAFETY_MARGIN: Duration = Duration::from_secs(2);
 /// we're about to bump the cap.
 const REMAINING_HEADROOM_THRESHOLD: u32 = 3;
 
-/// Fallback per-minute limit used when AL hasn't told us its current
-/// limit yet. Conservative — matches the documented "currently degraded
-/// to 30 req/min" state. Once we see `X-RateLimit-Limit` we use that
-/// instead, so during normal AL operation (90 req/min) we adapt up.
+/// Per-minute pacing rate Ryokan throttles AL requests against. Used
+/// both as the fallback when no rate-limit header has been seen yet
+/// AND as a hard ceiling regardless of what `X-RateLimit-Limit`
+/// reports — see `decide_wait` for the one-line clamp.
+///
+/// The ceiling exists because AL's `Limit` header is not trustworthy
+/// during degraded operation: live observation 2026-05-03 had AL
+/// continuing to return `Limit: 90` (the normal-mode value) while
+/// actually enforcing the documented 30 req/min degraded cap. With
+/// the original adapt-up-from-fallback logic that meant Ryokan paced
+/// at 84 req/min and ate 429s every 30-60s through a 12-minute
+/// sweep. Capping spacing at the documented degraded limit costs
+/// ~50s on a 27-series sweep in normal mode (27/min vs ~84/min)
+/// but eliminates the loop. The header's `Remaining` and `Reset`
+/// fields are still trusted — those are about state within the
+/// current window and don't depend on the window's reported size.
 const ANILIST_LIMIT_FALLBACK: u32 = 30;
 
 /// Per-response snapshot of AniList's rate-limit headers, used by
@@ -148,7 +160,16 @@ fn decide_wait(
     last_request: Option<Instant>,
     now: Instant,
 ) -> Duration {
-    let limit = state.map(|s| s.limit).unwrap_or(ANILIST_LIMIT_FALLBACK);
+    // Clamp the header-reported limit to `ANILIST_LIMIT_FALLBACK`
+    // (the documented degraded cap). AL has been observed returning
+    // `X-RateLimit-Limit: 90` while actually enforcing 30 req/min,
+    // and the prior `unwrap_or(30)` adapt-up-from-fallback shape
+    // would happily pace against 90 in that case. See the
+    // `ANILIST_LIMIT_FALLBACK` doc-comment for the full incident.
+    let limit = state
+        .map(|s| s.limit)
+        .unwrap_or(ANILIST_LIMIT_FALLBACK)
+        .min(ANILIST_LIMIT_FALLBACK);
     let min_spacing = min_inter_request(limit);
 
     let burst_wait = match last_request {
@@ -164,7 +185,16 @@ fn decide_wait(
         && let Some(reset_at) = s.reset_at
         && reset_at > now
     {
-        let window_wait = reset_at.saturating_duration_since(now) + Duration::from_secs(1);
+        // Same `+ COOLDOWN_SAFETY_MARGIN` as the cooldown path. AL's
+        // `X-RateLimit-Reset` is integer-seconds and `Instant::now()`
+        // came from `SystemTime::now().as_secs()` at recording time —
+        // both truncate, so a real reset that's 0.4s away can be
+        // recorded as 0s. A bare `+1s` margin is then collapsed by
+        // truncation noise, lands at the boundary, and trips a fresh
+        // 429 (live-reproduced during the 2026-05-02 sweep where
+        // `remaining=0 wait=1` was followed by a 429 ~1.5s later). The
+        // shared safety margin keeps the two paths in sync.
+        let window_wait = reset_at.saturating_duration_since(now) + COOLDOWN_SAFETY_MARGIN;
         return window_wait.max(burst_wait);
     }
 
@@ -396,7 +426,21 @@ pub fn note_external_anilist_response(
 /// Set the cooldown-until marker to `now + dur`. Used by `mod.rs` call sites
 /// that have already computed a duration via `cooldown_from_headers` — they
 /// don't need the `compute_cooldown_duration` step.
+///
+/// Also clears `RATE_LIMIT_STATE` so the post-cooldown first request falls
+/// to the conservative `min_inter_request(ANILIST_LIMIT_FALLBACK)` spacing
+/// instead of acting on a stale `remaining=0, reset_at=…` snapshot from
+/// the response that triggered this cooldown. Without the reset, the
+/// first call after cooldown either takes the window-flip path against a
+/// `reset_at` that's already in the past (no-op, falls through to burst
+/// guard) or — if the recorded `reset_at` was very close to the cooldown
+/// expiry — fires right at the boundary and trips a fresh 429. Clearing
+/// state forces a probe-style first request, and the fresh response's
+/// headers re-populate the snapshot for subsequent calls.
 pub(super) fn set_cooldown_until_now_plus(dur: Duration) {
+    if let Ok(mut g) = RATE_LIMIT_STATE.lock() {
+        *g = None;
+    }
     if let Ok(mut guard) = ANILIST_COOLDOWN_UNTIL.lock() {
         *guard = Some(Instant::now() + dur);
     }
@@ -545,6 +589,47 @@ mod tests {
         assert_eq!(dur, ANILIST_COOLDOWN_MAX + COOLDOWN_SAFETY_MARGIN);
     }
 
+    /// `set_cooldown_until_now_plus` must clear `RATE_LIMIT_STATE` so
+    /// the post-cooldown first request falls to defensive spacing
+    /// instead of acting on the stale `remaining=0, reset_at=…`
+    /// snapshot from the 429 that triggered this cooldown. Pinned
+    /// because the visible failure mode is silent — `decide_wait`
+    /// just takes the wrong branch and a sweep eats more 429s.
+    ///
+    /// Touches process-global state, so this test serializes itself
+    /// behind a mutex with the other `set_cooldown` test below to
+    /// avoid cross-test pollution. Other tests in this file are
+    /// pure (compute_* / decide_wait) and don't touch these globals.
+    #[test]
+    fn set_cooldown_clears_rate_limit_state() {
+        let _g = COOLDOWN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        // Seed state to a known non-None value.
+        if let Ok(mut g) = RATE_LIMIT_STATE.lock() {
+            *g = Some(RateLimitState {
+                limit: 30,
+                remaining: 0,
+                reset_at: Some(Instant::now() + Duration::from_secs(10)),
+            });
+        }
+        set_cooldown_until_now_plus(Duration::from_millis(1));
+        let snap = RATE_LIMIT_STATE.lock().ok().and_then(|g| *g);
+        assert!(
+            snap.is_none(),
+            "RATE_LIMIT_STATE must be cleared after cooldown set; got {:?}",
+            snap.map(|s| (s.limit, s.remaining))
+        );
+        // Belt-and-suspenders: clean up the cooldown-until marker too,
+        // since later tests may run while this one's brief cooldown is
+        // still notionally "active." The Duration::from_millis(1) above
+        // expires before any test could observe it, but explicit reset
+        // makes that not depend on test ordering.
+        if let Ok(mut g) = ANILIST_COOLDOWN_UNTIL.lock() {
+            *g = None;
+        }
+    }
+
+    static COOLDOWN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn state(limit: u32, remaining: u32, reset_at: Option<Instant>) -> RateLimitState {
         RateLimitState {
             limit,
@@ -577,6 +662,42 @@ mod tests {
         assert_eq!(decide_wait(Some(s), Some(last), now), Duration::ZERO);
     }
 
+    /// Pin Fix C — the live-observed AL header lie where `Limit: 90`
+    /// is reported while AL is actually enforcing the documented 30
+    /// req/min degraded cap. Decide_wait must clamp the header value
+    /// down to ANILIST_LIMIT_FALLBACK (30) so spacing stays at
+    /// `min_inter_request(30) ≈ 2200ms` instead of paced-against-90's
+    /// 733ms. Without the clamp, a 27-series sweep over-fires 3x and
+    /// eats 429s every 30-60s.
+    ///
+    /// Setup: state with limit=90 (the lie), remaining high (no
+    /// window-flip), no last request — so the function reduces to
+    /// the limit→min_spacing path. The wait should be the
+    /// degraded-equivalent value.
+    #[test]
+    fn decide_wait_clamps_limit_to_fallback_when_header_reports_higher() {
+        let now = Instant::now();
+        let s = state(90, 50, None);
+        // No last request → burst_wait would be 0 even if we paced
+        // against 90; need a recent last_request to expose the
+        // spacing decision.
+        let last = now - Duration::from_millis(0);
+        let w = decide_wait(Some(s), Some(last), now);
+        // At limit=30 (clamped), min_inter_request = 2200ms. Burst
+        // wait with 0 elapsed = 2200ms. If the clamp didn't fire we
+        // would have paced against 90 → 733ms.
+        assert!(
+            w >= Duration::from_millis(2000),
+            "expected ~2200ms (limit clamped to 30) but got {:?} — clamp may have regressed back to header-trusts",
+            w
+        );
+        assert!(
+            w <= Duration::from_millis(2500),
+            "expected ~2200ms (limit clamped to 30) but got {:?}",
+            w
+        );
+    }
+
     #[test]
     fn decide_wait_window_flip_fires_when_remaining_low_and_reset_in_future() {
         let now = Instant::now();
@@ -584,6 +705,19 @@ mod tests {
         let w = decide_wait(Some(s), None, now);
         assert!(w >= Duration::from_secs(30), "got {:?}", w);
         assert!(w <= Duration::from_secs(32), "got {:?}", w);
+    }
+
+    /// Pin the exact safety margin so a future "shorten the wait"
+    /// refactor can't silently regress to the +1s value that was
+    /// observed live to land at the AL window boundary and trip a
+    /// fresh 429. If you change the margin, change `COOLDOWN_SAFETY_MARGIN`
+    /// and update this assertion.
+    #[test]
+    fn decide_wait_window_flip_uses_cooldown_safety_margin() {
+        let now = Instant::now();
+        let s = state(30, 0, Some(now + Duration::from_secs(30)));
+        let w = decide_wait(Some(s), None, now);
+        assert_eq!(w, Duration::from_secs(30) + COOLDOWN_SAFETY_MARGIN);
     }
 
     #[test]
