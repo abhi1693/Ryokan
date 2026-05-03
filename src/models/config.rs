@@ -212,7 +212,7 @@ impl Default for Config {
             title_language: "english".to_string(),
             force_mal_fallback: false,
             rss_enabled: false,
-            rss_interval_minutes: 5,
+            rss_interval_minutes: 15,
             rss_master_enabled: true,
             disable_nyaa_rss: false,
             force_kitsu_fallback: false,

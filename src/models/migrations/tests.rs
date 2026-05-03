@@ -812,14 +812,20 @@ async fn migrate_default_jellyfin_use_ssl_is_zero() {
 }
 
 #[tokio::test]
-async fn migrate_default_rss_interval_minutes_is_five() {
+async fn migrate_default_rss_interval_minutes_is_fifteen() {
+    // Bumped from 5 → 15 on 2026-05-03 because non-Nyaa RSS feeds
+    // (SubsPlease + similar direct-feed publishers) consistently
+    // rate-limit at the five-minute cadence. See the migration
+    // doc-comment at `migrations::mod::migrate` for the full
+    // rationale; this test pins the fresh-install default so a
+    // future quiet revert to 5 fails loudly.
     let db = fresh_migrated_pool().await;
     insert_default_config_row(&db).await;
     let v: i64 = sqlx::query_scalar("SELECT rss_interval_minutes FROM config WHERE id = 1")
         .fetch_one(&db)
         .await
         .unwrap();
-    assert_eq!(v, 5);
+    assert_eq!(v, 15);
 }
 
 #[tokio::test]
