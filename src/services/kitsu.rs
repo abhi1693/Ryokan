@@ -7,7 +7,18 @@ use std::time::Duration;
 use crate::services::anilist::AnimeDetail;
 use crate::services::html::sanitize_rich_description;
 
-const KITSU_API: &str = "https://kitsu.io/api/edge";
+const KITSU_API_DEFAULT: &str = "https://kitsu.io/api/edge";
+
+/// Kitsu API base URL, with a `RYOKAN_KITSU_API_BASE` override the same
+/// shape as `RYOKAN_ANILIST_API_BASE` / `JIKAN_API_BASE`. Re-read on
+/// every call rather than cached so wiremock fixtures can flip it
+/// per-fixture without process restart.
+fn kitsu_api_base() -> String {
+    std::env::var("RYOKAN_KITSU_API_BASE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| KITSU_API_DEFAULT.to_string())
+}
 
 /// Shared reqwest client. Replaces a per-call `Client::new()` so the
 /// connection pool is reused across the search/detail fetch helpers.
@@ -261,7 +272,7 @@ async fn best_candidate(
     let mut best: Option<(Candidate, i64)> = None;
     for query in &queries {
         let response = match fetch_collection::<AnimeAttributes>(
-            &format!("{}/anime", KITSU_API),
+            &format!("{}/anime", kitsu_api_base()),
             &[("filter[text]", query.as_str()), ("page[limit]", "10")],
         )
         .await
@@ -363,7 +374,7 @@ pub async fn get_anime_detail_by_titles(
 /// the supported shape.
 pub async fn get_anime_detail_by_mal_id(mal_id: i64) -> Result<Option<AnimeDetail>, String> {
     let mal_id_str = mal_id.to_string();
-    let url = format!("{}/mappings", KITSU_API);
+    let url = format!("{}/mappings", kitsu_api_base());
     let resp = HTTP_CLIENT
         .get(&url)
         .query(&[
@@ -436,7 +447,7 @@ async fn fetch_episode_page_via_relationship(
         ("sort", "number"),
     ];
     fetch_collection::<EpisodeAttributes>(
-        &format!("{}/anime/{}/episodes", KITSU_API, kitsu_id),
+        &format!("{}/anime/{}/episodes", kitsu_api_base(), kitsu_id),
         &params,
     )
     .await
@@ -454,7 +465,7 @@ async fn fetch_episode_page_via_filter(
         ("page[offset]", offset_str.as_str()),
         ("sort", "number"),
     ];
-    fetch_collection::<EpisodeAttributes>(&format!("{}/episodes", KITSU_API), &params).await
+    fetch_collection::<EpisodeAttributes>(&format!("{}/episodes", kitsu_api_base()), &params).await
 }
 
 async fn get_cached_kitsu_episodes(

@@ -4,8 +4,19 @@ use std::sync::LazyLock;
 use std::time::{Duration, SystemTime};
 use tokio::sync::{Mutex, RwLock};
 
-const MAPPINGS_URL: &str =
+const MAPPINGS_URL_DEFAULT: &str =
     "https://github.com/anibridge/anibridge-mappings/releases/latest/download/mappings.min.json";
+
+/// Anibridge mappings download URL, with a `RYOKAN_ANIBRIDGE_MAPPINGS_URL`
+/// override the same shape as `RYOKAN_ANILIST_API_BASE` /
+/// `RYOKAN_NYAA_API_BASE`. Re-read on every call rather than cached so
+/// wiremock fixtures can flip it per-fixture without process restart.
+fn mappings_url() -> String {
+    std::env::var("RYOKAN_ANIBRIDGE_MAPPINGS_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| MAPPINGS_URL_DEFAULT.to_string())
+}
 
 /// How long the on-disk mappings JSON is considered fresh. This is
 /// also re-used by `main.rs` as the `anibridge_refresh` background-
@@ -546,7 +557,7 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
         None
     };
 
-    let mut req = client.get(MAPPINGS_URL).header("User-Agent", "Ryokan/0.1");
+    let mut req = client.get(mappings_url()).header("User-Agent", "Ryokan/0.1");
     if let Some(meta) = &conditional_meta {
         if let Some(etag) = &meta.etag {
             req = req.header(reqwest::header::IF_NONE_MATCH, etag);

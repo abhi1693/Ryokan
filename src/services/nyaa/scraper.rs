@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 // `self::scraper` (this file) instead of the external crate.
 use ::scraper::{Html, Selector};
 
-use super::{NYAA_BASE, SearchOptions, SearchResult, extract_hash};
+use super::{SearchOptions, SearchResult, extract_hash, nyaa_base};
 
 static SEL_ROW: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("table.torrent-list tbody tr").expect("SEL_ROW parses"));
@@ -100,6 +100,7 @@ static SINGLE_EP_RE: LazyLock<regex_lite::Regex> = LazyLock::new(|| {
 
 pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResult>, bool) {
     let document = Html::parse_document(html);
+    let base = nyaa_base();
 
     let mut results = Vec::new();
 
@@ -125,7 +126,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             Some(a) => {
                 let title = a.text().collect::<String>().trim().to_string();
                 let href = a.value().attr("href").unwrap_or("");
-                let link = format!("{}{}", NYAA_BASE, href);
+                let link = format!("{}{}", base, href);
                 (title, link)
             }
             None => continue,
@@ -139,7 +140,7 @@ pub(super) fn parse_results(html: &str, opts: &SearchOptions) -> (Vec<SearchResu
             .find_map(|a| {
                 let href = a.value().attr("href").unwrap_or("");
                 if href.ends_with(".torrent") {
-                    Some(format!("{}{}", NYAA_BASE, href))
+                    Some(format!("{}{}", base, href))
                 } else {
                     None
                 }
@@ -460,7 +461,8 @@ pub(super) fn parse_view_page(
     let info_hash = extract_hash(&magnet);
 
     // Torrent file URL: sibling `.card-footer-item` ending in .torrent.
-    // Paths on nyaa.si are relative, so prefix NYAA_BASE when needed.
+    // Paths on nyaa.si are relative, so prefix the configured base URL
+    // when needed.
     let torrent = document
         .select(&SEL_VIEW_TORRENT)
         .next()
@@ -469,7 +471,7 @@ pub(super) fn parse_view_page(
             if href.starts_with("http") {
                 href.to_string()
             } else {
-                format!("{}{}", NYAA_BASE, href)
+                format!("{}{}", nyaa_base(), href)
             }
         })
         .unwrap_or_default();
