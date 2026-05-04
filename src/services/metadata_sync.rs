@@ -1158,6 +1158,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_category_for_zero_id_routes_to_kitsu_not_jikan() {
+        // Pin the `detail.id < 0` sign-boundary at line 62. Mutating to
+        // `<=` would route id=0 to Jikan instead of falling through to
+        // Kitsu — wrong because id=0 isn't the negative-mal_id sentinel
+        // Jikan responses use, it's an empty / sentinel-error value
+        // from a provider that doesn't fit either AL or MAL shape.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(0);
+        assert_eq!(
+            provider_category_for_detail(&tracked, &detail),
+            LogCategory::Kitsu,
+            "detail.id=0 must NOT route to Jikan — that's the < vs <= boundary"
+        );
+    }
+
+    #[test]
+    fn is_trustworthy_write_rejects_zero_id_detail() {
+        // Pin the `detail.id < 0` sign-boundary at line 91. Mutating to
+        // `<=` would treat id=0 as trustworthy and write zeroed-out
+        // metadata over a real series row.
+        let tracked = series_fixture(1234);
+        let detail = detail_fixture(0);
+        // Sanity: not authoritative (already pinned by an earlier test).
+        assert!(!is_authoritative_detail(&tracked, &detail));
+        assert!(
+            !is_trustworthy_write(&tracked, &detail),
+            "detail.id=0 must NOT be trustworthy — that's the < vs <= boundary"
+        );
+    }
+
     /// Kitsu's title-fuzz fallback (the multi-query path used when the
     /// series has no MAL id) returns a positive id from Kitsu's own id
     /// space. If that id differs from tracked.anilist_id, the match
