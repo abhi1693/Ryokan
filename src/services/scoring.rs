@@ -533,6 +533,228 @@ mod tests {
         );
     }
 
+    // ─── Stretch tests from PLAN.md Item 2 deferred ─────────────────
+    //
+    // The original boundary-table tests pinned the seeders / downloads /
+    // compact-batch comparison ladders. These additions extend the
+    // coverage to the encoding-keyword chain, dual-audio detection,
+    // preferred-resolution match, and the legacy `score_result` wrapper.
+    // Each test isolates one branch so mutating one `||` to `&&` or
+    // dropping one `!` produces an observable score change.
+
+    #[rstest]
+    // Each row is a release-title fragment that triggers ONE keyword
+    // arm in the encoding chain (lines 155-166). Using isolated
+    // fragments — rather than a soup of every keyword — pins each
+    // `||` operator: a mutation flipping one to `&&` would require
+    // ALL keywords in the chain, breaking the case that was relying
+    // on this single match.
+    #[case::ten_bit_word("[G] Show 01 10bit.mkv")]
+    #[case::ten_bit_hyphen("[G] Show 01 10-bit.mkv")]
+    #[case::x265("[G] Show 01 x265.mkv")]
+    #[case::hevc("[G] Show 01 HEVC.mkv")]
+    #[case::bluray("[G] Show 01 BluRay.mkv")]
+    #[case::blu_ray_hyphen("[G] Show 01 Blu-Ray.mkv")]
+    #[case::bdrip("[G] Show 01 BDRip.mkv")]
+    #[case::space_bd_space("[G] Show 01 BD 1080p.mkv")]
+    #[case::starts_with_bd("BD Show 01.mkv")]
+    #[case::bracket_bd("[BD] Show 01.mkv")]
+    #[case::paren_bd("(BD) Show 01.mkv")]
+    fn encoding_keyword_each_alone_triggers_quality_bonus(#[case] title: &str) {
+        // Each isolated keyword must produce the +5 "Encoding / Source
+        // Quality" component. With seeders=0 (not in any seeder band),
+        // the only positive delta will be this bonus, plus -10 zero-
+        // seeders. Total should be -5.
+        let mut r = result(0, title);
+        r.is_batch = false;
+        r.is_trusted = false;
+        r.downloads = 0;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        let encoding = parts
+            .iter()
+            .find(|c| c.label == "Encoding / Source Quality");
+        assert!(
+            encoding.is_some(),
+            "title {title:?} must trigger the encoding-quality bonus"
+        );
+        assert_eq!(encoding.unwrap().delta, 5);
+    }
+
+    #[test]
+    fn encoding_keyword_no_match_skips_quality_bonus() {
+        // Sanity: a release with NO encoding token in the title gets
+        // no Encoding component at all. Pins the negative case so the
+        // chain stays a guarded gate — without this, an `||` to `&&`
+        // mutation flipping every match arm to AND-required would
+        // never fire and look like a no-op.
+        let r = result(0, "[G] Show 01 (1080p).mkv");
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert!(
+            parts.iter().all(|c| c.label != "Encoding / Source Quality"),
+            "no encoding keyword in title — bonus must not fire"
+        );
+    }
+
+    #[rstest]
+    // Each case isolates one of the six dual-audio variants at lines
+    // 182-187. Same `||`-chain shape as the encoding-keyword test.
+    #[case::dual_audio_space("[G] Show 01 Dual Audio.mkv")]
+    #[case::dual_audio_dot("[G] Show 01 Dual.Audio.mkv")]
+    #[case::multi_audio_space("[G] Show 01 Multi Audio.mkv")]
+    #[case::multi_audio_dot("[G] Show 01 Multi.Audio.mkv")]
+    #[case::multi_audio_hyphen("[G] Show 01 Multi-Audio.mkv")]
+    #[case::multiaudio("[G] Show 01 Multiaudio.mkv")]
+    fn dual_audio_keyword_each_alone_triggers_dub_penalty(#[case] title: &str) {
+        let r = result(0, title);
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        let dub = parts.iter().find(|c| c.label == "Dub / Dual Audio Penalty");
+        assert!(
+            dub.is_some(),
+            "title {title:?} must trigger the dub/dual penalty"
+        );
+        assert_eq!(dub.unwrap().delta, -15, "dub penalty must be exactly -15");
+    }
+
+    #[rstest]
+    // The is_dub final assembly at line 193:
+    //     is_dual || DUB_RE.is_match(&lower) || lower.contains("english dub")
+    // Pin the two `||` operators by exercising each path individually
+    // without the dual-audio case (already covered above).
+    #[case::dub_word("[G] Show 01 Dub.mkv")]
+    #[case::dubbed_word("[G] Show 01 Dubbed.mkv")]
+    #[case::english_dub_literal("[G] Show 01 English Dub.mkv")]
+    fn dub_word_or_english_dub_phrase_triggers_penalty(#[case] title: &str) {
+        let r = result(0, title);
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert!(
+            parts.iter().any(|c| c.label == "Dub / Dual Audio Penalty"),
+            "title {title:?} must be detected as dub/dual"
+        );
+    }
+
+    #[test]
+    fn dub_inverts_to_bonus_when_user_prefers_dubs() {
+        // prefer_subs=false flips the penalty into a bonus. Pin exact
+        // values on both sides so a `delete -` on either branch is
+        // observable (line 198 for the penalty side).
+        let r = result(0, "[G] Show 01 English Dub.mkv");
+
+        let (_, parts_subs) = score_result_with_breakdown(&r, &opts(), true);
+        let penalty = parts_subs
+            .iter()
+            .find(|c| c.label == "Dub / Dual Audio Penalty")
+            .expect("penalty present");
+        assert_eq!(penalty.delta, -15);
+
+        let (_, parts_dubs) = score_result_with_breakdown(&r, &opts(), false);
+        let bonus = parts_dubs
+            .iter()
+            .find(|c| c.label == "Dub / Dual Audio Bonus")
+            .expect("bonus present");
+        assert_eq!(bonus.delta, 15);
+    }
+
+    #[rstest]
+    // Pin all three branches of `if !opts.preferred_resolution.is_empty()
+    // && r.resolution == opts.preferred_resolution` at line 135:
+    //   * empty preferred → no bonus regardless of release resolution
+    //     (catches `delete !`)
+    //   * non-empty preferred matching release → +20 (catches `==`/`!=`)
+    //   * non-empty preferred mismatched against release → no bonus
+    //     (catches `&&`/`||`)
+    #[case::empty_preferred_skipped("", "1080p", false)]
+    #[case::matching_preferred_adds_20("1080p", "1080p", true)]
+    #[case::mismatched_preferred_skipped("720p", "1080p", false)]
+    fn preferred_resolution_match_pins_guard_and_equality(
+        #[case] preferred: &str,
+        #[case] release_resolution: &str,
+        #[case] expect_bonus: bool,
+    ) {
+        let mut r = result(0, "[G] Show - 01");
+        r.resolution = release_resolution.to_string();
+        let opts_case = SearchOptions {
+            preferred_resolution: preferred.to_string(),
+            ..SearchOptions::default()
+        };
+        let (_total, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let pr = parts.iter().find(|c| c.label == "Preferred Resolution");
+        if expect_bonus {
+            assert_eq!(
+                pr.expect("Preferred Resolution must be present").delta,
+                20,
+                "matching preferred must add exactly +20"
+            );
+        } else {
+            assert!(
+                pr.is_none(),
+                "no Preferred Resolution component when guard is closed"
+            );
+        }
+    }
+
+    #[test]
+    fn non_preferred_group_penalty_is_exactly_minus_15() {
+        // Pin line 121's `delete -` on -15. The release has a
+        // [Group] tag that's NOT in the preferred list, so the
+        // "Non-Preferred Group" branch fires.
+        let mut r = result(50, "[OtherGroup] Show - 01.mkv");
+        r.group = "OtherGroup".to_string();
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Kaizoku".to_string(), "smol".to_string()],
+            ..SearchOptions::default()
+        };
+        let (_, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let np = parts
+            .iter()
+            .find(|c| c.label == "Non-Preferred Group")
+            .expect("Non-Preferred Group present");
+        assert_eq!(np.delta, -15, "non-preferred-group penalty must be -15");
+    }
+
+    #[test]
+    fn no_group_tag_penalty_is_exactly_minus_10() {
+        // Pin line 128's `delete -` on -10. The release has an empty
+        // group field, so the "No Group Tag" branch fires.
+        let mut r = result(50, "Show - 01.mkv");
+        r.group = String::new();
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Kaizoku".to_string()],
+            ..SearchOptions::default()
+        };
+        let (_, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let ng = parts
+            .iter()
+            .find(|c| c.label == "No Group Tag")
+            .expect("No Group Tag present");
+        assert_eq!(ng.delta, -10, "no-group-tag penalty must be -10");
+    }
+
+    #[test]
+    fn score_result_wrapper_delegates_to_with_sub_pref_true() {
+        // Pin line 52's `pub fn score_result(...) -> i32` against the
+        // three return-substitution mutations (0 / 1 / -1). The wrapper
+        // is a one-liner — the cheapest assertion is "calling it
+        // produces the same value as calling the explicit prefer_subs
+        // form with true."
+        let mut r = result(75, "[Group] Show - 01 (1080p) [BluRay].mkv");
+        r.group = "Group".to_string();
+        r.downloads = 3000;
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Group".to_string()],
+            preferred_resolution: "1080p".to_string(),
+            ..SearchOptions::default()
+        };
+        let via_wrapper = score_result(&r, &opts_case);
+        let via_explicit = score_result_with_sub_pref(&r, &opts_case, true);
+        assert_eq!(via_wrapper, via_explicit);
+        // And the value is non-trivial — replacing with 0/1/-1 would
+        // not match any of those.
+        assert!(
+            via_wrapper.abs() > 1,
+            "wrapper score must be non-trivial (got {via_wrapper})"
+        );
+    }
+
     #[test]
     fn apply_cf_breakdown_noop_with_empty_cf_list() {
         let mut r = result(30, "[Group] Series - 01 (1080p)");
