@@ -1442,6 +1442,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn download_parse_and_persist_200_with_only_etag_persists_meta() {
+        // Pin the line 677 `||` operator. Test sends ONLY ETag (no
+        // Last-Modified). With original `||`, meta gets persisted
+        // (one validator present is enough). With mutated `&&`, meta
+        // would NOT be persisted (both required).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let body_bytes = serde_json::to_vec(&serde_json::json!({
+            "tmdb_show:1:s1": {"anilist:1": {}}
+        }))
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"only-etag\"")
+                    .set_body_bytes(body_bytes),
+            )
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        download_parse_and_persist().await.expect("succeeds");
+        let meta = read_disk_cache_meta()
+            .expect("meta must be persisted when at least one validator is present");
+        assert_eq!(meta.etag.as_deref(), Some("\"only-etag\""));
+        assert!(meta.last_modified.is_none());
+    }
+
+    #[tokio::test]
+    async fn download_parse_and_persist_304_with_only_last_modified_refreshes_meta() {
+        // Pin the line 617 `||` operator. 304 response carries ONLY
+        // Last-Modified (no ETag). Original `||` persists the
+        // refreshed Last-Modified; mutated `&&` would skip the write,
+        // leaving the disk meta at its pre-304 value.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .respond_with(
+                ResponseTemplate::new(304)
+                    .insert_header("Last-Modified", "Wed, 03 Apr 2025 00:00:00 GMT"),
+            )
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        // Pre-seed cache + a meta with the OLD Last-Modified.
+        let cached_bytes = serde_json::to_vec(&serde_json::json!({
+            "tmdb_show:99:s1": {"anilist:111": {}}
+        }))
+        .unwrap();
+        write_disk_cache(&cached_bytes).expect("seed cache");
+        write_disk_cache_meta(&DiskCacheMeta {
+            etag: Some("\"v1\"".into()),
+            last_modified: Some("Mon, 01 Apr 2025 00:00:00 GMT".into()),
+        })
+        .expect("seed meta");
+
+        download_parse_and_persist().await.expect("304 succeeds");
+        // Meta must reflect the REFRESHED Last-Modified from the 304
+        // response, not the pre-seeded one. ETag is unchanged from
+        // the response (None) — the function rewrites the entire
+        // meta blob with whatever the response provided.
+        let meta = read_disk_cache_meta().expect("meta still present after 304");
+        assert_eq!(
+            meta.last_modified.as_deref(),
+            Some("Wed, 03 Apr 2025 00:00:00 GMT"),
+            "304 path must persist refreshed Last-Modified even without ETag"
+        );
+    }
+
+    #[tokio::test]
     async fn download_parse_and_persist_5xx_path_returns_error() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
