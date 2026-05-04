@@ -16,13 +16,11 @@ rust-version = "1.95"
 # without the helpers. CI flips it on for the test step.
 test-support = []
 
-# Browser-driving e2e tests for the HTMX migration (issue #129). Opt-in
-# because they require a running geckodriver (or chromedriver) on
-# localhost:4444 + a Firefox/LibreWolf binary, and pull `fantoccini`
-# into the dev-dep tree. NOT enabled in CI — they're a local-iteration
-# tool to drive the migration faster, and the plan is to remove this
-# infrastructure (feature flag, dev-dep, test target) once the HTMX
-# migration is complete. Run locally with:
+# Browser-driving e2e tests for HTMX UI flows. Opt-in because they
+# require a running geckodriver (or chromedriver) on localhost:4444
+# + a Firefox/LibreWolf binary, and pull `fantoccini` into the
+# dev-dep tree. NOT enabled in CI — they're a local-iteration tool.
+# Run locally with:
 #   geckodriver --port=4444 &
 #   cargo test --features browser-e2e --test htmx_browser_e2e
 browser-e2e = ["dep:fantoccini"]
@@ -144,7 +142,6 @@ axum = { version = "0.8", features = ["macros"] }
 # can return either full pages (regular nav) or HTML fragments
 # (HTMX swap target) based on the `HX-Request: true` header. Lives at
 # `services/htmx_response.rs` for the project's helper conventions.
-# Issue #129 (HTMX migration).
 axum-htmx = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
@@ -247,14 +244,12 @@ ammonia = "4"
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
 anitomy = "0.2"
 
-# fantoccini: WebDriver client for browser-driven e2e tests of the
-# HTMX migration (issue #129). `optional = true` + the `browser-e2e`
-# feature gate means the dep only enters the build graph when
-# explicitly opted in — `cargo build` / `cargo test` (without the
-# flag) don't pull it, so prod and CI stays unaffected. Listed here
-# rather than in [dev-dependencies] because Cargo doesn't allow
-# optional dev-deps. The `browser-e2e` feature is planned to be
-# removed once the HTMX migration is complete; this dep goes with it.
+# fantoccini: WebDriver client for browser-driven e2e tests of HTMX
+# UI flows. `optional = true` + the `browser-e2e` feature gate means
+# the dep only enters the build graph when explicitly opted in —
+# `cargo build` / `cargo test` (without the flag) don't pull it, so
+# prod and CI stay unaffected. Listed here rather than in
+# [dev-dependencies] because Cargo doesn't allow optional dev-deps.
 fantoccini = { version = "0.22", optional = true }
 
 [dev-dependencies]
