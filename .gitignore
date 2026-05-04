@@ -8,4 +8,9 @@
 /.claude/*
 !/.claude/agents/
 !/.claude/skills/
-mutants.out/
+# cargo-mutants outputs. The wildcard catches both the canonical
+# `mutants.out/` and the timestamped siblings produced when a run is
+# preserved before re-running (`mutants.out.pre-pull/` etc.). The
+# `mutants-*.log` rule covers the tee'd run logs.
+mutants.out*/
+mutants-*.log
