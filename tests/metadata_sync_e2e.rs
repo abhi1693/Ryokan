@@ -21,7 +21,7 @@
 //!   * `idMal: null` + empty title fields → the AL-failure paths
 //!     (5xx, rate-limit) don't fall back to Jikan / Kitsu.
 
-use ryokan::models::{metadata_cache, series};
+use ryokan::models::{local_metadata, metadata_cache, series};
 use ryokan::services::{anilist, metadata_sync};
 use ryokan::test_support::in_memory_pool;
 use serde_json::json;
@@ -82,6 +82,26 @@ async fn seed_minimal_series(db: &SqlitePool, anilist_id: i64) -> i64 {
     sqlx::query(
         "INSERT INTO series (anilist_id, title, title_romaji, folder_name, status, format) \
          VALUES (?, '', '', '', 'FINISHED', 'MOVIE')",
+    )
+    .bind(anilist_id)
+    .execute(db)
+    .await
+    .unwrap();
+    sqlx::query_scalar::<_, i64>("SELECT id FROM series WHERE anilist_id = ?")
+        .bind(anilist_id)
+        .fetch_one(db)
+        .await
+        .unwrap()
+}
+
+/// TV variant of the seed helper. Format = TV so build_episode_cache's
+/// `episodic_format` gate fires and the function reaches the
+/// jikan/kitsu episode-titles fetch (the surface this file's TV
+/// fixture wants to exercise).
+async fn seed_minimal_series_tv(db: &SqlitePool, anilist_id: i64) -> i64 {
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name, status, format) \
+         VALUES (?, '', '', '', 'FINISHED', 'TV')",
     )
     .bind(anilist_id)
     .execute(db)
@@ -246,6 +266,217 @@ async fn refresh_series_metadata_returns_rate_limit_error_on_al_429() {
 
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+/// AL fixture for a TV-format show that build_episode_cache will
+/// follow up on with a Jikan episodes fetch. `idMal` is set so the
+/// `should_fetch_jikan` branch fires; `episodes: 3` keeps the response
+/// payload + downstream loops short.
+fn tv_media_detail_response(id: i64, mal_id: i64) -> serde_json::Value {
+    json!({
+        "data": {
+            "Media": {
+                "id": id,
+                "idMal": mal_id,
+                "title": {
+                    "romaji": "Test TV Show",
+                    "english": "Test TV Show EN",
+                    "native": "テスト"
+                },
+                "synonyms": [],
+                "coverImage": {
+                    "large": "https://example/cover.jpg",
+                    "extraLarge": "https://example/cover-xl.jpg"
+                },
+                "bannerImage": "https://example/banner.jpg",
+                "format": "TV",
+                "status": "FINISHED",
+                "episodes": 3,
+                "duration": 24,
+                "season": "WINTER",
+                "seasonYear": 2024,
+                "endDate": { "year": 2024 },
+                "description": "TV fixture for the build_episode_cache path.",
+                "genres": ["Action"],
+                "averageScore": 80,
+                "nextAiringEpisode": null,
+                "streamingEpisodes": [],
+                "relations": { "edges": [] }
+            }
+        }
+    })
+}
+
+#[tokio::test]
+async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
+    // Drives the build_episode_cache path that the existing happy-path
+    // test (MOVIE format) deliberately skips. With format=TV +
+    // idMal=Some(...), `should_fetch_jikan` fires and the function
+    // hits Jikan for the per-episode titles. Pins the
+    //
+    //     jikan_eps.remove(&ep_num).map(...).or_else(...)
+    //
+    // merge ladder at line ~304: the Jikan title takes precedence
+    // when present, the fallback chain only fires when Jikan is empty.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(tv_media_detail_response(5555, 99999)),
+        )
+        .mount(&mock)
+        .await;
+
+    // Jikan episodes fixture — 3 episodes with distinct titles so the
+    // assertions can verify the per-episode title round-trips.
+    Mock::given(method("GET"))
+        .and(path("/anime/99999/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "mal_id": 1, "episode_id": 1, "title": "Pilot Episode",
+                  "aired": "2024-01-01T00:00:00+00:00" },
+                { "mal_id": 2, "episode_id": 2, "title": "Second Steps",
+                  "aired": "2024-01-08T00:00:00+00:00" },
+                { "mal_id": 3, "episode_id": 3, "title": "Resolution",
+                  "aired": "2024-01-15T00:00:00+00:00" },
+            ]
+        })))
+        .mount(&mock)
+        .await;
+
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series_tv(&db, 5555).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+
+    let detail = metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("TV refresh should succeed against the wiremock fixture");
+    assert_eq!(detail.id, 5555);
+    assert_eq!(detail.format, "TV");
+    assert_eq!(detail.id_mal, Some(99999));
+
+    // The episode cache must round-trip the Jikan titles.
+    let episodes = local_metadata::get_episode_map_for_series(&db, series_id)
+        .await
+        .expect("episode-map fetch");
+    assert_eq!(episodes.len(), 3, "all 3 episodes must be cached");
+    assert_eq!(
+        episodes.get(&1).map(|e| e.title.as_str()),
+        Some("Pilot Episode")
+    );
+    assert_eq!(
+        episodes.get(&2).map(|e| e.title.as_str()),
+        Some("Second Steps")
+    );
+    assert_eq!(
+        episodes.get(&3).map(|e| e.title.as_str()),
+        Some("Resolution")
+    );
+    // Source label must be `jikan` since that's where the title came
+    // from. Pins the per-episode source-attribution column the UI
+    // uses to badge "from MAL/Jikan" vs "from AL/Kitsu/series".
+    assert_eq!(
+        episodes.get(&1).map(|e| e.source.as_str()),
+        Some("jikan"),
+        "Jikan-sourced episodes must be tagged accordingly"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
+async fn refresh_series_metadata_tv_format_falls_back_to_series_title_when_jikan_empty() {
+    // When Jikan returns no episodes (e.g. the show isn't indexed in
+    // MAL despite an idMal being set), build_episode_cache's per-
+    // episode loop falls through to the empty `local` branch and the
+    // fallback_title kicks in. For TV format with episodes > 1, the
+    // fallback_title is empty (line ~272: `String::new()` because the
+    // ep_count > 1 branch doesn't compute one). This pins the empty-
+    // title default — episodes still get cached, but with empty
+    // titles instead of Jikan ones.
+    //
+    // The mutation surface here is the `if ep_count <= 1` guard at
+    // line 264 of metadata_sync.rs and the fallback ladder around it.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(tv_media_detail_response(6666, 88888)),
+        )
+        .mount(&mock)
+        .await;
+    // Jikan returns empty data — no episodes cached upstream.
+    Mock::given(method("GET"))
+        .and(path("/anime/88888/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&mock)
+        .await;
+    // Kitsu also returns no candidates — without this, `best_candidate`
+    // hits real kitsu.io and may match something for "Test TV Show",
+    // which would feed the kitsu_eps merge ladder with "Episode N"
+    // synthetic titles (kitsu.rs:594) and break the fallback assertion.
+    Mock::given(method("GET"))
+        .and(path("/anime"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .mount(&mock)
+        .await;
+
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series_tv(&db, 6666).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("TV refresh succeeds even when Jikan has no episodes");
+
+    let episodes = local_metadata::get_episode_map_for_series(&db, series_id)
+        .await
+        .expect("episode-map fetch");
+    assert_eq!(episodes.len(), 3, "episode rows must still be created");
+    // Empty titles, source tagged as the series-level fallback.
+    for ep_num in 1..=3 {
+        let ep = episodes.get(&ep_num).expect("episode row present");
+        assert!(
+            ep.title.is_empty(),
+            "TV episode without Jikan title must be empty (got {:?})",
+            ep.title
+        );
+        assert_eq!(
+            ep.source.as_str(),
+            "series",
+            "fallback rows must be tagged 'series'"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
     }
     anilist::reset_state_for_tests();
 }
