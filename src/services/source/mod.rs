@@ -1126,6 +1126,7 @@ pub(crate) fn contains_word(haystack: &str, needle: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
 
     fn ev(src: Source, conf: f32, origin: Origin) -> SourceEvidence {
         SourceEvidence::new(src, conf, origin, "")
@@ -1794,5 +1795,300 @@ mod tests {
         // one. The classifier's structural correctness is what this
         // test exercises; the side-effect-to-logs contract belongs in
         // a needs_review-specific test (covered separately).
+    }
+
+    // ─── classify_release_sync ──────────────────────────────────────
+    //
+    // Pure-synchronous variant used by upgrade-detection. The two
+    // mutations missed by the audit:
+    //   * line 744: `filename.resolution != Resolution::Unknown`
+    //     flipped to `==` would fall through to the resolution_hint
+    //     branch even when the filename parsed a real resolution.
+    //   * line 753: `result.source == Source::Web` flipped to `!=`
+    //     would skip web_kind propagation for actual WEB releases
+    //     and propagate it for non-WEB ones.
+
+    #[test]
+    fn classify_release_sync_uses_filename_resolution_over_hint() {
+        // Title parses to 1080p; the hint argument should be ignored
+        // because the filename signal wins. Mutating the `!=` to `==`
+        // would invert this — the hint would only apply when filename
+        // succeeded, which is the opposite of intent.
+        let r = classify_release_sync(
+            "[Group] Show - 01 (1080p) [BluRay].mkv",
+            Some("720p"), // hint deliberately wrong
+        );
+        assert_eq!(
+            r.resolution,
+            Resolution::R1080p,
+            "filename's 1080p must win over the 720p hint"
+        );
+    }
+
+    #[test]
+    fn classify_release_sync_falls_back_to_hint_only_when_filename_unknown() {
+        // No resolution token in the title — hint takes over.
+        let r = classify_release_sync("[Group] Show - 01.mkv", Some("1080p"));
+        assert_eq!(r.resolution, Resolution::R1080p, "hint must fill the gap");
+    }
+
+    #[test]
+    fn classify_release_sync_propagates_web_kind_only_when_source_is_web() {
+        // BluRay source must NOT carry a web_kind. Pin the
+        // `result.source == Source::Web` guard at line 753.
+        let bd = classify_release_sync("[Group] Show - 01 [BluRay].mkv", None);
+        assert_eq!(bd.source, Source::BluRay);
+        assert_eq!(
+            bd.web_kind,
+            WebKind::Unknown,
+            "non-WEB source must not propagate web_kind"
+        );
+
+        // WEB-DL source DOES carry web_kind.
+        let web = classify_release_sync("[Group] Show - 01 (WEB-DL 1080p).mkv", None);
+        assert_eq!(web.source, Source::Web);
+        assert_eq!(
+            web.web_kind,
+            WebKind::WebDl,
+            "WEB source propagates web_kind"
+        );
+    }
+
+    // ─── score_classification ───────────────────────────────────────
+    //
+    // 56 missed mutants in the audit — every threshold check, every
+    // arithmetic operator, every band boost was unpinned. Build a
+    // minimal ClassificationResult fixture and pin each rule with a
+    // boundary case on each side.
+
+    fn cls(source: Source, resolution: Resolution) -> ClassificationResult {
+        ClassificationResult {
+            source,
+            resolution,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::Unknown,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: vec![],
+            decision_rule: DecisionRule::Empty,
+        }
+    }
+
+    #[test]
+    fn score_classification_unknown_unknown_returns_negative_five() {
+        // Pin the early-return at line 998. Mutating the `&&` to `||`
+        // would fire the early return on either-Unknown, which would
+        // mis-handle "WEB but unknown resolution" releases.
+        let c = cls(Source::Unknown, Resolution::Unknown);
+        assert_eq!(
+            score_classification(
+                &c,
+                Source::BluRay,
+                Resolution::R1080p,
+                Source::Web,
+                Resolution::R720p
+            ),
+            -5
+        );
+    }
+
+    /// Scoring walk for `score_classification` against a fixed
+    /// reference profile (preferred BluRay/1080p, cutoff Web/720p) so
+    /// the rstest cases below can stay terse. Walking through every
+    /// branch in the function and asserting the *exact* total is what
+    /// catches every arithmetic-operator mutation cargo-mutants
+    /// generates (`+=` → `-=`/`*=`, `-` → `+`/`/`, etc.) — assertions
+    /// that only check relative ordering let those mutations slip
+    /// through because the directional inequality survives even when
+    /// the magnitudes are wildly wrong.
+    #[rstest]
+    // Source: Unknown=0, Tv=1, Hdtv=2, Dvd=3, Web=4, BluRay=5
+    // Resolution: Unknown=0, R480p=1, R576p=2, R720p=3, R1080p=4, R2160p=5
+    //
+    // BluRay/R1080p at preferred: res 50 (25+15+10), src 30 (15+10+5) = 80
+    #[case::at_preferred(Source::BluRay, Resolution::R1080p, 80)]
+    // BluRay/R2160p above preferred: res 35 (25+0+10), src 30 = 65
+    #[case::above_preferred_resolution(Source::BluRay, Resolution::R2160p, 65)]
+    // Web/R720p one below: res -10 (-(10+1*10)+10), src -5 (-(5+1*5)+5) = -15
+    #[case::one_band_below(Source::Web, Resolution::R720p, -15)]
+    // Tv/R480p well below: res -40 (-(10+3*10)+0), src -25 (-(5+4*5)+0) = -65
+    #[case::well_below_preferred(Source::Tv, Resolution::R480p, -65)]
+    // Web/Unknown — partial unknown does NOT short-circuit (line 998 `&&` gate).
+    // Resolution Unknown: -10. Source Web: -10 (gap=1). Cutoff +5. = -15
+    #[case::partial_unknown_resolution(Source::Web, Resolution::Unknown, -15)]
+    // Unknown/R720p — partial unknown the other way.
+    // Resolution -10 (gap=1, +10 cutoff). Source Unknown: -5. = -15
+    #[case::partial_unknown_source(Source::Unknown, Resolution::R720p, -15)]
+    fn score_classification_walks_match_documented_rules(
+        #[case] source: Source,
+        #[case] resolution: Resolution,
+        #[case] expected: i32,
+    ) {
+        let c = cls(source, resolution);
+        let s = score_classification(
+            &c,
+            Source::BluRay,
+            Resolution::R1080p,
+            Source::Web,
+            Resolution::R720p,
+        );
+        assert_eq!(
+            s, expected,
+            "scoring rule walk failed for ({source:?}, {resolution:?})"
+        );
+    }
+
+    #[test]
+    fn score_classification_remux_and_bdmv_premiums_only_when_preferring_bluray() {
+        // BD premiums fire only when preferred_source >= BluRay (line 1050).
+        // Asserting EXACT post-premium values pins both the gate and
+        // the `+= 7` / `+= 5` arithmetic. Mutating `+=` to `*=` or `-=`
+        // would multiply / negate the partial sum (~80) instead of
+        // adding the small bonus, producing a wildly different total
+        // that exact-equality catches but a relative `s_bdmv > s_remux`
+        // assertion would miss.
+        let resolution = Resolution::R1080p;
+        let plain = cls(Source::BluRay, resolution);
+        let mut remux = plain.clone();
+        remux.is_remux = true;
+        let mut bdmv = plain.clone();
+        bdmv.is_bdmv = true;
+
+        // When preferring BluRay (gate fires).
+        // Reference: plain BD@1080p = 80 (from the walk table above).
+        let s_plain =
+            score_classification(&plain, Source::BluRay, resolution, Source::Web, resolution);
+        let s_remux =
+            score_classification(&remux, Source::BluRay, resolution, Source::Web, resolution);
+        let s_bdmv =
+            score_classification(&bdmv, Source::BluRay, resolution, Source::Web, resolution);
+        assert_eq!(s_plain, 80, "plain BD@1080p baseline");
+        assert_eq!(s_remux, 85, "remux adds exactly +5 (line 1054)");
+        assert_eq!(s_bdmv, 87, "BDMV adds exactly +7 (line 1052)");
+
+        // When preferring WEB (gate skips premiums).
+        // BluRay/R1080p with prefer Web/R1080p, cutoff Tv/R720p:
+        // res 50, src (15+0+5)=20 → 70 base, no BD premium.
+        let s_plain_w =
+            score_classification(&plain, Source::Web, resolution, Source::Tv, resolution);
+        let s_remux_w =
+            score_classification(&remux, Source::Web, resolution, Source::Tv, resolution);
+        let s_bdmv_w = score_classification(&bdmv, Source::Web, resolution, Source::Tv, resolution);
+        assert_eq!(s_plain_w, 70, "plain BluRay scoring against Web preference");
+        assert_eq!(s_remux_w, 70, "remux premium gated off when preferring Web");
+        assert_eq!(s_bdmv_w, 70, "BDMV premium gated off when preferring Web");
+    }
+
+    #[test]
+    fn score_classification_web_kind_subtier_pin() {
+        // Lines 1064-1069: WebDl gets +3, WebRip gets -1, Unknown
+        // contributes 0. Mutating the match arms would shift the
+        // ordering of WEB-DL vs WEBRip releases at the same source/
+        // resolution.
+        let resolution = Resolution::R1080p;
+        let mut webdl = cls(Source::Web, resolution);
+        webdl.web_kind = WebKind::WebDl;
+        let mut webrip = cls(Source::Web, resolution);
+        webrip.web_kind = WebKind::WebRip;
+        let mut webunk = cls(Source::Web, resolution);
+        webunk.web_kind = WebKind::Unknown;
+
+        let pref_source = Source::Web;
+        let pref_res = resolution;
+        let cutoff_s = Source::Tv;
+        let cutoff_r = Resolution::R720p;
+
+        let s_dl = score_classification(&webdl, pref_source, pref_res, cutoff_s, cutoff_r);
+        let s_rip = score_classification(&webrip, pref_source, pref_res, cutoff_s, cutoff_r);
+        let s_unk = score_classification(&webunk, pref_source, pref_res, cutoff_s, cutoff_r);
+        assert_eq!(s_dl - s_unk, 3, "WebDl bonus must be exactly +3");
+        assert_eq!(s_rip - s_unk, -1, "WebRip penalty must be exactly -1");
+    }
+
+    #[test]
+    fn score_classification_needs_review_penalty_pin() {
+        // Line 1075-1077: needs_review = true subtracts exactly 3.
+        let mut clean = cls(Source::BluRay, Resolution::R1080p);
+        clean.needs_review = false;
+        let mut review = clean.clone();
+        review.needs_review = true;
+
+        let pref_source = Source::BluRay;
+        let pref_res = Resolution::R1080p;
+        let cutoff_s = Source::Web;
+        let cutoff_r = Resolution::R720p;
+
+        let s_clean = score_classification(&clean, pref_source, pref_res, cutoff_s, cutoff_r);
+        let s_review = score_classification(&review, pref_source, pref_res, cutoff_s, cutoff_r);
+        assert_eq!(
+            s_clean - s_review,
+            3,
+            "needs_review penalty must be exactly -3 (s_clean={s_clean} s_review={s_review})"
+        );
+    }
+
+    // ─── contains_word ──────────────────────────────────────────────
+    //
+    // Word-boundary substring search shared between filename and
+    // directory layers. Pin all 6 missed mutants:
+    //   * 1105: `hb.len() < nb.len()` length-guard
+    //   * 1111: `i == 0` left-boundary special case
+    //   * 1112: `i + nb.len() == hb.len()` right-boundary special case
+    //   * 1112: the `+` arithmetic in the right-boundary calc
+    //   * 1113: `&&` joining left_ok and right_ok
+
+    #[test]
+    fn contains_word_returns_false_when_haystack_shorter_than_needle() {
+        // Pin line 1105's length guard. Mutating `<` to `==` would
+        // still false-out for shorter haystacks but accept equal-length
+        // ones; mutating to `<=` would flip the equal-length case.
+        assert!(!contains_word("ab", "abcd"));
+        // Boundary: equal length and a real match should succeed.
+        assert!(contains_word("flac", "flac"));
+        // Boundary: equal length but mismatch should still be false.
+        assert!(!contains_word("xxxx", "flac"));
+    }
+
+    #[test]
+    fn contains_word_matches_at_start_with_left_boundary() {
+        // Pin line 1111's `i == 0` left-boundary special case.
+        // Mutating to `!=` would reject matches at position 0.
+        assert!(contains_word("flac on the start", "flac"));
+        assert!(contains_word("FLAC matches case-insensitively", "flac"));
+    }
+
+    #[test]
+    fn contains_word_matches_at_end_with_right_boundary() {
+        // Pin line 1112's `i + nb.len() == hb.len()` right-boundary
+        // special case. Also pins the `+` mutation: replacing with
+        // `*` would compute i*nb.len() instead of i+nb.len(), so a
+        // legitimate end-of-haystack match would be rejected.
+        assert!(contains_word("ends in flac", "flac"));
+        // Edge: i=0 AND i+nb.len()=hb.len() (whole-haystack match)
+        // already covered by length-equal case above.
+    }
+
+    #[test]
+    fn contains_word_rejects_alpha_boundary_on_either_side() {
+        // Pin line 1113's `&&` joining left_ok and right_ok. Mutating
+        // to `||` would accept matches with an alpha neighbor on
+        // ONE side (just not both).
+        // Alpha LEFT, non-alpha right (digit) → reject.
+        assert!(!contains_word("lemonflac01", "flac"));
+        // Non-alpha left (space), alpha RIGHT → reject.
+        assert!(!contains_word("the flacburst was loud", "flac"));
+        // Both alpha → reject.
+        assert!(!contains_word("xflacx", "flac"));
+        // Neither alpha (digit, digit) → accept.
+        assert!(contains_word("x264_2flac_2ch", "flac"));
+    }
+
+    #[test]
+    fn contains_word_empty_needle_returns_false() {
+        // Defensive: empty needle returns false at line 1101.
+        // Without this guard, the while-loop would do hb.len() comparisons
+        // against zero-length matches at every position and return true.
+        assert!(!contains_word("anything goes here", ""));
     }
 }
