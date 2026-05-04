@@ -654,6 +654,362 @@ mod crud_ci {
     }
 }
 
+// ─── remove_series path-safety + cleanup integrity ────────────
+//
+// Mutation-testing audit (mutants.out.pre-pull) flagged the
+// folder-cleanup branch in `remove_series` as the densest
+// concentration of undetected mutants in the file (36/42 = 86%
+// missed). Every guard in the if-let cascade at lines 366-407 of
+// crud/mod.rs survived a hostile mutation, including the
+// path-traversal `starts_with(&media_root_canon)` match guard at
+// line 373 — a CVE-shape bug if it ever flipped. These tests pin
+// the surface end-to-end: traversal refused, happy-path removes,
+// missing-folder reports correctly, both empty-string guards
+// short-circuit cleanup, and the success counter matches actual
+// `delete()` calls. See `mutants.out/PLAN.md` Item 1.
+mod remove_series_safety {
+    use super::super::*;
+    use crate::models::config::{Config, save_config};
+    use crate::services::download_client::{
+        AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+    };
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+    use async_trait::async_trait;
+    use axum::extract::State;
+    use axum::response::Json as AxumJson;
+    use std::sync::{Arc, Mutex};
+    use tempfile::TempDir;
+
+    /// Persist a Config row whose `media_root` points at the given
+    /// path. Other fields take their `Default` values; the handler
+    /// only reads `cfg.media_root` from the row.
+    async fn save_media_root(db: &sqlx::SqlitePool, media_root: &str) {
+        let cfg = Config {
+            media_root: media_root.to_string(),
+            ..Default::default()
+        };
+        save_config(db, &cfg).await.expect("save config");
+    }
+
+    /// `seed_series` always sets `folder_name = title`. For the
+    /// empty-string guard tests we need the column actually empty
+    /// after seeding, so this helper UPDATEs it. Seeding directly
+    /// with title="" would also collide with the
+    /// `release_title.trim().is_empty()` guards elsewhere.
+    async fn override_folder_name(db: &sqlx::SqlitePool, series_id: i64, folder_name: &str) {
+        sqlx::query("UPDATE series SET folder_name = ? WHERE id = ?")
+            .bind(folder_name)
+            .bind(series_id)
+            .execute(db)
+            .await
+            .expect("override folder_name");
+    }
+
+    /// Pull `body["folder"]` out of the handler's success JSON.
+    fn folder_status(body: &serde_json::Value) -> &str {
+        body["folder"].as_str().expect("folder field")
+    }
+
+    #[tokio::test]
+    async fn refuses_traversal_when_resolved_path_escapes_media_root() {
+        // CVE-shape: pin the `series_canon.starts_with(&media_root_canon)`
+        // match guard at crud/mod.rs:373. Mutating that guard to `true`
+        // would make any canonicalized path pass the under-root check,
+        // letting a series with `folder_name = "../escape"` recurse
+        // `remove_dir_all` into a directory the operator never
+        // intended to delete.
+        let tmp = TempDir::new().expect("tempdir");
+        let media_root = tmp.path().join("media");
+        let escape = tmp.path().join("escape");
+        std::fs::create_dir(&media_root).unwrap();
+        std::fs::create_dir(&escape).unwrap();
+        // Sentinel file inside the escape target — must survive the
+        // call. canonicalize() requires the path to exist, so the
+        // target dir must be present.
+        let sentinel = escape.join("sentinel.txt");
+        std::fs::write(&sentinel, b"do not delete").unwrap();
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1001, "Show").await;
+        override_folder_name(&db, series_id, "../escape").await;
+        save_media_root(&db, media_root.to_str().unwrap()).await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(folder_status(&resp), "refused");
+        assert!(sentinel.exists(), "escape target must survive");
+        assert!(escape.exists(), "escape dir must survive");
+        assert!(media_root.exists(), "media_root must survive");
+    }
+
+    #[tokio::test]
+    async fn removes_folder_when_under_media_root() {
+        // Happy path. Pins line 373's positive arm + line 374's
+        // remove_dir_all. Without this assertion, a mutation flipping
+        // the match guard to `false` would silently pass — the test
+        // suite already had a "delete returns Ok" test, but no test
+        // asserted the directory was actually gone afterwards.
+        let tmp = TempDir::new().expect("tempdir");
+        let media_root = tmp.path().to_path_buf();
+        let series_dir = media_root.join("Show");
+        std::fs::create_dir(&series_dir).unwrap();
+        let payload = series_dir.join("ep01.mkv");
+        std::fs::write(&payload, b"x").unwrap();
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1002, "Show").await;
+        save_media_root(&db, media_root.to_str().unwrap()).await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(folder_status(&resp), "removed");
+        assert!(!series_dir.exists(), "series dir must be gone");
+        assert!(media_root.exists(), "media_root must survive");
+    }
+
+    #[tokio::test]
+    async fn reports_missing_when_under_root_path_does_not_exist() {
+        // Pins the `Err if err.kind() == NotFound` arm at line 393.
+        // A mutation flipping the kind comparison would route the
+        // missing-folder case to "error" instead of "missing",
+        // confusing the user-facing UI message.
+        let tmp = TempDir::new().expect("tempdir");
+        let media_root = tmp.path().to_path_buf();
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1003, "GhostShow").await;
+        // GhostShow folder is NOT created on disk.
+        save_media_root(&db, media_root.to_str().unwrap()).await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(folder_status(&resp), "missing");
+    }
+
+    #[tokio::test]
+    async fn skips_folder_cleanup_when_folder_name_is_empty() {
+        // Pins line 367's `!tracked.folder_name.trim().is_empty()`
+        // guard. Mutating to drop the `!` would enter the cleanup
+        // block with folder_name="", which joins as `media_root/""`
+        // = media_root itself — `remove_dir_all` would wipe the
+        // operator's media library.
+        let tmp = TempDir::new().expect("tempdir");
+        let media_root = tmp.path().to_path_buf();
+        let sentinel = media_root.join("DO_NOT_DELETE.txt");
+        std::fs::write(&sentinel, b"library content").unwrap();
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1004, "Show").await;
+        override_folder_name(&db, series_id, "").await;
+        save_media_root(&db, media_root.to_str().unwrap()).await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(
+            folder_status(&resp),
+            "skipped",
+            "empty folder_name must short-circuit folder cleanup"
+        );
+        assert!(sentinel.exists(), "media_root content must survive");
+        assert!(media_root.exists(), "media_root must survive");
+    }
+
+    #[tokio::test]
+    async fn skips_folder_cleanup_when_media_root_is_empty() {
+        // Pins line 368's `!cfg.media_root.trim().is_empty()` guard.
+        // Mutating to drop the `!` would enter the cleanup block
+        // with media_root="" — `Path::new("").join("Show")` is a
+        // relative "Show", canonicalized against CWD. Wherever CWD
+        // points (the cargo workspace during tests), an unintended
+        // deletion would land.
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1005, "Show").await;
+        save_media_root(&db, "").await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(
+            folder_status(&resp),
+            "skipped",
+            "empty media_root must short-circuit folder cleanup"
+        );
+    }
+
+    /// Records every `delete()` call so 1b can assert the success
+    /// counter equals the number of distinct hashes the handler
+    /// asked to remove. Other trait methods return defaults — the
+    /// handler doesn't call them on the remove path.
+    #[derive(Default)]
+    struct RecordingClient {
+        deletes: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl DownloadClient for RecordingClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("mock".into())
+        }
+        async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+            Ok(AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<SelectiveOutcome, String> {
+            Ok(SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, hash: &str, _delete_files: bool) -> Result<(), String> {
+            self.deletes.lock().unwrap().push(hash.to_string());
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+        fn protocol(&self) -> &'static str {
+            "torrent"
+        }
+    }
+
+    #[tokio::test]
+    async fn torrents_removed_counter_matches_actual_delete_calls() {
+        // Pins the `+= 1` increments at lines 332 and 340. A mutation
+        // flipping `+=` to `-=` or `*=` would produce a count that
+        // diverges from the actual number of `delete()` calls observed
+        // by the recording client. The existing remove_series tests
+        // assert `result.is_ok()` but never inspect torrents_removed.
+        let db = in_memory_pool().await;
+        let series_id = crate::test_support::seed_series(&db, 1006, "Show").await;
+        // Three grabs, three distinct hashes. None hit the
+        // respects_seed_rules early-return (no seed_rule rows exist
+        // in the fresh in-memory DB), so every hash takes the
+        // dispatch branch at line 339-342.
+        for (hash, name, ep) in [
+            ("hash-aaa", "show-01.torrent", 1),
+            ("hash-bbb", "show-02.torrent", 2),
+            ("hash-ccc", "show-03.torrent", 3),
+        ] {
+            crate::test_support::seed_grabbed_torrent(&db, series_id, hash, name, &[ep]).await;
+        }
+
+        // Hold the concrete type so we can inspect `deletes` after the
+        // call; clone-coerce to `Arc<dyn DownloadClient>` for the pool
+        // entry. Same shape as grab_sweep's recording-client pattern.
+        let recorder = Arc::new(RecordingClient::default());
+        let client: Arc<dyn DownloadClient> = recorder.clone();
+        let state = build_test_app_state(db.clone(), Some(client));
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+
+        assert_eq!(
+            resp["torrents_removed"].as_u64(),
+            Some(3),
+            "counter must match the three grabs"
+        );
+        // Cross-check against the recording client — counter and
+        // observable delete() calls should agree.
+        assert_eq!(
+            recorder.deletes.lock().unwrap().len(),
+            3,
+            "client must have received three delete() calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn handles_zero_grabbed_torrents_without_dispatching() {
+        // Pins line 313's `if !hashes.is_empty()` guard. With no grabs,
+        // mutating `delete !` would still leave the for-loop a no-op
+        // (iterating an empty Vec) — so this is potentially an
+        // equivalent mutant. We pin the observable shape anyway: empty
+        // grabs must yield torrents_removed=0 with no errors and folder
+        // cleanup still runs (folder_status="missing" since no dir was
+        // created). If the targeted mutant doesn't flip after this
+        // test, accept it as equivalent and move on.
+        let tmp = TempDir::new().expect("tempdir");
+        let media_root = tmp.path().to_path_buf();
+
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 1007, "EmptyShow").await;
+        save_media_root(&db, media_root.to_str().unwrap()).await;
+        let state = build_test_app_state(db.clone(), None);
+
+        let form = super::super::RemoveSeriesForm {
+            id: series_id,
+            delete_files: Some(true),
+        };
+        let resp = remove_series(State(state), AxumJson(form))
+            .await
+            .expect("handler ok");
+        assert_eq!(resp["torrents_removed"].as_u64(), Some(0));
+        assert_eq!(
+            resp["torrent_errors"].as_array().map(|a| a.len()),
+            Some(0),
+            "no grabs means no per-torrent errors"
+        );
+        // folder cleanup still ran (the dispatch loop guard doesn't
+        // gate folder cleanup), so folder_status reflects the
+        // missing-folder branch.
+        assert_eq!(folder_status(&resp), "missing");
+    }
+}
+
 /// D1 live integration test: removing a series from the library
 /// must also delete every grabbed torrent for that series from
 /// the active download client.
