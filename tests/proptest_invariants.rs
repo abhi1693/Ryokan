@@ -22,12 +22,14 @@
 //! file builds as a normal integration test.
 
 use proptest::prelude::*;
+use ryokan::services::auto_search::parse_release_numbers;
 use ryokan::services::nyaa::{SearchOptions, SearchResult};
 use ryokan::services::scoring::{ScoreComponent, score_result_with_breakdown};
 use ryokan::services::source::{
     self, ClassificationResult, DecisionRule, Resolution, Source, SourceEvidence, WebKind,
     aggregate, score_classification,
 };
+use ryokan::services::source_filename::classify_filename;
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -319,6 +321,130 @@ proptest! {
         } else if a_res.rank() < b_res.rank() {
             prop_assert!(ra < rb);
         }
+    }
+}
+
+// ─── parser-layer fuzz invariants ─────────────────────────────────
+//
+// `services::auto_search::parse_release_numbers` and
+// `services::source_filename::classify_filename` are pure parsers that
+// take arbitrary release-title strings off-the-wire. The most
+// valuable property test for each is "doesn't panic on any input"
+// — random byte sequences, trolling Unicode, deeply-nested brackets,
+// pathological lengths. Plus a few targeted invariants that the
+// parsers' doc comments imply.
+
+proptest! {
+    /// `parse_release_numbers` must never panic. Fuzzes the public
+    /// release-title parser with arbitrary strings; if the regex
+    /// engine, range parsing, or bracket-strip ever overflows /
+    /// out-of-bounds / divides-by-zero on a hostile input, this
+    /// catches it.
+    #[test]
+    fn parse_release_numbers_never_panics_on_any_input(
+        title in ".{0,200}",
+    ) {
+        let _ = parse_release_numbers(&title);
+    }
+
+    /// Stripping bracketed metadata is the documented behavior:
+    /// "[1080p]" / "(2024)" / "{tag}" inside the title must be
+    /// ignored before number extraction. Pin that strict equivalence
+    /// — adding bracketed content around a parseable core must not
+    /// change the parsed episode set.
+    #[test]
+    fn parse_release_numbers_ignores_bracketed_content(
+        episode in 1_i32..=300,
+        bracket_payload in "[a-zA-Z0-9 \\.x]{0,40}",
+    ) {
+        let bare = format!("Show - {episode:02}");
+        let bracketed = format!("[Group] Show - {episode:02} [{bracket_payload}]");
+        let bare_set = parse_release_numbers(&bare);
+        let bracketed_set = parse_release_numbers(&bracketed);
+        prop_assert_eq!(
+            bare_set,
+            bracketed_set,
+            "bracketed metadata must not affect the parsed episode set"
+        );
+    }
+
+    /// Determinism: two calls with the same input return the same
+    /// output. Defends against accidental introduction of internal
+    /// state (a once_cell that gets primed differently across calls,
+    /// or thread-local mutability).
+    #[test]
+    fn parse_release_numbers_is_deterministic(title in ".{0,200}") {
+        let a = parse_release_numbers(&title);
+        let b = parse_release_numbers(&title);
+        prop_assert_eq!(a, b);
+    }
+
+    /// `classify_filename` must never panic. anitomy parses C++ via
+    /// FFI; a malformed input that crashed the C++ side would crash
+    /// the test process. Worth a fuzz pass even at modest case counts.
+    #[test]
+    fn classify_filename_never_panics_on_any_input(
+        title in ".{0,200}",
+    ) {
+        let _ = classify_filename(&title);
+    }
+
+    /// Empty / whitespace-only titles return the documented empty
+    /// classification (`FilenameClassification::empty`). Pin that
+    /// short-circuit so a future refactor doesn't accidentally
+    /// invoke anitomy on whitespace and produce surprising output.
+    #[test]
+    fn classify_filename_empty_or_whitespace_returns_empty(
+        ws in "[ \\t\\r\\n]{0,20}",
+    ) {
+        let result = classify_filename(&ws);
+        prop_assert_eq!(result.resolution, Resolution::Unknown);
+        prop_assert!(!result.is_remux);
+        prop_assert!(!result.is_bdmv);
+        prop_assert_eq!(result.web_kind, WebKind::Unknown);
+        prop_assert!(result.evidence.is_empty());
+    }
+
+    /// `aggregate` must never panic on any combination of evidence,
+    /// confidences, or sources. Random-construct a small evidence
+    /// vec and pass through.
+    #[test]
+    fn aggregate_never_panics_on_any_evidence_combination(
+        sources in proptest::collection::vec(known_source(), 0..6),
+        confidences in proptest::collection::vec(0.0_f32..=1.0, 0..6),
+    ) {
+        // Pair sources with confidences (truncate to the shorter of
+        // the two so the proptest's vec strategies can return
+        // independent lengths).
+        let n = sources.len().min(confidences.len());
+        let evidence: Vec<SourceEvidence> = (0..n)
+            .map(|i| {
+                SourceEvidence::new(
+                    sources[i],
+                    confidences[i],
+                    source::Origin::Filename,
+                    "fuzz",
+                )
+            })
+            .collect();
+        let _ = aggregate(&evidence);
+    }
+
+    /// `aggregate(empty)` always produces Unknown source AND Unknown
+    /// resolution AND empty evidence. Already pinned by
+    /// `aggregate_empty_evidence_is_always_unknown` above for the
+    /// source/resolution dims; this widens the assertion.
+    #[test]
+    fn aggregate_empty_produces_zero_confidence_and_empty_evidence(
+        _filler in any::<bool>(),
+    ) {
+        let result = aggregate(&[]);
+        prop_assert!(result.evidence.is_empty(), "empty input → empty evidence");
+        prop_assert!(
+            result.confidence == 0.0,
+            "empty input → zero confidence (got {})",
+            result.confidence
+        );
     }
 }
 
