@@ -270,6 +270,53 @@ async fn refresh_series_metadata_returns_rate_limit_error_on_al_429() {
     anilist::reset_state_for_tests();
 }
 
+/// MOVIE-format AL response with caller-controlled title fields. The
+/// existing `media_detail_response` hard-codes "Test Movie" / "Test
+/// Movie EN" / "テスト" — handy for the happy-path test, but unable
+/// to exercise the `if !detail.title_english.trim().is_empty() ...
+/// else if !detail.title_romaji ...` fallback chain in
+/// `build_episode_cache`. This lets a test populate any subset of
+/// the three title slots.
+fn movie_detail_response_with_titles(
+    id: i64,
+    romaji: &str,
+    english: &str,
+    native: &str,
+) -> serde_json::Value {
+    json!({
+        "data": {
+            "Media": {
+                "id": id,
+                "idMal": null,
+                "title": {
+                    "romaji": romaji,
+                    "english": english,
+                    "native": native,
+                },
+                "synonyms": [],
+                "coverImage": {
+                    "large": "https://example/cover.jpg",
+                    "extraLarge": "https://example/cover-xl.jpg"
+                },
+                "bannerImage": "https://example/banner.jpg",
+                "format": "MOVIE",
+                "status": "FINISHED",
+                "episodes": 1,
+                "duration": 120,
+                "season": null,
+                "seasonYear": 2020,
+                "endDate": { "year": 2020 },
+                "description": "Title-fallback fixture for build_episode_cache.",
+                "genres": [],
+                "averageScore": null,
+                "nextAiringEpisode": null,
+                "streamingEpisodes": [],
+                "relations": { "edges": [] }
+            }
+        }
+    })
+}
+
 /// AL fixture for a TV-format show that build_episode_cache will
 /// follow up on with a Jikan episodes fetch. `idMal` is set so the
 /// `should_fetch_jikan` branch fires; `episodes: 3` keeps the response
@@ -477,6 +524,107 @@ async fn refresh_series_metadata_tv_format_falls_back_to_series_title_when_jikan
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
         std::env::remove_var("JIKAN_API_BASE");
         std::env::remove_var("RYOKAN_KITSU_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
+async fn refresh_series_metadata_movie_falls_back_to_romaji_when_english_empty() {
+    // Pin line 265's `if !detail.title_english.trim().is_empty()` guard
+    // in build_episode_cache. With title_english = "" and a non-empty
+    // title_romaji, the original code falls through to the romaji
+    // branch (line 267) and writes "Test Romaji" as the episode
+    // title. A `delete !` mutation flips the guard to "fire when
+    // title_english IS empty," which would write the empty string.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(movie_detail_response_with_titles(
+                7001,
+                "Test Romaji",
+                "",
+                "テスト",
+            )),
+        )
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series(&db, 7001).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("refresh");
+
+    let episodes = local_metadata::get_episode_map_for_series(&db, series_id)
+        .await
+        .expect("episode-map fetch");
+    let ep1 = episodes.get(&1).expect("episode 1 present");
+    assert_eq!(
+        ep1.title, "Test Romaji",
+        "empty title_english must fall through to title_romaji"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
+async fn refresh_series_metadata_movie_falls_back_to_native_when_english_and_romaji_empty() {
+    // Pin line 267's `if !detail.title_romaji.trim().is_empty()` guard.
+    // With both english and romaji empty, the chain falls through to
+    // the title_native else-arm (line 270). A `delete !` mutation on
+    // line 267 would prefer the empty title_romaji over the populated
+    // title_native.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(movie_detail_response_with_titles(
+                7002,
+                "",
+                "",
+                "テスト",
+            )),
+        )
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series(&db, 7002).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("refresh");
+
+    let episodes = local_metadata::get_episode_map_for_series(&db, series_id)
+        .await
+        .expect("episode-map fetch");
+    let ep1 = episodes.get(&1).expect("episode 1 present");
+    assert_eq!(
+        ep1.title, "テスト",
+        "both english and romaji empty must fall through to title_native"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
     }
     anilist::reset_state_for_tests();
 }
