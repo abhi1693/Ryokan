@@ -1096,4 +1096,172 @@ mod tests {
             "anime-less entries should not be indexed"
         );
     }
+
+    // ─── Tier 2 deferred — disk-cache helpers ───────────────────────
+    //
+    // The audit flagged 51 missed mutants in this file. Most are in
+    // `download_parse_and_persist`, `build_cache`, `resolve_tmdb_id`,
+    // and the `lookup_*` cache-state readers — all of which require
+    // either a wiremock fixture for the GitHub mappings download or a
+    // populated CACHE state global. Those need fixture infrastructure
+    // that doesn't exist yet (deferred).
+    //
+    // The disk-cache layer (cache_file_path, read_fresh_disk_cache,
+    // write_disk_cache, meta helpers, touch_disk_cache,
+    // read_disk_cache_unconditional) is testable today via tempdir +
+    // RYOKAN_ANIBRIDGE_CACHE_DIR. ~15 mutants worth of low-effort wins.
+    //
+    // nextest runs each #[test] in its own process by default, so env
+    // var sets here don't leak to other tests. `std::env::set_var` is
+    // marked unsafe (Rust 1.74+) because of cross-thread races; in
+    // single-threaded test bodies the call is still sound.
+
+    use std::time::SystemTime;
+
+    /// Set `RYOKAN_ANIBRIDGE_CACHE_DIR` to a fresh tempdir for the
+    /// remainder of the test. Returns the tempdir handle so the
+    /// caller keeps it alive (drops at end-of-fn → cleanup).
+    fn anibridge_cache_tmpdir() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("RYOKAN_ANIBRIDGE_CACHE_DIR", tmp.path());
+        }
+        tmp
+    }
+
+    #[test]
+    fn refresh_interval_constant_is_exactly_24_hours() {
+        // Pin line 18's `24 * 60 * 60` constant. Mutating either `*`
+        // to `/` collapses it to 0 or 24 (instead of 86400), which
+        // would reduce the disk-cache TTL to either zero (re-download
+        // every refresh) or 24s (re-download per minute).
+        assert_eq!(REFRESH_INTERVAL, std::time::Duration::from_secs(86400));
+    }
+
+    #[test]
+    fn cache_file_path_uses_env_var_override_when_set() {
+        let tmp = anibridge_cache_tmpdir();
+        let path = cache_file_path();
+        assert_eq!(path, tmp.path().join("mappings.json"));
+    }
+
+    #[test]
+    fn meta_file_path_is_sibling_of_cache_file_with_meta_extension() {
+        let _tmp = anibridge_cache_tmpdir();
+        let cache = cache_file_path();
+        let meta = meta_file_path();
+        assert_eq!(cache.parent(), meta.parent(), "both files share a parent");
+        assert!(
+            meta.to_string_lossy().ends_with(".meta.json"),
+            "meta path must end in .meta.json (got {meta:?})"
+        );
+    }
+
+    #[test]
+    fn read_fresh_disk_cache_returns_none_when_file_missing() {
+        let _tmp = anibridge_cache_tmpdir();
+        // No file written — fresh-read must return None.
+        assert!(read_fresh_disk_cache().is_none());
+    }
+
+    #[test]
+    fn write_disk_cache_round_trips_through_read_fresh() {
+        let _tmp = anibridge_cache_tmpdir();
+        let payload = b"{\"key\": \"value\"}";
+        write_disk_cache(payload).expect("write succeeds");
+        let read = read_fresh_disk_cache().expect("fresh read returns Some");
+        assert_eq!(read.as_slice(), payload, "round-trip exact bytes");
+        // The temp file from the atomic write should NOT be left behind.
+        let parent = cache_file_path().parent().unwrap().to_path_buf();
+        let stragglers: Vec<_> = std::fs::read_dir(&parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("tmp"))
+            .collect();
+        assert!(stragglers.is_empty(), "no .tmp file left behind");
+    }
+
+    #[test]
+    fn read_fresh_disk_cache_returns_none_when_stale() {
+        let _tmp = anibridge_cache_tmpdir();
+        let payload = b"stale";
+        write_disk_cache(payload).expect("write");
+        // Push the cache file's mtime two days into the past (beyond
+        // the 24h CACHE_TTL).
+        let path = cache_file_path();
+        let two_days_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 86400);
+        let f = std::fs::File::open(&path).expect("open");
+        f.set_modified(two_days_ago).expect("set_modified");
+        drop(f);
+        assert!(
+            read_fresh_disk_cache().is_none(),
+            "stale cache must read as None"
+        );
+        // But unconditional read still returns the bytes.
+        let bytes = read_disk_cache_unconditional().expect("unconditional");
+        assert_eq!(bytes.as_slice(), payload);
+    }
+
+    #[test]
+    fn read_disk_cache_meta_returns_none_when_missing() {
+        let _tmp = anibridge_cache_tmpdir();
+        assert!(read_disk_cache_meta().is_none());
+    }
+
+    #[test]
+    fn write_then_read_disk_cache_meta_round_trips_etag_and_last_modified() {
+        let _tmp = anibridge_cache_tmpdir();
+        let meta = DiskCacheMeta {
+            etag: Some("\"abc123\"".into()),
+            last_modified: Some("Mon, 01 Apr 2025 00:00:00 GMT".into()),
+        };
+        write_disk_cache_meta(&meta).expect("write meta");
+        let read = read_disk_cache_meta().expect("read meta");
+        assert_eq!(read.etag.as_deref(), Some("\"abc123\""));
+        assert_eq!(
+            read.last_modified.as_deref(),
+            Some("Mon, 01 Apr 2025 00:00:00 GMT")
+        );
+    }
+
+    #[test]
+    fn touch_disk_cache_updates_mtime_to_recent() {
+        let _tmp = anibridge_cache_tmpdir();
+        write_disk_cache(b"x").expect("write");
+        // Push mtime backward, then touch.
+        let path = cache_file_path();
+        let old = SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        // Sanity: it's stale now.
+        assert!(read_fresh_disk_cache().is_none());
+
+        touch_disk_cache().expect("touch succeeds");
+
+        // After touching, the cache reads as fresh again.
+        assert!(
+            read_fresh_disk_cache().is_some(),
+            "post-touch cache must be fresh"
+        );
+    }
+
+    #[test]
+    fn read_disk_cache_unconditional_ignores_mtime_freshness() {
+        let _tmp = anibridge_cache_tmpdir();
+        let payload = b"contents";
+        write_disk_cache(payload).expect("write");
+        // Push mtime far into the past — read_fresh would return None,
+        // but unconditional must still return the bytes.
+        let path = cache_file_path();
+        let way_old = SystemTime::now() - std::time::Duration::from_secs(7 * 86400);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(way_old)
+            .unwrap();
+        assert!(read_fresh_disk_cache().is_none(), "fresh must reject stale");
+        let read = read_disk_cache_unconditional().expect("unconditional returns Some");
+        assert_eq!(read.as_slice(), payload);
+    }
 }
