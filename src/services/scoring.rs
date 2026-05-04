@@ -310,6 +310,7 @@ pub fn apply_cf_breakdown(
 mod tests {
     use super::*;
     use crate::services::nyaa::{SearchOptions, SearchResult};
+    use rstest::rstest;
 
     fn result(seeders: i32, title: &str) -> SearchResult {
         SearchResult {
@@ -417,6 +418,119 @@ mod tests {
         let scalar = score_result_with_sub_pref(&r, &opts, true);
         let (breakdown_total, _) = score_result_with_breakdown(&r, &opts, true);
         assert_eq!(scalar, breakdown_total);
+    }
+
+    // ─── Boundary-pinning tests for `score_result_with_breakdown` ───
+    //
+    // Mutation-testing audit (mutants.out.pre-pull) found every comparison
+    // operator in the seeders ladder (lines 89/91/93/95), the downloads
+    // ladder (lines 211/217/223), and the compact-batch guard (line 232)
+    // survived a hostile mutation. Existing tests asserted the
+    // sum-of-deltas invariant but never that crossing a threshold
+    // produced a different score band — so `>` flipped to `<`/`==`/`>=`
+    // would not fail any test.
+    //
+    // Each rstest case below pins the value on each side of a threshold
+    // and asserts the resulting `ScoreComponent.delta` matches the band
+    // the production code intends. Showing each (input, expected_delta)
+    // case as its own test name makes mutation-testing failure messages
+    // point straight at the broken band. See mutants.out/PLAN.md Item 2.
+
+    /// Find a component by label. None when the band's "no contribution"
+    /// case fires (e.g. zero-downloads doesn't push a Downloads entry).
+    fn delta_of(parts: &[ScoreComponent], label: &str) -> Option<i32> {
+        parts.iter().find(|c| c.label == label).map(|c| c.delta)
+    }
+
+    #[rstest]
+    #[case(0, -10)] // zero seeders penalty (else branch, line 98)
+    #[case(1, 10)] // r.seeders > 0 → +10 (line 95)
+    #[case(10, 10)] // 10 is NOT > 10, still in the >0 band → +10
+    #[case(11, 20)] // crosses > 10 boundary → +20 (line 93)
+    #[case(50, 20)] // 50 is NOT > 50, still in the >10 band → +20
+    #[case(51, 25)] // crosses > 50 boundary → +25 (line 91)
+    #[case(100, 25)] // 100 is NOT > 100, still in the >50 band → +25
+    #[case(101, 30)] // crosses > 100 boundary → +30 (line 89)
+    fn seeders_band_pins_each_threshold_boundary(
+        #[case] seeders: i32,
+        #[case] expected_delta: i32,
+    ) {
+        let r = result(seeders, "[G] Show - 01.mkv");
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Seeders"),
+            Some(expected_delta),
+            "seeders={seeders} should land in band with delta={expected_delta}"
+        );
+    }
+
+    #[rstest]
+    #[case(0, None)] // no Downloads component when below all thresholds
+    #[case(1000, None)] // 1000 is NOT > 1000 — still no entry
+    #[case(1001, Some(5))] // crosses > 1000 → +5 (line 223)
+    #[case(5000, Some(5))] // 5000 NOT > 5000, still in >1000 band
+    #[case(5001, Some(10))] // crosses > 5000 → +10 (line 217)
+    #[case(10000, Some(10))] // 10000 NOT > 10000, still in >5000 band
+    #[case(10001, Some(15))] // crosses > 10000 → +15 (line 211)
+    fn downloads_band_pins_each_threshold_boundary(
+        #[case] downloads: i32,
+        #[case] expected: Option<i32>,
+    ) {
+        // Hold seeders constant in the +20 band so the rest of the
+        // breakdown is stable across cases — only the Downloads entry
+        // varies. Title is the same; opts() defaults are empty so the
+        // group/resolution/CF branches don't fire.
+        let mut r = result(25, "[G] Show - 01.mkv");
+        r.downloads = downloads;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Downloads"),
+            expected,
+            "downloads={downloads} should produce {:?}",
+            expected
+        );
+    }
+
+    /// 25 GiB — the literal upper bound on the compact-batch size guard
+    /// at line 232. Spelled out as a const so the mutation that flips
+    /// `*` to `+` (which collapses the constant to 25 + 1024 + 1024 +
+    /// 1024 = ~3K bytes) is observably broken even by the "1 byte"
+    /// boundary case below.
+    const TWENTY_FIVE_GIB: i64 = 25 * 1024 * 1024 * 1024;
+
+    #[rstest]
+    // is_batch=false: never emits Compact Batch regardless of size.
+    // Pins the leading `r.is_batch &&` — `||` would let size_bytes
+    // alone trigger the bonus.
+    #[case(false, 1, None)]
+    #[case(false, 5_000_000_000, None)]
+    // is_batch=true with size_bytes=0: NOT > 0 → no emit. Pins the
+    // `r.size_bytes > 0` guard. Mutating `>` to `>=` would emit at 0.
+    #[case(true, 0, None)]
+    // is_batch=true with size_bytes=1: just over 0, well under 25 GiB
+    // → emit.
+    #[case(true, 1, Some(10))]
+    // Just under 25 GiB (the upper bound) → emit.
+    #[case(true, TWENTY_FIVE_GIB - 1, Some(10))]
+    // Exactly 25 GiB: NOT < 25 GiB → no emit. Pins `<` against `<=`.
+    #[case(true, TWENTY_FIVE_GIB, None)]
+    // Over 25 GiB → no emit.
+    #[case(true, TWENTY_FIVE_GIB + 1, None)]
+    fn compact_batch_pins_size_thresholds_and_is_batch_guard(
+        #[case] is_batch: bool,
+        #[case] size_bytes: i64,
+        #[case] expected: Option<i32>,
+    ) {
+        let mut r = result(25, "[G] Show - Batch.mkv");
+        r.is_batch = is_batch;
+        r.size_bytes = size_bytes;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Compact Batch"),
+            expected,
+            "is_batch={is_batch} size_bytes={size_bytes} should produce {:?}",
+            expected
+        );
     }
 
     #[test]
