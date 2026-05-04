@@ -557,7 +557,9 @@ async fn download_parse_and_persist() -> Result<MappingCache, String> {
         None
     };
 
-    let mut req = client.get(mappings_url()).header("User-Agent", "Ryokan/0.1");
+    let mut req = client
+        .get(mappings_url())
+        .header("User-Agent", "Ryokan/0.1");
     if let Some(meta) = &conditional_meta {
         if let Some(etag) = &meta.etag {
             req = req.header(reqwest::header::IF_NONE_MATCH, etag);
@@ -1274,5 +1276,190 @@ mod tests {
         assert!(read_fresh_disk_cache().is_none(), "fresh must reject stale");
         let read = read_disk_cache_unconditional().expect("unconditional returns Some");
         assert_eq!(read.as_slice(), payload);
+    }
+
+    // ─── Wiremock tests for download_parse_and_persist ──────────────
+    //
+    // The previous "deferred" comment block above is now closed: the
+    // RYOKAN_ANIBRIDGE_MAPPINGS_URL seam (added in the same wave as the
+    // RYOKAN_NYAA_API_BASE / RYOKAN_KITSU_API_BASE seams) lets us point
+    // the downloader at a wiremock'd GitHub mappings URL.
+
+    /// Set both env vars (mappings URL → wiremock, cache dir → tempdir)
+    /// and return the tempdir handle so the caller keeps it alive.
+    /// Call before each wiremock test so the disk-cache writes don't
+    /// pollute the user's real cache directory.
+    fn anibridge_e2e_env(server_url: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::set_var("RYOKAN_ANIBRIDGE_CACHE_DIR", tmp.path());
+            std::env::set_var(
+                "RYOKAN_ANIBRIDGE_MAPPINGS_URL",
+                format!("{server_url}/mappings.min.json"),
+            );
+        }
+        tmp
+    }
+
+    #[tokio::test]
+    async fn download_parse_and_persist_200_path_returns_parsed_cache_and_writes_disk() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let mappings = serde_json::json!({
+            "tmdb_show:42:s1": {
+                "anilist:1234": {},
+                "mal:5678": {},
+            }
+        });
+        let body_bytes = serde_json::to_vec(&mappings).unwrap();
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("ETag", "\"v1\"")
+                    .insert_header("Last-Modified", "Mon, 01 Apr 2025 00:00:00 GMT")
+                    .set_body_bytes(body_bytes.clone()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        let cache = download_parse_and_persist()
+            .await
+            .expect("download succeeds");
+        // Cache content is parsed correctly.
+        assert!(
+            cache.tmdb_to_anime.contains_key(&(42, 1)),
+            "TMDB show 42 season 1 must be indexed"
+        );
+        // 200 path must persist bytes to disk.
+        let on_disk = read_disk_cache_unconditional().expect("disk cache present");
+        assert_eq!(on_disk, body_bytes);
+        // 200 path must persist meta (ETag + Last-Modified).
+        let meta = read_disk_cache_meta().expect("disk meta present");
+        assert_eq!(meta.etag.as_deref(), Some("\"v1\""));
+        assert_eq!(
+            meta.last_modified.as_deref(),
+            Some("Mon, 01 Apr 2025 00:00:00 GMT")
+        );
+    }
+
+    #[tokio::test]
+    async fn download_parse_and_persist_304_path_reads_disk_and_touches_mtime() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Wiremock returns 304 ONLY when the client sends matching
+        // If-None-Match. Stage that header expectation.
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .and(header("If-None-Match", "\"v1\""))
+            .respond_with(
+                ResponseTemplate::new(304)
+                    .insert_header("ETag", "\"v1\"")
+                    .insert_header("Last-Modified", "Tue, 02 Apr 2025 00:00:00 GMT"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        // Pre-seed the disk cache and meta so the 304 path has bytes
+        // to fall back on. Push the cache mtime backward so we can
+        // observe the post-304 touch.
+        let cached_bytes = serde_json::to_vec(&serde_json::json!({
+            "tmdb_show:99:s1": {"anilist:111": {}}
+        }))
+        .unwrap();
+        write_disk_cache(&cached_bytes).expect("seed cache");
+        write_disk_cache_meta(&DiskCacheMeta {
+            etag: Some("\"v1\"".into()),
+            last_modified: Some("Mon, 01 Apr 2025 00:00:00 GMT".into()),
+        })
+        .expect("seed meta");
+        let path = cache_file_path();
+        let two_hours_ago = SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(two_hours_ago)
+            .unwrap();
+
+        let cache = download_parse_and_persist()
+            .await
+            .expect("304 path returns parsed cache");
+        // The 304 path must parse the disk-cached bytes (not the body
+        // of the 304 response, which has none).
+        assert!(
+            cache.tmdb_to_anime.contains_key(&(99, 1)),
+            "304 path must parse disk-cached mappings"
+        );
+        // mtime must have been touched forward (post-304 freshness).
+        let new_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(
+            new_mtime > two_hours_ago,
+            "304 path must update mtime after success"
+        );
+        // Refreshed meta is persisted from the 304 response headers.
+        let meta = read_disk_cache_meta().expect("meta present");
+        assert_eq!(
+            meta.last_modified.as_deref(),
+            Some("Tue, 02 Apr 2025 00:00:00 GMT"),
+            "304 path must persist refreshed Last-Modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_parse_and_persist_304_with_no_cached_bytes_errors_clearly() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // Even without an If-None-Match header, return 304 to hit
+        // the missing-disk-cache branch. The function itself doesn't
+        // send conditional headers when there's no cached file —
+        // wiremock here returns 304 unconditionally to drive the
+        // error branch in production code.
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .respond_with(ResponseTemplate::new(304))
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        // No write_disk_cache call → no disk bytes available for the
+        // 304 path's fallback read.
+        let err = download_parse_and_persist()
+            .await
+            .expect_err("must error without cached bytes");
+        assert!(
+            err.contains("304") || err.contains("disk cache is missing"),
+            "error must surface the 304-without-cache shape: got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn download_parse_and_persist_5xx_path_returns_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/mappings.min.json"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let _tmp = anibridge_e2e_env(&server.uri());
+
+        let err = download_parse_and_persist()
+            .await
+            .expect_err("5xx must produce an error");
+        assert!(
+            err.contains("503") || err.contains("HTTP"),
+            "error must surface the HTTP status: got {err:?}"
+        );
     }
 }
