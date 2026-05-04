@@ -322,6 +322,19 @@ fn movie_detail_response_with_titles(
 /// `should_fetch_jikan` branch fires; `episodes: 3` keeps the response
 /// payload + downstream loops short.
 fn tv_media_detail_response(id: i64, mal_id: i64) -> serde_json::Value {
+    tv_media_detail_response_with_format(id, mal_id, "TV", 3)
+}
+
+/// Caller-controlled variant of `tv_media_detail_response`. Lets tests
+/// pin specific (format, episode-count) combinations needed to exercise
+/// the boolean assembly of `should_fetch_jikan` (line 233 of
+/// build_episode_cache: `episodic_format || ep_count > 1`).
+fn tv_media_detail_response_with_format(
+    id: i64,
+    mal_id: i64,
+    format: &str,
+    episodes: i32,
+) -> serde_json::Value {
     json!({
         "data": {
             "Media": {
@@ -338,14 +351,14 @@ fn tv_media_detail_response(id: i64, mal_id: i64) -> serde_json::Value {
                     "extraLarge": "https://example/cover-xl.jpg"
                 },
                 "bannerImage": "https://example/banner.jpg",
-                "format": "TV",
+                "format": format,
                 "status": "FINISHED",
-                "episodes": 3,
+                "episodes": episodes,
                 "duration": 24,
                 "season": "WINTER",
                 "seasonYear": 2024,
                 "endDate": { "year": 2024 },
-                "description": "TV fixture for the build_episode_cache path.",
+                "description": "TV-shape fixture for the build_episode_cache path.",
                 "genres": ["Action"],
                 "averageScore": 80,
                 "nextAiringEpisode": null,
@@ -381,7 +394,12 @@ async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
         .await;
 
     // Jikan episodes fixture — 3 episodes with distinct titles so the
-    // assertions can verify the per-episode title round-trips.
+    // assertions can verify the per-episode title round-trips. The
+    // .expect(1..) pins line 233's `should_fetch_jikan = episodic_format
+    // || ep_count > 1` boolean: a mutation flipping `||` to `&&` would
+    // need BOTH conditions true, but TV+ep_count=3 has both anyway —
+    // so the call-count distinguishes the gate from a `delete !` that
+    // inverts episodic_format.
     Mock::given(method("GET"))
         .and(path("/anime/99999/episodes"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -394,12 +412,28 @@ async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
                   "aired": "2024-01-15T00:00:00+00:00" },
             ]
         })))
+        .expect(1..)
+        .mount(&mock)
+        .await;
+    // Kitsu must NOT be called: with all Jikan titles populated,
+    // episode_needs_kitsu_backfill returns false → should_try_kitsu
+    // is false → no Kitsu fetch. Pins line 251's
+    // `.map(|info| !info.title.trim().is_empty())` closure: a
+    // mutation `delete !` would invert it (true when title IS empty),
+    // making episode_needs_kitsu_backfill return true even with all
+    // titles present, triggering an unwanted Kitsu fetch that
+    // .expect(0) catches.
+    Mock::given(method("GET"))
+        .and(path("/anime"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
         .mount(&mock)
         .await;
 
     unsafe {
         std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
         std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
     }
 
     let db = in_memory_pool().await;
@@ -442,6 +476,85 @@ async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
         std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
+async fn refresh_series_metadata_movie_format_with_multi_episodes_still_fetches_jikan() {
+    // Pins line 233's OR operator: `should_fetch_jikan = episodic_format
+    // || ep_count > 1`. A mutation `||→&&` would require BOTH conditions
+    // (episodic AND ep_count>1). MOVIE format makes episodic_format
+    // false; episodes=3 makes ep_count>1 true. Original: should_fetch
+    // = false || true = true → Jikan called. Mutated: false && true =
+    // false → Jikan NOT called.
+    //
+    // Also pins line 233's `>` operator on ep_count: `replace > with
+    // <=/==/<` would skip the Jikan fetch for ep_count=3.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            tv_media_detail_response_with_format(7100, 71001, "MOVIE", 3),
+        ))
+        .mount(&mock)
+        .await;
+    // Jikan MUST be called. Mutations to either OR or > would skip it.
+    Mock::given(method("GET"))
+        .and(path("/anime/71001/episodes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "mal_id": 1, "episode_id": 1, "title": "Part One",
+                  "aired": "2024-01-01T00:00:00+00:00" },
+                { "mal_id": 2, "episode_id": 2, "title": "Part Two",
+                  "aired": "2024-01-08T00:00:00+00:00" },
+                { "mal_id": 3, "episode_id": 3, "title": "Part Three",
+                  "aired": "2024-01-15T00:00:00+00:00" },
+            ]
+        })))
+        .expect(1..)
+        .mount(&mock)
+        .await;
+    // Kitsu must NOT be called (ep_count > 1 AND Jikan returned all
+    // titles → no backfill needed).
+    Mock::given(method("GET"))
+        .and(path("/anime"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series(&db, 7100).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("MOVIE+ep_count>1 refresh succeeds via Jikan path");
+
+    let episodes = local_metadata::get_episode_map_for_series(&db, series_id)
+        .await
+        .expect("episode-map fetch");
+    assert_eq!(episodes.len(), 3);
+    assert_eq!(
+        episodes.get(&1).map(|e| e.title.as_str()),
+        Some("Part One"),
+        "MOVIE+multi-episode must hit the Jikan-first merge ladder"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
     }
     anilist::reset_state_for_tests();
 }
@@ -471,19 +584,26 @@ async fn refresh_series_metadata_tv_format_falls_back_to_series_title_when_jikan
         )
         .mount(&mock)
         .await;
-    // Jikan returns empty data — no episodes cached upstream.
+    // Jikan returns empty data — no episodes cached upstream. Pinning
+    // `.expect(1..)` doubles as a check that should_fetch_jikan still
+    // fires for TV+ep_count>1.
     Mock::given(method("GET"))
         .and(path("/anime/88888/episodes"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(1..)
         .mount(&mock)
         .await;
     // Kitsu also returns no candidates — without this, `best_candidate`
     // hits real kitsu.io and may match something for "Test TV Show",
     // which would feed the kitsu_eps merge ladder with "Episode N"
     // synthetic titles (kitsu.rs:594) and break the fallback assertion.
+    // .expect(1..) pins line 247's `force_kitsu_fallback || backfill`
+    // OR + line 251's closure: when Jikan returns empty, all closure
+    // results are false → backfill needed → Kitsu IS fetched.
     Mock::given(method("GET"))
         .and(path("/anime"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(1..)
         .mount(&mock)
         .await;
 
