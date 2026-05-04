@@ -86,6 +86,11 @@ path = "tests/rss_user_feed_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "proptest_invariants"
+path = "tests/proptest_invariants.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "htmx_browser_e2e"
 path = "tests/htmx_browser_e2e.rs"
 required-features = ["test-support", "browser-e2e"]
@@ -284,6 +289,14 @@ insta = { version = "1", features = ["json"] }
 # existing one-fn-per-case pattern in the classification pipeline
 # into tabular data. Equivalent to C#'s [TestCase].
 rstest = "0.26"
+# proptest: property-based testing. Generates randomized inputs against
+# invariant assertions. Used for fuzzing pure-function invariants like
+# scoring's sum-of-deltas property and the source classifier's
+# rank-monotonicity rules — places where hand-picked cases pin specific
+# behaviors but a fuzzed sweep is what catches the "I didn't think of
+# that input" class of bugs. Default 256 cases per `proptest!` block,
+# tunable via `PROPTEST_CASES` env var when iterating on a flake.
+proptest = "1"
 
 # Test-runtime profile. opt-level = 1 on dependencies (not the test
 # crate itself, which stays unoptimized for fast incremental builds)
