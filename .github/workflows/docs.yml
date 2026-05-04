@@ -10,9 +10,8 @@
 # stays available so you can force a rebuild after a zensical /
 # pymdown-extensions release without committing.
 #
-# Zensical reads our existing `mkdocs.yml` directly — no separate
-# `zensical.toml` is needed. The migration from mkdocs-material is
-# essentially this workflow + `docs-requirements.txt`.
+# Zensical reads `mkdocs.yml` directly — no separate `zensical.toml`
+# file is needed.
 name: Build and deploy docs
 
 on:

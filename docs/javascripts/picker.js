@@ -643,10 +643,10 @@ services:
   }
 
   // The output `<pre>` blocks use `data-picker="..."` selectors rather
-  // than ids on purpose. MkDocs Material's `content.code.copy` rewrites
-  // any `<pre id="x">` to `<pre id="__code_x">` so its own copy-button
+  // than ids on purpose. The `content.code.copy` feature rewrites any
+  // `<pre id="x">` to `<pre id="__code_x">` so its own copy-button
   // wiring can find it — which makes `getElementById('compose-output')`
-  // return null at runtime. Data attributes survive Material's pass.
+  // return null at runtime. Data attributes survive that rewrite.
   function rerender() {
     const cfg = readForm();
     if (!cfg) return;
@@ -715,11 +715,11 @@ services:
     }
   }
 
-  // MkDocs Material exposes a `document$` observable (its RxJS
+  // The site theme exposes a `document$` observable (an RxJS
   // document-state subject) that fires once on initial load and
   // again on instant-navigation transitions. Subscribing to it is
-  // the canonical Material integration pattern; falling back to
-  // DOMContentLoaded when Material's runtime isn't present.
+  // the canonical integration pattern; fall back to DOMContentLoaded
+  // when the theme's runtime isn't present.
   if (typeof window !== 'undefined' && window.document$ &&
       typeof window.document$.subscribe === 'function') {
     window.document$.subscribe(init);
