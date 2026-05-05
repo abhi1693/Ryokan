@@ -646,6 +646,34 @@ fn normalize_system_tab_help_alias_resolves_to_scoring() {
 }
 
 #[test]
+fn series_template_episode_button_branch_fires_for_tag_overflow_rows() {
+    // Pin the template-side companion to
+    // build_episodes_surfaces_grab_tags_beyond_ep_count_without_disk_file.
+    //
+    // Tag-overflow rows (auto-expand backfills a quality_tag for an
+    // episode past AL's reported count, e.g. One Piece eps 1157-1160
+    // while AL still reports `next_airing_episode = 1157`) carry
+    // empty title AND empty filename — Source 3 of build_episodes.
+    // Pre-fix the template's episode-title cell only fired the
+    // clickable button when filename was non-empty; tag-overflow
+    // rows fell through to the unclickable `<span class="ep-missing-text">`
+    // arm, so the user couldn't open the grab-history modal for
+    // those episodes (the visible bug: text rendered grayer than
+    // siblings, no click target).
+    //
+    // The fix widens the second-arm guard to also fire when
+    // quality_state is non-empty OR downloaded is true. This test
+    // pins the template literal so a future refactor that
+    // accidentally narrows the guard back can't ship.
+    let template = include_str!("../../../../templates/series.html");
+    assert!(
+        template
+            .contains("!ep.filename.is_empty() || !ep.quality_state.is_empty() || ep.downloaded"),
+        "series.html must keep the widened ep-title-btn guard so tag-overflow rows past ep_count stay clickable for the grab-history modal"
+    );
+}
+
+#[test]
 fn normalize_system_tab_unknown_or_missing_defaults_to_logs() {
     // Logs is the safest landing — the user can always see what's
     // going on from the logs tab.

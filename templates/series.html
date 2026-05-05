@@ -393,7 +393,21 @@
                                 <span class="title-option" data-title-lang="native">{% if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else %}{{ ep.title }}{% endif %}</span>
                             </span>
                         </button>
-                        {% else if !ep.filename.is_empty() %}
+                        {% else if !ep.filename.is_empty() || !ep.quality_state.is_empty() || ep.downloaded %}
+                        {# Branch 2: row has actionable state — either an
+                           on-disk filename, a recorded grab tag (queued /
+                           completed / failed), or a post-processing-off
+                           "downloaded" mark. The grab-history modal renders
+                           usefully even when title + filename are empty
+                           (the body's "Not in library root" placeholder
+                           plus the grab-history loader cover the missing
+                           bits). Pre-fix this branch only fired on
+                           non-empty filename, so tag-overflow rows past
+                           ep_count (typical for airing series whose
+                           AL-reported episode count lags the grabbed
+                           number) rendered as unclickable gray text and
+                           the user couldn't open grab history for those
+                           episodes. #}
                         <button class="ep-title-btn" type="button"
                             onclick="showEpisodeDetail({{ ep.number }}, this)"
                             data-filename="{{ ep.filename }}"
