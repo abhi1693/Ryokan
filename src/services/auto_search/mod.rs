@@ -2284,4 +2284,201 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|q| q.ends_with(" 56")));
     }
+
+    // ─── Tier 2 deferred — small testable helpers ───────────────────
+    //
+    // The audit flagged 139 missed mutants in this file. Most are in
+    // `find_all_for_target`, `collect_scored_for_target`, and
+    // `collect_scored_batches_for_target` — all of which call
+    // `run_queries`/`run_queries_interactive` which makes live HTTP
+    // requests to Nyaa and torznab indexers. Pinning those needs a
+    // wiremock-Nyaa harness that doesn't exist yet (significant lift,
+    // out of scope for this commit).
+    //
+    // The pure-function helpers ARE testable end-to-end without
+    // network mocking. This block pins them.
+
+    fn detail(id: i64, romaji: &str, english: &str, native: &str) -> AnimeDetail {
+        AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: romaji.into(),
+            title_english: english.into(),
+            title_native: native.into(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: "TV".into(),
+            status: "FINISHED".into(),
+            status_display: "Finished".into(),
+            episodes: Some(12),
+            duration: Some(24),
+            season: String::new(),
+            season_year: Some(2024),
+            end_year: Some(2024),
+            description: String::new(),
+            genres: vec![],
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: vec![],
+            streaming_episodes: vec![],
+            relations: vec![],
+        }
+    }
+
+    #[test]
+    fn display_title_prefers_english_when_present() {
+        // Pin the English-first preference (line 1669). The
+        // `replace -> "" / "xyzzy"` mutations are caught by asserting
+        // the exact returned string, and `delete !` is caught by the
+        // English-empty branch in the second test.
+        let d = detail(
+            1,
+            "Sousou no Frieren",
+            "Frieren: Beyond Journey's End",
+            "葬送のフリーレン",
+        );
+        assert_eq!(display_title(&d), "Frieren: Beyond Journey's End");
+    }
+
+    #[test]
+    fn display_title_falls_back_to_romaji_when_english_empty() {
+        // Empty title_english → `delete !` mutation at line 1669:8
+        // would invert the guard and return romaji even when English
+        // is present. Pin the empty-english fallback.
+        let d = detail(2, "Sousou no Frieren", "", "葬送のフリーレン");
+        assert_eq!(display_title(&d), "Sousou no Frieren");
+    }
+
+    #[rstest::rstest]
+    #[case::ep_target_relative(5, 5, 0, true)] // direct hit on relative number
+    #[case::ep_target_absolute_offset(52, 5, 47, true)] // parsed=52 = target(5)+offset(47)
+    #[case::ep_neither_relative_nor_absolute(99, 5, 0, false)] // no match
+    #[case::offset_not_active_returns_false_for_absolute(52, 5, 0, false)] // offset=0 → no absolute branch
+    fn episode_match_pins_target_and_absolute_branches(
+        #[case] parsed_value: i32,
+        #[case] target_ep: i32,
+        #[case] absolute_offset: i32,
+        #[case] expected: bool,
+    ) {
+        // Pin line 1376's `absolute_offset > 0` guard. Mutating to
+        // `>= 0` would activate the absolute-number branch even when
+        // offset is zero, which is what the function explicitly avoids
+        // (the offset=0 case must collapse to the strict-relative
+        // path used for first-season entries).
+        let mut parsed = HashSet::new();
+        parsed.insert(parsed_value);
+        assert_eq!(episode_match(&parsed, target_ep, absolute_offset), expected);
+    }
+
+    #[rstest::rstest]
+    // Each band of `Resolution::from_str` mapped to the corresponding
+    // bare-number string the Nyaa search pipeline expects. Pins both
+    // return-substitution mutations at line 1679 (the function-level
+    // replacement to `""` or `"xyzzy"`) and the Unknown→1080 default
+    // (line 1685).
+    #[case::r480("480p", "480")]
+    #[case::r576("576p", "576")]
+    #[case::r720("720p", "720")]
+    #[case::r1080("1080p", "1080")]
+    #[case::r2160("2160p", "2160")]
+    #[case::unknown_defaults_to_1080("garbage", "1080")]
+    #[case::empty_defaults_to_1080("", "1080")]
+    fn preferred_resolution_search_value_maps_each_band(
+        #[case] preferred: &str,
+        #[case] expected: &str,
+    ) {
+        let cfg = Config {
+            preferred_resolution: preferred.into(),
+            ..Default::default()
+        };
+        assert_eq!(preferred_resolution_search_value(&cfg), expected);
+    }
+
+    #[test]
+    fn build_queries_mixed_returns_canonical_only_when_variants_empty() {
+        // Pin line 1627's `!variants.is_empty()` guard. With empty
+        // variants, the function MUST return the canonical query set
+        // unchanged. Mutating `delete !` would call
+        // `build_queries_from_aliases` with empty variants, which is
+        // a no-op (returns empty) but the extend would still happen —
+        // observationally identical, so this test pins the result
+        // shape only.
+        let canonical = vec!["Show".to_string()];
+        let variants: Vec<String> = vec![];
+        let out = build_queries_mixed(&canonical, &variants, &SearchTarget::Episode(1), true);
+        // collapsed=true with one alias and Episode(1) → one query.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0], "Show 01");
+    }
+
+    #[test]
+    fn build_queries_mixed_includes_variant_queries_when_present() {
+        // Variants run collapsed=true regardless of the call-site's
+        // `collapsed` flag (so a 4-variant fan-out doesn't multiply
+        // the canonical 4-form sweep by 4 again). Pin both the
+        // canonical AND variant query presence so the function-level
+        // return-substitution mutations (`vec![]`, `vec!["xyzzy"]`,
+        // `vec![String::new()]`) at line 1626 all flip MISSED → CAUGHT.
+        let canonical = vec!["Show".to_string()];
+        let variants = vec!["Show 2".to_string()];
+        let out = build_queries_mixed(&canonical, &variants, &SearchTarget::Single, false);
+        // Canonical Single non-collapsed: bare + quoted = 2.
+        // Variants collapsed=true: bare = 1.
+        // Total = 3 (no overlap because the strings differ).
+        assert_eq!(out.len(), 3, "got {out:?}");
+        assert!(out.iter().any(|q| q == "Show"));
+        assert!(out.iter().any(|q| q == "\"Show\""));
+        assert!(out.iter().any(|q| q == "Show 2"));
+    }
+
+    #[test]
+    fn collect_aliases_with_variants_returns_non_empty_combined_canonical_variants() {
+        // The mutation surface (12 substitutions of the 3-tuple
+        // return) all collapse to either an empty Vec, a single-
+        // entry-with-empty-string Vec, or a single-entry-with-"xyzzy"
+        // Vec. Asserting the function returns NON-empty content with
+        // recognizable substrings of the input AnimeDetail kills all
+        // 12 substitutions.
+        let d = detail(
+            1,
+            "Sousou no Frieren",
+            "Frieren: Beyond Journey's End",
+            "葬送のフリーレン",
+        );
+        let (combined, canonical, variants) = collect_aliases_with_variants(&d);
+
+        assert!(
+            !combined.is_empty(),
+            "combined alias list must not be empty"
+        );
+        assert!(
+            !canonical.is_empty(),
+            "canonical alias list must not be empty"
+        );
+        // Combined must include canonical entries.
+        for c in &canonical {
+            assert!(
+                combined.iter().any(|x| x == c),
+                "combined missing canonical alias {c:?}"
+            );
+        }
+        // Variants are derived from canonical sequel-numbering, so they
+        // may be empty for a one-shot title (no S2 / Part variants
+        // detected). Just assert the field exists with its own type.
+        let _: Vec<String> = variants;
+
+        // Sanity: at least one alias contains a substring of the
+        // input title fields, so the substitution-to-"xyzzy" or
+        // empty-string would fail this check.
+        assert!(
+            canonical
+                .iter()
+                .any(|a| a.contains("Frieren") || a.contains("Sousou")),
+            "canonical must carry a recognizable token from the input"
+        );
+    }
 }

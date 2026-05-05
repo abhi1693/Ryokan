@@ -1,0 +1,82 @@
+# Regenerate `licenses/THIRD_PARTY_LICENSES.html` and auto-commit
+# back to the branch when it drifts. Triggered on push to `dev` when
+# Cargo.lock or about.toml/about.hbs (the cargo-about config) changes.
+#
+# Why a dedicated workflow rather than failing rust.yml's build:
+#
+#   * `cargo about generate` is a mechanical operation. Failing CI and
+#     making contributors regen-and-commit locally is friction without
+#     payoff — every dep bump produces drift, and the workflow's output
+#     is byte-deterministic given the lockfile.
+#   * The HTML file is the user-facing "find third-party notices on
+#     GitHub" deliverable that README links to. It needs to stay
+#     committed so the README link resolves on the repo's main view,
+#     but it doesn't need human curation.
+#
+# This runs only on push to `dev` (not PRs) because workflows running
+# on PRs from forks don't have write access to the repo. A PR that
+# bumps Cargo.lock will land on `dev` after merge; this workflow then
+# regenerates and commits the licenses-file refresh as a follow-up
+# `chore:` commit. Same pattern Sonarr / `dependabot` use for similar
+# auto-maintenance tasks.
+
+name: Refresh third-party license notices
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - Cargo.lock
+      - about.toml
+      - about.hbs
+      - .github/workflows/license-notices.yml
+  workflow_dispatch:
+
+# Two rapid Cargo.lock pushes don't both need to run. Cancel any
+# in-flight regen when a new push lands.
+concurrency:
+  group: license-notices
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need the full token so the auto-commit push back to `dev`
+          # uses the workflow's own credentials. The default
+          # `GITHUB_TOKEN` is fine; we don't need a PAT because we're
+          # pushing to the same repo / non-protected branch.
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: license-notices
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - name: Regenerate licenses/THIRD_PARTY_LICENSES.html
+        run: |
+          cargo about generate \
+            -c about.toml about.hbs \
+            -o licenses/THIRD_PARTY_LICENSES.html
+      - name: Commit and push if changed
+        run: |
+          if git diff --quiet licenses/THIRD_PARTY_LICENSES.html; then
+            echo "licenses/THIRD_PARTY_LICENSES.html is already current; nothing to commit."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add licenses/THIRD_PARTY_LICENSES.html
+          # `[skip ci]` so this commit doesn't trigger another rust.yml
+          # run — the file change is mechanical and doesn't need to
+          # re-run the full verify chain (clippy / nextest / build).
+          # The next non-licenses commit will exercise CI normally.
+          git commit -m "chore: regenerate THIRD_PARTY_LICENSES.html [skip ci]"
+          git push origin HEAD:dev

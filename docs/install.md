@@ -52,6 +52,6 @@ Ryokan listens on `0.0.0.0:8978` by default (override with `LISTEN_ADDR`). The D
 
 ## First-run setup
 
-The first time Ryokan boots, navigating to `/` redirects to `/setup`. Create an admin account there. Once that's done, `/setup` is locked behind auth and won't accept further submissions.
+The first time Ryokan boots, navigating to `/` redirects to `/setup`. Create an admin account there. Once a user has been created, `/setup` redirects to `/login` and won't accept further submissions.
 
 If you need to reset the admin account (forgot password, username, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart: see the `RYOKAN_RESET_AUTH` env var in the [Docker page](docker.md#environment-variables).

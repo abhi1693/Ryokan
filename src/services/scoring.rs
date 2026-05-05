@@ -310,6 +310,7 @@ pub fn apply_cf_breakdown(
 mod tests {
     use super::*;
     use crate::services::nyaa::{SearchOptions, SearchResult};
+    use rstest::rstest;
 
     fn result(seeders: i32, title: &str) -> SearchResult {
         SearchResult {
@@ -417,6 +418,341 @@ mod tests {
         let scalar = score_result_with_sub_pref(&r, &opts, true);
         let (breakdown_total, _) = score_result_with_breakdown(&r, &opts, true);
         assert_eq!(scalar, breakdown_total);
+    }
+
+    // ─── Boundary-pinning tests for `score_result_with_breakdown` ───
+    //
+    // Mutation-testing audit (mutants.out.pre-pull) found every comparison
+    // operator in the seeders ladder (lines 89/91/93/95), the downloads
+    // ladder (lines 211/217/223), and the compact-batch guard (line 232)
+    // survived a hostile mutation. Existing tests asserted the
+    // sum-of-deltas invariant but never that crossing a threshold
+    // produced a different score band — so `>` flipped to `<`/`==`/`>=`
+    // would not fail any test.
+    //
+    // Each rstest case below pins the value on each side of a threshold
+    // and asserts the resulting `ScoreComponent.delta` matches the band
+    // the production code intends. Showing each (input, expected_delta)
+    // case as its own test name makes mutation-testing failure messages
+    // point straight at the broken band. See mutants.out/PLAN.md Item 2.
+
+    /// Find a component by label. None when the band's "no contribution"
+    /// case fires (e.g. zero-downloads doesn't push a Downloads entry).
+    fn delta_of(parts: &[ScoreComponent], label: &str) -> Option<i32> {
+        parts.iter().find(|c| c.label == label).map(|c| c.delta)
+    }
+
+    #[rstest]
+    #[case(0, -10)] // zero seeders penalty (else branch, line 98)
+    #[case(1, 10)] // r.seeders > 0 → +10 (line 95)
+    #[case(10, 10)] // 10 is NOT > 10, still in the >0 band → +10
+    #[case(11, 20)] // crosses > 10 boundary → +20 (line 93)
+    #[case(50, 20)] // 50 is NOT > 50, still in the >10 band → +20
+    #[case(51, 25)] // crosses > 50 boundary → +25 (line 91)
+    #[case(100, 25)] // 100 is NOT > 100, still in the >50 band → +25
+    #[case(101, 30)] // crosses > 100 boundary → +30 (line 89)
+    fn seeders_band_pins_each_threshold_boundary(
+        #[case] seeders: i32,
+        #[case] expected_delta: i32,
+    ) {
+        let r = result(seeders, "[G] Show - 01.mkv");
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Seeders"),
+            Some(expected_delta),
+            "seeders={seeders} should land in band with delta={expected_delta}"
+        );
+    }
+
+    #[rstest]
+    #[case(0, None)] // no Downloads component when below all thresholds
+    #[case(1000, None)] // 1000 is NOT > 1000 — still no entry
+    #[case(1001, Some(5))] // crosses > 1000 → +5 (line 223)
+    #[case(5000, Some(5))] // 5000 NOT > 5000, still in >1000 band
+    #[case(5001, Some(10))] // crosses > 5000 → +10 (line 217)
+    #[case(10000, Some(10))] // 10000 NOT > 10000, still in >5000 band
+    #[case(10001, Some(15))] // crosses > 10000 → +15 (line 211)
+    fn downloads_band_pins_each_threshold_boundary(
+        #[case] downloads: i32,
+        #[case] expected: Option<i32>,
+    ) {
+        // Hold seeders constant in the +20 band so the rest of the
+        // breakdown is stable across cases — only the Downloads entry
+        // varies. Title is the same; opts() defaults are empty so the
+        // group/resolution/CF branches don't fire.
+        let mut r = result(25, "[G] Show - 01.mkv");
+        r.downloads = downloads;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Downloads"),
+            expected,
+            "downloads={downloads} should produce {:?}",
+            expected
+        );
+    }
+
+    /// 25 GiB — the literal upper bound on the compact-batch size guard
+    /// at line 232. Spelled out as a const so the mutation that flips
+    /// `*` to `+` (which collapses the constant to 25 + 1024 + 1024 +
+    /// 1024 = ~3K bytes) is observably broken even by the "1 byte"
+    /// boundary case below.
+    const TWENTY_FIVE_GIB: i64 = 25 * 1024 * 1024 * 1024;
+
+    #[rstest]
+    // is_batch=false: never emits Compact Batch regardless of size.
+    // Pins the leading `r.is_batch &&` — `||` would let size_bytes
+    // alone trigger the bonus.
+    #[case(false, 1, None)]
+    #[case(false, 5_000_000_000, None)]
+    // is_batch=true with size_bytes=0: NOT > 0 → no emit. Pins the
+    // `r.size_bytes > 0` guard. Mutating `>` to `>=` would emit at 0.
+    #[case(true, 0, None)]
+    // is_batch=true with size_bytes=1: just over 0, well under 25 GiB
+    // → emit.
+    #[case(true, 1, Some(10))]
+    // Just under 25 GiB (the upper bound) → emit.
+    #[case(true, TWENTY_FIVE_GIB - 1, Some(10))]
+    // Exactly 25 GiB: NOT < 25 GiB → no emit. Pins `<` against `<=`.
+    #[case(true, TWENTY_FIVE_GIB, None)]
+    // Over 25 GiB → no emit.
+    #[case(true, TWENTY_FIVE_GIB + 1, None)]
+    fn compact_batch_pins_size_thresholds_and_is_batch_guard(
+        #[case] is_batch: bool,
+        #[case] size_bytes: i64,
+        #[case] expected: Option<i32>,
+    ) {
+        let mut r = result(25, "[G] Show - Batch.mkv");
+        r.is_batch = is_batch;
+        r.size_bytes = size_bytes;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert_eq!(
+            delta_of(&parts, "Compact Batch"),
+            expected,
+            "is_batch={is_batch} size_bytes={size_bytes} should produce {:?}",
+            expected
+        );
+    }
+
+    // ─── Stretch tests from PLAN.md Item 2 deferred ─────────────────
+    //
+    // The original boundary-table tests pinned the seeders / downloads /
+    // compact-batch comparison ladders. These additions extend the
+    // coverage to the encoding-keyword chain, dual-audio detection,
+    // preferred-resolution match, and the legacy `score_result` wrapper.
+    // Each test isolates one branch so mutating one `||` to `&&` or
+    // dropping one `!` produces an observable score change.
+
+    #[rstest]
+    // Each row is a release-title fragment that triggers ONE keyword
+    // arm in the encoding chain (lines 155-166). Using isolated
+    // fragments — rather than a soup of every keyword — pins each
+    // `||` operator: a mutation flipping one to `&&` would require
+    // ALL keywords in the chain, breaking the case that was relying
+    // on this single match.
+    #[case::ten_bit_word("[G] Show 01 10bit.mkv")]
+    #[case::ten_bit_hyphen("[G] Show 01 10-bit.mkv")]
+    #[case::x265("[G] Show 01 x265.mkv")]
+    #[case::hevc("[G] Show 01 HEVC.mkv")]
+    #[case::bluray("[G] Show 01 BluRay.mkv")]
+    #[case::blu_ray_hyphen("[G] Show 01 Blu-Ray.mkv")]
+    #[case::bdrip("[G] Show 01 BDRip.mkv")]
+    #[case::space_bd_space("[G] Show 01 BD 1080p.mkv")]
+    #[case::starts_with_bd("BD Show 01.mkv")]
+    #[case::bracket_bd("[BD] Show 01.mkv")]
+    #[case::paren_bd("(BD) Show 01.mkv")]
+    fn encoding_keyword_each_alone_triggers_quality_bonus(#[case] title: &str) {
+        // Each isolated keyword must produce the +5 "Encoding / Source
+        // Quality" component. With seeders=0 (not in any seeder band),
+        // the only positive delta will be this bonus, plus -10 zero-
+        // seeders. Total should be -5.
+        let mut r = result(0, title);
+        r.is_batch = false;
+        r.is_trusted = false;
+        r.downloads = 0;
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        let encoding = parts
+            .iter()
+            .find(|c| c.label == "Encoding / Source Quality");
+        assert!(
+            encoding.is_some(),
+            "title {title:?} must trigger the encoding-quality bonus"
+        );
+        assert_eq!(encoding.unwrap().delta, 5);
+    }
+
+    #[test]
+    fn encoding_keyword_no_match_skips_quality_bonus() {
+        // Sanity: a release with NO encoding token in the title gets
+        // no Encoding component at all. Pins the negative case so the
+        // chain stays a guarded gate — without this, an `||` to `&&`
+        // mutation flipping every match arm to AND-required would
+        // never fire and look like a no-op.
+        let r = result(0, "[G] Show 01 (1080p).mkv");
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert!(
+            parts.iter().all(|c| c.label != "Encoding / Source Quality"),
+            "no encoding keyword in title — bonus must not fire"
+        );
+    }
+
+    #[rstest]
+    // Each case isolates one of the six dual-audio variants at lines
+    // 182-187. Same `||`-chain shape as the encoding-keyword test.
+    #[case::dual_audio_space("[G] Show 01 Dual Audio.mkv")]
+    #[case::dual_audio_dot("[G] Show 01 Dual.Audio.mkv")]
+    #[case::multi_audio_space("[G] Show 01 Multi Audio.mkv")]
+    #[case::multi_audio_dot("[G] Show 01 Multi.Audio.mkv")]
+    #[case::multi_audio_hyphen("[G] Show 01 Multi-Audio.mkv")]
+    #[case::multiaudio("[G] Show 01 Multiaudio.mkv")]
+    fn dual_audio_keyword_each_alone_triggers_dub_penalty(#[case] title: &str) {
+        let r = result(0, title);
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        let dub = parts.iter().find(|c| c.label == "Dub / Dual Audio Penalty");
+        assert!(
+            dub.is_some(),
+            "title {title:?} must trigger the dub/dual penalty"
+        );
+        assert_eq!(dub.unwrap().delta, -15, "dub penalty must be exactly -15");
+    }
+
+    #[rstest]
+    // The is_dub final assembly at line 193:
+    //     is_dual || DUB_RE.is_match(&lower) || lower.contains("english dub")
+    // Pin the two `||` operators by exercising each path individually
+    // without the dual-audio case (already covered above).
+    #[case::dub_word("[G] Show 01 Dub.mkv")]
+    #[case::dubbed_word("[G] Show 01 Dubbed.mkv")]
+    #[case::english_dub_literal("[G] Show 01 English Dub.mkv")]
+    fn dub_word_or_english_dub_phrase_triggers_penalty(#[case] title: &str) {
+        let r = result(0, title);
+        let (_total, parts) = score_result_with_breakdown(&r, &opts(), true);
+        assert!(
+            parts.iter().any(|c| c.label == "Dub / Dual Audio Penalty"),
+            "title {title:?} must be detected as dub/dual"
+        );
+    }
+
+    #[test]
+    fn dub_inverts_to_bonus_when_user_prefers_dubs() {
+        // prefer_subs=false flips the penalty into a bonus. Pin exact
+        // values on both sides so a `delete -` on either branch is
+        // observable (line 198 for the penalty side).
+        let r = result(0, "[G] Show 01 English Dub.mkv");
+
+        let (_, parts_subs) = score_result_with_breakdown(&r, &opts(), true);
+        let penalty = parts_subs
+            .iter()
+            .find(|c| c.label == "Dub / Dual Audio Penalty")
+            .expect("penalty present");
+        assert_eq!(penalty.delta, -15);
+
+        let (_, parts_dubs) = score_result_with_breakdown(&r, &opts(), false);
+        let bonus = parts_dubs
+            .iter()
+            .find(|c| c.label == "Dub / Dual Audio Bonus")
+            .expect("bonus present");
+        assert_eq!(bonus.delta, 15);
+    }
+
+    #[rstest]
+    // Pin all three branches of `if !opts.preferred_resolution.is_empty()
+    // && r.resolution == opts.preferred_resolution` at line 135:
+    //   * empty preferred → no bonus regardless of release resolution
+    //     (catches `delete !`)
+    //   * non-empty preferred matching release → +20 (catches `==`/`!=`)
+    //   * non-empty preferred mismatched against release → no bonus
+    //     (catches `&&`/`||`)
+    #[case::empty_preferred_skipped("", "1080p", false)]
+    #[case::matching_preferred_adds_20("1080p", "1080p", true)]
+    #[case::mismatched_preferred_skipped("720p", "1080p", false)]
+    fn preferred_resolution_match_pins_guard_and_equality(
+        #[case] preferred: &str,
+        #[case] release_resolution: &str,
+        #[case] expect_bonus: bool,
+    ) {
+        let mut r = result(0, "[G] Show - 01");
+        r.resolution = release_resolution.to_string();
+        let opts_case = SearchOptions {
+            preferred_resolution: preferred.to_string(),
+            ..SearchOptions::default()
+        };
+        let (_total, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let pr = parts.iter().find(|c| c.label == "Preferred Resolution");
+        if expect_bonus {
+            assert_eq!(
+                pr.expect("Preferred Resolution must be present").delta,
+                20,
+                "matching preferred must add exactly +20"
+            );
+        } else {
+            assert!(
+                pr.is_none(),
+                "no Preferred Resolution component when guard is closed"
+            );
+        }
+    }
+
+    #[test]
+    fn non_preferred_group_penalty_is_exactly_minus_15() {
+        // Pin line 121's `delete -` on -15. The release has a
+        // [Group] tag that's NOT in the preferred list, so the
+        // "Non-Preferred Group" branch fires.
+        let mut r = result(50, "[OtherGroup] Show - 01.mkv");
+        r.group = "OtherGroup".to_string();
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Kaizoku".to_string(), "smol".to_string()],
+            ..SearchOptions::default()
+        };
+        let (_, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let np = parts
+            .iter()
+            .find(|c| c.label == "Non-Preferred Group")
+            .expect("Non-Preferred Group present");
+        assert_eq!(np.delta, -15, "non-preferred-group penalty must be -15");
+    }
+
+    #[test]
+    fn no_group_tag_penalty_is_exactly_minus_10() {
+        // Pin line 128's `delete -` on -10. The release has an empty
+        // group field, so the "No Group Tag" branch fires.
+        let mut r = result(50, "Show - 01.mkv");
+        r.group = String::new();
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Kaizoku".to_string()],
+            ..SearchOptions::default()
+        };
+        let (_, parts) = score_result_with_breakdown(&r, &opts_case, true);
+        let ng = parts
+            .iter()
+            .find(|c| c.label == "No Group Tag")
+            .expect("No Group Tag present");
+        assert_eq!(ng.delta, -10, "no-group-tag penalty must be -10");
+    }
+
+    #[test]
+    fn score_result_wrapper_delegates_to_with_sub_pref_true() {
+        // Pin line 52's `pub fn score_result(...) -> i32` against the
+        // three return-substitution mutations (0 / 1 / -1). The wrapper
+        // is a one-liner — the cheapest assertion is "calling it
+        // produces the same value as calling the explicit prefer_subs
+        // form with true."
+        let mut r = result(75, "[Group] Show - 01 (1080p) [BluRay].mkv");
+        r.group = "Group".to_string();
+        r.downloads = 3000;
+        let opts_case = SearchOptions {
+            preferred_groups: vec!["Group".to_string()],
+            preferred_resolution: "1080p".to_string(),
+            ..SearchOptions::default()
+        };
+        let via_wrapper = score_result(&r, &opts_case);
+        let via_explicit = score_result_with_sub_pref(&r, &opts_case, true);
+        assert_eq!(via_wrapper, via_explicit);
+        // And the value is non-trivial — replacing with 0/1/-1 would
+        // not match any of those.
+        assert!(
+            via_wrapper.abs() > 1,
+            "wrapper score must be non-trivial (got {via_wrapper})"
+        );
     }
 
     #[test]

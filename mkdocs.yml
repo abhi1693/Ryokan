@@ -21,7 +21,7 @@ repo_url: https://github.com/johnthreekay/Ryokan
 repo_name: johnthreekay/Ryokan
 edit_uri: edit/main/docs/
 
-# Project URL is `/Ryokan/docs/`, not `/Ryokan/`. MkDocs needs the
+# Project URL is `/Ryokan/docs/`, not `/Ryokan/`. Zensical needs the
 # explicit base so internal `[link](other-page.md)` refs resolve
 # correctly under the deployed subdirectory.
 docs_dir: docs

@@ -3,7 +3,23 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 
-const NYAA_BASE: &str = "https://nyaa.si";
+const NYAA_BASE_DEFAULT: &str = "https://nyaa.si";
+
+/// Nyaa scrape origin, with a `RYOKAN_NYAA_API_BASE` override the same
+/// shape as `RYOKAN_ANILIST_API_BASE` / `JIKAN_API_BASE`. Re-read on
+/// every call rather than cached so wiremock fixtures can flip it
+/// per-fixture without process restart; the env-var lookup is
+/// sub-microsecond and dwarfed by the network round-trip that follows.
+///
+/// Production should leave this unset. Test-only — keeps Nyaa as the
+/// "protected hot path" CLAUDE.md flags by adding a seam at the URL
+/// builder rather than refactoring Nyaa into a generic Indexer trait.
+pub(super) fn nyaa_base() -> String {
+    std::env::var("RYOKAN_NYAA_API_BASE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| NYAA_BASE_DEFAULT.to_string())
+}
 
 /// Process-global `reqwest::Client` for Nyaa search requests. A fresh
 /// `Client` per search throws away keep-alive connections and forces a
@@ -163,9 +179,10 @@ pub struct SearchResponse {
 /// Search Nyaa by scraping the HTML results page.
 pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, String> {
     let sanitized_query = sanitize_query_for_nyaa(&opts.query);
+    let base = nyaa_base();
     let mut url = format!(
         "{}/?f={}&c={}&q={}&p={}",
-        NYAA_BASE,
+        base,
         opts.filter,
         opts.category,
         urlencoding::encode(&sanitized_query),
@@ -175,7 +192,7 @@ pub async fn search(opts: &SearchOptions, page: i32) -> Result<SearchResponse, S
     if !opts.user.is_empty() {
         url = format!(
             "{}/user/{}?f={}&c={}&q={}&p={}",
-            NYAA_BASE,
+            base,
             urlencoding::encode(&opts.user),
             opts.filter,
             opts.category,
