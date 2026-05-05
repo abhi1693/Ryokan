@@ -39,11 +39,24 @@
                         <strong class="dc-card-name">{{ row.name }}</strong>
                         {% if row.is_default %}<span class="dc-default-pill" title="Default {% if row.kind == "sabnzbd" %}usenet{% else %}torrent{% endif %} client — receives every {% if row.kind == "sabnzbd" %}newznab{% else %}torznab{% endif %} grab without an explicit indexer pin">Default</span>{% endif %}
                     </div>
-                    {# Status pill — placeholder loads then HTMX swap-on-load
-                       replaces with the probed version, or a static Disabled
-                       pill for disabled rows. #}
+                    {# Status pill — three render modes:
+                       (a) row disabled → static "Disabled" pill (no probe).
+                       (b) cached_status hit → render the probed pill
+                           directly server-side. Avoids the boost-nav
+                           "Probing… → real status" flash; the cache
+                           is kept fresh by the 60s TTL + the probe
+                           handler writing back on every fire.
+                       (c) cold cache → placeholder + hx-trigger="load"
+                           fires the probe (which writes the cache for
+                           subsequent renders). #}
                     {% if !row.enabled %}
                     <span class="dc-status-pill dc-status-pill-disabled">Disabled</span>
+                    {% else if let Some(cached) = cached_status.get(&row.id) %}
+                        {% if let Some(version) = cached.version.as_ref() %}
+                        <span class="dc-status-pill dc-status-pill-ok" title="Connected">{{ crate::handlers::settings::download_clients::kind_label(row.kind.as_str()) }} {{ version }}</span>
+                        {% else %}
+                        <span class="dc-status-pill dc-status-pill-err" title="{{ cached.error }}">Unreachable</span>
+                        {% endif %}
                     {% else %}
                     <span class="dc-status-pill dc-status-pill-loading"
                           hx-get="/api/download-clients/{{ row.id }}/status"

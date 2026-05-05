@@ -847,6 +847,7 @@ mod cancel_pending_sab_e2e {
             start_time: chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 0)
                 .expect("epoch"),
             tasks: crate::services::task_registry::TaskRegistry::new(),
+            dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

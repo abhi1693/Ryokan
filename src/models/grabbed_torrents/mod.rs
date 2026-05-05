@@ -1180,5 +1180,20 @@ pub struct GrabbedTorrentWithSeries {
     pub replaces_count: i64,
 }
 
+impl GrabbedTorrentWithSeries {
+    /// Server-rendered short-form humanized `grabbed_at` for the
+    /// Downloads → History + Blocklist timestamp columns. Mirrors the
+    /// JS renderer in `static/js/base.js` exactly so the 30s tick
+    /// produces the same string (idempotent textContent assignment,
+    /// no paint). Pre-rendering eliminates the boost-nav flash where
+    /// the raw "2026-05-04 12:34:56" briefly showed before JS replaced
+    /// it with "5h ago" — and the column-width snap that followed
+    /// (table-layout: auto sized to the longer hidden text). See
+    /// `services::relative_time` for the full rationale.
+    pub fn grabbed_at_relative(&self) -> String {
+        crate::services::relative_time::humanize_sqlite_short_now(&self.grabbed_at)
+    }
+}
+
 #[cfg(test)]
 mod tests;

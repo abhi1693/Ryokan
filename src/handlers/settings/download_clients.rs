@@ -75,6 +75,15 @@ struct DownloadClientsListPartial {
     // both protocols.
     first_torrent_client: bool,
     first_usenet_client: bool,
+    /// Per-row cached probe status, keyed by `download_clients.id`.
+    /// Populated from `AppState.dc_status_cache` for entries fresh
+    /// within `DC_STATUS_CACHE_TTL`. When the row's id is present
+    /// here, the template renders the full pill server-side (same
+    /// shape as `partials/settings/download_clients/status_pill.html`)
+    /// instead of emitting the `hx-trigger="load"` placeholder. When
+    /// absent (cold cache, expired entry), the placeholder + JS-driven
+    /// probe runs as before.
+    cached_status: std::collections::HashMap<i64, crate::DcStatusEntry>,
 }
 
 impl DownloadClientsListPartial {
@@ -191,12 +200,41 @@ async fn render_section(state: &AppState) -> Response {
     let first_usenet_client = !rows
         .iter()
         .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
+    // Snapshot fresh entries from the per-process cache so the
+    // template can render the probed pill server-side and skip the
+    // hx-trigger="load" placeholder for those cards. Stale entries
+    // (older than DC_STATUS_CACHE_TTL) and disabled rows fall through
+    // to the placeholder path. The lock window is tiny — a single
+    // lookup per row, no async work — so a std Mutex is fine.
+    let cached_status = snapshot_fresh_dc_status(&state.dc_status_cache);
     DownloadClientsListPartial {
         rows,
         first_torrent_client,
         first_usenet_client,
+        cached_status,
     }
     .into_html_ok()
+}
+
+/// Walk the DC status cache and return only the entries still within
+/// TTL. Stale entries get evicted on the same pass so the map can't
+/// grow unboundedly across hours of use without a server restart
+/// (the entries themselves are small but a never-evicting cache is a
+/// latent leak). `pub(super)` so the parent settings module's full-
+/// page render path can read the same cache for its inline include
+/// of `download_clients/list.html`.
+pub(super) fn snapshot_fresh_dc_status(
+    cache: &crate::DcStatusCache,
+) -> std::collections::HashMap<i64, crate::DcStatusEntry> {
+    use std::time::Instant;
+    let mut guard = cache.lock().unwrap();
+    let now = Instant::now();
+    let ttl = crate::DC_STATUS_CACHE_TTL;
+    guard.retain(|_, (probed_at, _)| now.duration_since(*probed_at) < ttl);
+    guard
+        .iter()
+        .map(|(id, (_, entry))| (*id, entry.clone()))
+        .collect()
 }
 
 /// Form payload for create/update. `id == None` creates a new row;
@@ -317,6 +355,10 @@ pub async fn settings_download_clients_upsert(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             if is_htmx {
                 // Re-render the whole section in one swap — picks up
                 // the new card, the moved "default" badge if the user
@@ -380,6 +422,10 @@ pub async fn settings_download_clients_delete(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
             // HTMX redesign (#129 follow-up) — re-render the whole
             // section so the "+ Add" button + empty-state CTA both
@@ -447,6 +493,10 @@ pub async fn settings_download_clients_set_default(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             if is_htmx {
                 // Section re-render so the "default" badge moves
                 // between cards in one swap. Per-card swap would
@@ -720,6 +770,33 @@ pub async fn settings_download_clients_status(
         .map(|r| kind_label(&r.kind))
         .unwrap_or("Client");
 
+    // Cache hit (entry within DC_STATUS_CACHE_TTL) → return the
+    // cached pill without re-probing. Lets the placeholder swap
+    // resolve in microseconds rather than the 50-500ms+ the
+    // network probe takes, which is what the user perceived as
+    // flashing on every boost-nav into Settings → Connections.
+    // The render_section path also reads this cache and skips the
+    // placeholder entirely; this branch handles cards whose
+    // initial render predated the cache (cold first paint) or whose
+    // cache entry expired between the placeholder render and the
+    // hx-trigger="load" fire.
+    {
+        let mut guard = state.dc_status_cache.lock().unwrap();
+        if let Some((probed_at, entry)) = guard.get(&id)
+            && probed_at.elapsed() < crate::DC_STATUS_CACHE_TTL
+        {
+            return DownloadClientStatusPillPartial {
+                version: entry.version.clone(),
+                error: entry.error.clone(),
+                kind_label,
+            }
+            .into_html_ok();
+        }
+        // Drop expired entry on the way through so the lookup-then-
+        // probe path doesn't leave a dead row behind.
+        guard.remove(&id);
+    }
+
     // Pull the cached `Arc<dyn DownloadClient>` out of the pool
     // under the read lock and clone it; release the lock before
     // running the network probe so a slow client can't stall a
@@ -740,6 +817,19 @@ pub async fn settings_download_clients_status(
             "Client not in active pool (disabled or invalid kind)".into(),
         ),
     };
+
+    // Write the result back into the cache so render_section
+    // (and the next probe within TTL) skip the network round-trip.
+    state.dc_status_cache.lock().unwrap().insert(
+        id,
+        (
+            std::time::Instant::now(),
+            crate::DcStatusEntry {
+                version: version.clone(),
+                error: error.clone(),
+            },
+        ),
+    );
 
     DownloadClientStatusPillPartial {
         version,

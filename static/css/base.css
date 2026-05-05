@@ -149,6 +149,16 @@
     visibility: hidden;
 }
 
+/* Same shape for `data-utc` (manual search results' upload-date column).
+ * Server now pre-renders the trimmed `YYYY-MM-DD` string + stamps
+ * `data-utc-rendered="1"`, so this rule is dormant on the happy path —
+ * but a paginated-append row inserted via JS doesn't pre-stamp the
+ * marker, so the CSS guard prevents the brief raw-datetime flash before
+ * `renderUploadDates()` runs. */
+[data-utc]:not([data-utc-rendered]) {
+    visibility: hidden;
+}
+
 body {
     background: var(--bg);
     color: var(--text);

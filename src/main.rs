@@ -518,6 +518,7 @@ async fn main() {
         oauth_state: services::oauth_state::new(),
         start_time: chrono::Utc::now(),
         tasks: services::task_registry::TaskRegistry::new(),
+        dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.

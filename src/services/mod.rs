@@ -24,6 +24,7 @@ pub mod library_link;
 pub mod logger;
 pub mod progress;
 pub mod quality;
+pub mod relative_time;
 pub mod task_registry;
 
 pub mod rss;

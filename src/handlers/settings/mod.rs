@@ -190,6 +190,13 @@ struct SettingsTemplate {
     /// the HTMX-served partial path.
     first_torrent_client: bool,
     first_usenet_client: bool,
+    /// Same shape + role as `DownloadClientsListPartial.cached_status`
+    /// — the included `download_clients/list.html` partial reads
+    /// this map by row id to render the probed pill server-side
+    /// instead of the hx-trigger="load" placeholder. Both render
+    /// paths (full page + section partial) populate from the same
+    /// process-wide cache so they stay in sync.
+    cached_status: std::collections::HashMap<i64, crate::DcStatusEntry>,
     /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
     /// SubsPlease per-quality feeds) rendered on the Indexers tab
     /// alongside the torznab/newznab indexer rows. Empty until the
@@ -893,6 +900,7 @@ async fn build_settings_template(
         .iter()
         .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
     let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
+    let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -914,6 +922,7 @@ async fn build_settings_template(
         first_torrent_client,
         first_usenet_client,
         direct_rss_feeds,
+        cached_status,
     }
 }
 
@@ -1366,6 +1375,7 @@ pub async fn settings_submit(
         let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
             .await
             .unwrap_or_default();
+        let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -1387,6 +1397,7 @@ pub async fn settings_submit(
             first_torrent_client,
             first_usenet_client,
             direct_rss_feeds,
+            cached_status,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1484,6 +1495,7 @@ pub async fn settings_submit(
     let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
         .await
         .unwrap_or_default();
+    let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
@@ -1510,6 +1522,7 @@ pub async fn settings_submit(
         first_torrent_client,
         first_usenet_client,
         direct_rss_feeds,
+        cached_status,
     };
     Html(template.render().unwrap_or_default())
 }
