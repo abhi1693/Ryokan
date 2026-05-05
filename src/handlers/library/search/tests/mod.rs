@@ -983,3 +983,183 @@ mod cascade_stop_tests {
         assert!(!series_still_in_library(&db, Some(999_999)).await);
     }
 }
+
+// ─── Handler-level coverage for the four endpoints in mod.rs +
+//     interactive.rs that don't need a full Nyaa wiremock harness:
+//     the `api_series_detail` cache hit, the `anilist_search`
+//     400-on-invalid-source branch, and the cache-hit short circuit
+//     in both `interactive_search_*` endpoints. The Nyaa-backed
+//     non-cached paths in interactive_* are covered indirectly by
+//     `tests/auto_search_e2e.rs` (which tests `find_all_for_target`
+//     directly with the same RYOKAN_NYAA_API_BASE seam); the handler
+//     surface above that is just resolver + cache wiring.
+
+#[cfg(test)]
+mod handler_endpoints {
+    use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
+    use axum::response::Json as AxumJson;
+
+    use super::super::interactive::{interactive_search_batches, interactive_search_episode};
+    use super::super::{anilist_search, api_series_detail};
+    use super::empty_anime_detail;
+    use crate::handlers::library::AnilistSearchQuery;
+    use crate::services::interactive_search_cache;
+    use crate::services::nyaa::SearchResult;
+    use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+    fn empty_search_result(title: &str, info_hash: &str) -> SearchResult {
+        SearchResult {
+            title: title.into(),
+            link: String::new(),
+            magnet: String::new(),
+            torrent: String::new(),
+            size: String::new(),
+            size_bytes: 0,
+            seeders: 0,
+            leechers: 0,
+            downloads: 0,
+            group: String::new(),
+            resolution: String::new(),
+            quality_label: String::new(),
+            source: String::new(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: false,
+            is_trusted: false,
+            score: 0,
+            info_hash: info_hash.into(),
+            score_breakdown: Vec::new(),
+            upload_date: String::new(),
+            indexer_id: None,
+            indexer_name: String::new(),
+        }
+    }
+
+    // ─── api_series_detail ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn api_series_detail_returns_cached_metadata_without_network() {
+        // Cache hit short-circuits resolve_series_context inline at
+        // line 263 of reconcile.rs without hitting AniList. Pin the
+        // happy path: `(_, _, detail)` unpacks to the cached
+        // AnimeDetail and the JSON body round-trips.
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 600;
+        let series_id = seed_series(&db, anilist_id, "Cached Detail Show").await;
+        let detail = empty_anime_detail(anilist_id, "Cached Detail Show");
+        crate::models::metadata_cache::upsert(&db, series_id, anilist_id, None, &detail)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let AxumJson(returned) = api_series_detail(State(state), Path(anilist_id))
+            .await
+            .expect("cache-hit path must succeed without network");
+        assert_eq!(returned.id, anilist_id);
+        assert_eq!(returned.title_english, "Cached Detail Show");
+        assert_eq!(returned.episodes, Some(26));
+    }
+
+    // ─── anilist_search invalid-source guard ────────────────────
+
+    #[tokio::test]
+    async fn anilist_search_returns_400_for_unrecognized_source_override() {
+        // `?source=` accepts only "al", "mal", or omitted. A typo
+        // (`?source=anilist`) should be a hard 400 — silently
+        // falling through to the config default would mask the bug
+        // and the toggle in the Add Series modal would look broken.
+        // The 400 fires BEFORE any AniList HTTP call so this test
+        // doesn't need network or wiremock.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let result = anilist_search(
+            State(state),
+            Query(AnilistSearchQuery {
+                q: "anything".into(),
+                source: Some("anilist".into()),
+            }),
+        )
+        .await;
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert!(
+                    body.contains("invalid source override"),
+                    "the 400 must explain the bad value; got {body}"
+                );
+            }
+            Ok(_) => panic!("invalid source must surface as 400, not Ok"),
+        }
+    }
+
+    // ─── interactive_search_* cache short-circuits ──────────────
+
+    #[tokio::test]
+    async fn interactive_search_episode_returns_cached_results_when_present() {
+        // Pre-populate the cache; the handler must short-circuit at
+        // line 339 of interactive.rs and return without touching
+        // the resolver, the config, or Nyaa. Pin the contract — a
+        // refactor that flipped the cache-key shape (e.g. to
+        // `(series_id, ep)` instead of `(request_id, Some(ep))`)
+        // would break the lookup and silently re-fetch every poll.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+
+        let request_id: i64 = 700;
+        let episode: i32 = 5;
+        let cache_key = (request_id, Some(episode));
+        let seeded = vec![empty_search_result(
+            "[Group] Cached Show - 05.mkv",
+            "0123456789abcdef0123456789abcdef01234567",
+        )];
+        interactive_search_cache::insert(
+            &state.interactive_search_cache,
+            cache_key,
+            seeded.clone(),
+        );
+
+        let AxumJson(results) =
+            interactive_search_episode(State(state), Path((request_id, episode)))
+                .await
+                .expect("cache-hit path must succeed without resolver/Nyaa");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "[Group] Cached Show - 05.mkv");
+    }
+
+    #[tokio::test]
+    async fn interactive_search_batches_returns_cached_results_when_present() {
+        // Same shape as the per-episode test above, but the batch
+        // variant uses `(request_id, None)` as the cache key. Pin
+        // the None slot so a refactor that defaulted to `Some(0)`
+        // wouldn't silently confuse batch and episode-1 caches.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+
+        let request_id: i64 = 701;
+        let cache_key = (request_id, None);
+        let seeded = vec![
+            empty_search_result(
+                "[Group] Show - 01-12 Batch (1080p)",
+                "abcdef0123456789abcdef0123456789abcdef01",
+            ),
+            empty_search_result(
+                "[Group] Show - 01-24 Complete BD",
+                "fedcba9876543210fedcba9876543210fedcba98",
+            ),
+        ];
+        interactive_search_cache::insert(
+            &state.interactive_search_cache,
+            cache_key,
+            seeded.clone(),
+        );
+
+        let AxumJson(results) = interactive_search_batches(State(state), Path(request_id))
+            .await
+            .expect("cache-hit path must succeed");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().any(|r| r.title.contains("01-12")));
+        assert!(results.iter().any(|r| r.title.contains("01-24")));
+    }
+}
