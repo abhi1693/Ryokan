@@ -522,16 +522,22 @@ if (!window.__ryokanSettingsDcModalListeners) {
 }
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────
-// Mirrors the DC modal flow, including the await-then-open shape
-// that prevents the previous form's body from flashing into view
-// for ~50ms before the swap lands. Catalog seed cards →
-// `openIndexerAddModal(slug, name)` fetches the Add form pre-filled
-// with that seed's defaults; existing-indexer cards →
-// `openIndexerEditModal(id, name)` fetches the row's Edit form. Both
-// land in `#indexer-modal-body`. After a successful save the form's
-// hx-target="#indexer-section" causes the server's section-partial
-// response to replace the entire section, including the modal, at
-// display:none — closing + resetting in one shot.
+// Mirrors the DC modal flow: clear the body on click, open the
+// modal immediately for instant feedback, fire htmx.ajax to fill
+// the body. Indexer kind-aware copy (URL placeholder + API-key
+// hint) is server-rendered for `row.kind` (see commit 723fac4),
+// so the swap is correct on first paint and we don't need to
+// pre-pass the relabel before opening — same one-shape-for-both
+// the review pass landed on.
+//
+// Catalog seed cards → `openIndexerAddModal(slug, name)` fetches
+// the Add form pre-filled with that seed's defaults; existing-
+// indexer cards → `openIndexerEditModal(id, name)` fetches the
+// row's Edit form. Both land in `#indexer-modal-body`. After a
+// successful save the form's hx-target="#indexer-section" causes
+// the server's section-partial response to replace the entire
+// section, including the modal, at display:none — closing +
+// resetting in one shot.
 function openIndexerModal(title) {
     const modal = document.getElementById('indexer-modal');
     if (!modal) return;
@@ -540,10 +546,17 @@ function openIndexerModal(title) {
         if (titleEl) titleEl.textContent = title;
     }
     modal.style.display = 'flex';
-    // Focus first text/url input in the freshly-swapped body for
-    // keyboard ergonomics. The body is already in place because the
-    // caller awaited the htmx.ajax Promise before opening, so no
-    // setTimeout dance needed.
+    // Focus the first text/url input in the body for keyboard
+    // ergonomics. The body may be empty here (we clear it on click
+    // so the previous form doesn't flash through while the fetch is
+    // in flight); the htmx:afterSettle listener below picks up the
+    // focus once the form lands.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function focusIndexerModalFirstInput() {
+    const modal = document.getElementById('indexer-modal');
+    if (!modal || modal.style.display === 'none') return;
     const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
     if (firstInput) firstInput.focus();
 }
@@ -551,22 +564,25 @@ function closeIndexerModal() {
     const modal = document.getElementById('indexer-modal');
     if (modal) modal.style.display = 'none';
 }
-function fetchThenOpenIndexerModal(url, title) {
-    const show = function() { openIndexerModal(title); };
-    if (!window.htmx) { show(); return; }
-    const p = window.htmx.ajax(
-        'GET',
-        url,
-        { target: '#indexer-modal-body', swap: 'innerHTML' }
-    );
-    if (p && typeof p.then === 'function') {
-        p.then(show, show);
-    } else {
-        show();
+function fetchAndOpenIndexerModal(url, title) {
+    // Same clear-then-open shape as `fetchAndOpenDcModal` — drops
+    // the previous form's content so a rapid Edit↔Add toggle
+    // doesn't flash the prior row's fields into view, opens the
+    // modal immediately for instant click feedback, lets htmx fill
+    // the body in.
+    const body = document.getElementById('indexer-modal-body');
+    if (body) body.innerHTML = '';
+    openIndexerModal(title);
+    if (window.htmx) {
+        window.htmx.ajax(
+            'GET',
+            url,
+            { target: '#indexer-modal-body', swap: 'innerHTML' }
+        );
     }
 }
 function openIndexerEditModal(id, name) {
-    fetchThenOpenIndexerModal(
+    fetchAndOpenIndexerModal(
         '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
         'Editing ' + (name || 'indexer')
     );
@@ -575,7 +591,7 @@ function openIndexerAddModal(slug, name) {
     const url = slug
         ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
         : '/settings/indexers/add-form';
-    fetchThenOpenIndexerModal(url, 'Add ' + (name || 'indexer'));
+    fetchAndOpenIndexerModal(url, 'Add ' + (name || 'indexer'));
 }
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #indexer-section
@@ -651,6 +667,10 @@ if (!window.__ryokanSettingsIndexerModalListener) {
         if (ev.target && ev.target.id === 'indexer-modal-body') {
             const form = ev.target.querySelector('form');
             if (form) bindIndexerKindCopyToForm(form);
+            // Pick up focus the body-clear-on-open dance left
+            // pending — `openIndexerModal` ran before the swap
+            // landed, so its querySelector found nothing.
+            focusIndexerModalFirstInput();
         }
     });
 }
