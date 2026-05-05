@@ -511,6 +511,67 @@ async fn refresh_series_metadata_tv_format_merges_jikan_episode_titles() {
 }
 
 #[tokio::test]
+async fn refresh_series_metadata_movie_with_single_episode_skips_jikan_fetch() {
+    // Pins line 232's `delete !` on `episodic_format = !matches!(...)`
+    // and line 233's `> with >=` on `ep_count > 1`. Both control
+    // should_fetch_jikan = episodic_format || ep_count > 1.
+    //
+    // With MOVIE+episodes=1: original gate is false || false = false;
+    // mutated either side flips at least one operand to true. To
+    // observe the difference, the AL response must carry idMal=Some(_)
+    // so that fetch_live_detail_for_ids reaches Jikan via mal_id when
+    // the gate fires (without idMal, fetch_episode_titles_for_detail
+    // short-circuits regardless of the gate, hiding the mutation).
+    //
+    // The .expect(0) on the Jikan mock is the assertion: any unwanted
+    // call (mutation triggers the gate) fails the test on mock drop.
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    let mut detail = media_detail_response(7200);
+    // Set idMal so the gate's outcome is observable via Jikan calls.
+    detail["data"]["Media"]["idMal"] = serde_json::json!(72001);
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("Media(id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(detail))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/anime/\d+/episodes$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/anime"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let series_id = seed_minimal_series(&db, 7200).await;
+    let tracked = series::get_by_id(&db, series_id).await.unwrap().unwrap();
+    metadata_sync::refresh_series_metadata(&db, &tracked, false)
+        .await
+        .expect("MOVIE+1ep refresh succeeds without Jikan fetch");
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
 async fn refresh_series_metadata_movie_format_with_multi_episodes_still_fetches_jikan() {
     // Pins line 233's OR operator: `should_fetch_jikan = episodic_format
     // || ep_count > 1`. A mutation `||→&&` would require BOTH conditions
