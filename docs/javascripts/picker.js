@@ -1,8 +1,7 @@
 // Stack-builder generator. Renders a docker-compose.yml + Ryokan
 // settings snippet from the form on `docs/stack-builder.md`. Pure
-// vanilla JS, no framework — lives at the document level so MkDocs
-// Material's `extra_javascript` config wires it in without a build
-// step.
+// vanilla JS, no framework — lives at the document level so the
+// site's `extra_javascript` config wires it in without a build step.
 //
 // Design discipline: every option the form exposes must produce a
 // compose snippet that runs as-is. No "edit before use" knobs except
@@ -680,7 +679,7 @@ services:
     }, 1500);
   }
 
-  // Idempotent init. Material's `document$` observable can fire more
+  // Idempotent init. The site's `document$` observable can fire more
   // than once (instant navigation, theme toggle, etc.) — guarding via
   // a dataset flag so we don't stack duplicate listeners on the form.
   function init() {
