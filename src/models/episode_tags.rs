@@ -222,6 +222,18 @@ pub async fn record_grab(
     // for a single-episode it gets refined to the per-file size at
     // import time.
     let is_batch_i: i64 = if is_batch { 1 } else { 0 };
+
+    // Wrap both writes in a single transaction so we never end up with a
+    // history row but no quality_tags row. Pre-transaction, an error
+    // between the two INSERTs would commit the history side and leave
+    // the tag side empty — the OP ep 1157 case in production. The
+    // tag-overflow rendering path (build_episodes' Pass 2) iterates
+    // `quality_tags`, so a missing tag silently de-renders the row's
+    // grabbed state and the user can't open grab history for the
+    // episode. Rolling back both on failure keeps the two tables in
+    // lockstep.
+    let mut tx = db.begin().await?;
+
     let history_id: i64 = sqlx::query_scalar(
         "INSERT INTO episode_grab_history (series_id, episode_number, quality_tag, release_title, release_group, file_name, size_bytes, is_batch, state)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'grabbed')
@@ -235,7 +247,7 @@ pub async fn record_grab(
     .bind(release_title)
     .bind(size_bytes)
     .bind(is_batch_i)
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
 
     // The `WHERE COALESCE(manual_override, 0) = 0` guard mirrors
@@ -282,8 +294,10 @@ pub async fn record_grab(
     .bind(confidence)
     .bind(needs_review)
     .bind(&evidence_json)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(history_id)
 }

@@ -393,21 +393,29 @@
                                 <span class="title-option" data-title-lang="native">{% if !ep.title_native.is_empty() %}{{ ep.title_native }}{% else if !ep.title_romaji.is_empty() %}{{ ep.title_romaji }}{% else if !ep.title_english.is_empty() %}{{ ep.title_english }}{% else %}{{ ep.title }}{% endif %}</span>
                             </span>
                         </button>
-                        {% else if !ep.filename.is_empty() || !ep.quality_state.is_empty() || ep.downloaded %}
-                        {# Branch 2: row has actionable state — either an
-                           on-disk filename, a recorded grab tag (queued /
-                           completed / failed), or a post-processing-off
-                           "downloaded" mark. The grab-history modal renders
-                           usefully even when title + filename are empty
-                           (the body's "Not in library root" placeholder
-                           plus the grab-history loader cover the missing
-                           bits). Pre-fix this branch only fired on
-                           non-empty filename, so tag-overflow rows past
-                           ep_count (typical for airing series whose
-                           AL-reported episode count lags the grabbed
-                           number) rendered as unclickable gray text and
-                           the user couldn't open grab history for those
-                           episodes. #}
+                        {% else %}
+                        {# Fallback branch: any row without a title goes
+                           through the same clickable button shape as the
+                           branches above, regardless of whether it has
+                           an on-disk filename, a recorded grab tag, or
+                           neither. The grab-history modal renders
+                           usefully even when title + filename + tag are
+                           all empty — the body's "Not in library root"
+                           placeholder plus the grab-history loader cover
+                           the missing bits, and an empty modal body for
+                           an episode that genuinely has no data is fine.
+                           Earlier shapes split this into two branches
+                           (filename-or-tag-or-downloaded → button vs.
+                           else → unclickable span); the split missed
+                           main-loop rows where AL-reported `ep_count`
+                           was promoted past the real aired count by
+                           empty-title placeholder rows in
+                           `series_episode_metadata` (the One Piece
+                           1157-1160 case where Jikan/Kitsu hadn't seen
+                           the eps yet but the metadata-sync wrote
+                           `source="series"` placeholders). Always
+                           rendering as a button avoids that whole class
+                           of dead-click bug. #}
                         <button class="ep-title-btn" type="button"
                             onclick="showEpisodeDetail({{ ep.number }}, this)"
                             data-filename="{{ ep.filename }}"
@@ -415,8 +423,6 @@
                             data-on-disk="{{ ep.on_disk }}">
                             <span class="ep-missing-text">Episode {{ ep.number }}</span>
                         </button>
-                        {% else %}
-                        <span class="ep-missing-text">Episode {{ ep.number }}</span>
                         {% endif %}
                     </td>
                     <td class="ep-col-aired">{{ ep.aired }}</td>
