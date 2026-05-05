@@ -43,16 +43,19 @@
 //!   doesn't include 5070.
 //! - **Per-indexer rate limits live inside Prowlarr/Jackett,** not
 //!   the indexer itself. They surface as `429 Retry-After`. The
-//!   client surfaces the retry_after seconds in the error message;
-//!   no process-wide cooldown is applied yet — every fan-out re-
-//!   issues whether the previous burst hit a 429 or not. PR C
-//!   wires the cooldown table mirroring
-//!   [`crate::services::anilist::rate_limit`]; until then, a
-//!   429-storm just logs at debug level and keeps trying.
+//!   torznab client honors them via the per-id [`cooldown`] table
+//!   in this module: on 429 it stamps `until = now + Retry-After`
+//!   (capped at [`cooldown::COOLDOWN_MAX`], defaulted to
+//!   [`cooldown::COOLDOWN_DEFAULT`] when the header is missing) and
+//!   subsequent calls for that indexer short-circuit at the top of
+//!   `fetch()` until the window lifts. Per-id rather than global
+//!   so a 429 on AB doesn't silence a healthy NZBGeek for the same
+//!   window — each Prowlarr-fronted indexer has its own budget.
 //! - **`tvsearch` with `cat=5070&q=<title>` is the right anime
 //!   path.** `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.
 
+pub mod cooldown;
 pub mod torznab;
 
 use serde::{Deserialize, Serialize};
