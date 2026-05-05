@@ -142,10 +142,20 @@ function closeCfEditorModal() {
 
 // ── Settings → Download Clients shared add/edit modal ──────────────
 // One modal serves both flows. Per-card click → openDcEditModal(id,
-// name); "+ Add" tile → openDcAddModal(). Each routes through
-// htmx.ajax() to fetch the right form body into `#dc-modal-body`
-// AND opens the modal immediately (no wait for the round-trip — the
-// modal shows a brief loading-flash on the body until the swap lands).
+// name); "+ Add" tile → openDcAddModal(). Each clears the modal body
+// (so the previous form's content doesn't briefly show through),
+// opens the modal immediately for instant feedback, and fires
+// htmx.ajax() to fetch the right form body into `#dc-modal-body`.
+//
+// The form is rendered server-side with the kind-aware shape
+// (visibility, label names, input types) baked in for the row's
+// kind, so when the swap lands it's already correct — no async JS
+// relabel pass on first paint, no structural flash. The JS path in
+// `applyDcKindCopy` still owns the live kind-flip case (user toggles
+// the dropdown after the modal is open). Keep `DC_KIND_COPY` in JS
+// in lockstep with `copy_for_kind` in
+// `src/handlers/settings/download_clients.rs`.
+//
 // After a successful save the form's hx-target="#dc-section" causes
 // the server's section-partial response to replace the entire
 // section, including the modal, at display:none with the Add form
@@ -162,9 +172,18 @@ function openDownloadClientModal(title) {
         if (titleEl) titleEl.textContent = title;
     }
     modal.style.display = 'flex';
-    // Focus first text/url input in the freshly-swapped body for
-    // keyboard ergonomics. querySelector matches in DOM order so
-    // the Name field wins on both Add and Edit forms.
+    // Focus the first text/url input in the body for keyboard
+    // ergonomics. The body may be empty here (we clear it on click
+    // so the previous form doesn't flash through while the fetch
+    // is in flight); the htmx:afterSettle listener below picks up
+    // the focus once the form lands. querySelector matches in DOM
+    // order so the Name field wins on both Add and Edit forms.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function focusDcModalFirstInput() {
+    const modal = document.getElementById('dc-modal');
+    if (!modal || modal.style.display === 'none') return;
     const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
     if (firstInput) firstInput.focus();
 }
@@ -172,25 +191,34 @@ function closeDownloadClientModal() {
     const modal = document.getElementById('dc-modal');
     if (modal) modal.style.display = 'none';
 }
-function openDcEditModal(id, name) {
-    openDownloadClientModal('Editing ' + (name || 'download client'));
+function fetchAndOpenDcModal(url, title) {
+    // Clear the modal body so the previous form's content doesn't
+    // briefly show through while the fetch is in flight. The form
+    // rebuilds in place when the swap lands — kind-aware rendering
+    // is server-side now, so the swap is correct on arrival and no
+    // JS relabel pass is needed on first paint.
+    const body = document.getElementById('dc-modal-body');
+    if (body) body.innerHTML = '';
+    openDownloadClientModal(title);
     if (window.htmx) {
         window.htmx.ajax(
             'GET',
-            '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+            url,
             { target: '#dc-modal-body', swap: 'innerHTML' }
         );
     }
 }
+function openDcEditModal(id, name) {
+    fetchAndOpenDcModal(
+        '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+        'Editing ' + (name || 'download client')
+    );
+}
 function openDcAddModal() {
-    openDownloadClientModal('Add download client');
-    if (window.htmx) {
-        window.htmx.ajax(
-            'GET',
-            '/api/download-clients/add-form',
-            { target: '#dc-modal-body', swap: 'innerHTML' }
-        );
-    }
+    fetchAndOpenDcModal(
+        '/api/download-clients/add-form',
+        'Add download client'
+    );
 }
 // One-shot guard wraps every `addEventListener` at module scope in this
 // file. hx-boost re-runs the script on each nav-back, so an unguarded
@@ -470,6 +498,11 @@ if (!window.__ryokanSettingsDcModalListeners) {
         if (ev.target && ev.target.id === 'dc-modal-body') {
             const form = ev.target.querySelector('form');
             if (form) bindDcKindCopyToForm(form);
+            // Pick up the focus the body-clear-on-open dance left
+            // pending — `openDownloadClientModal` ran before the swap
+            // landed so its querySelector found nothing, and the
+            // user's first keystroke would otherwise go nowhere.
+            focusDcModalFirstInput();
         }
     });
     // Initial load (the section partial pre-renders the Add form body
@@ -489,7 +522,9 @@ if (!window.__ryokanSettingsDcModalListeners) {
 }
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────
-// Mirrors the DC modal flow. Catalog seed cards →
+// Mirrors the DC modal flow, including the await-then-open shape
+// that prevents the previous form's body from flashing into view
+// for ~50ms before the swap lands. Catalog seed cards →
 // `openIndexerAddModal(slug, name)` fetches the Add form pre-filled
 // with that seed's defaults; existing-indexer cards →
 // `openIndexerEditModal(id, name)` fetches the row's Edit form. Both
@@ -506,39 +541,41 @@ function openIndexerModal(title) {
     }
     modal.style.display = 'flex';
     // Focus first text/url input in the freshly-swapped body for
-    // keyboard ergonomics. Run after a microtask so the htmx.ajax
-    // call below has a chance to swap the body in first.
-    setTimeout(function() {
-        const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
-        if (firstInput) firstInput.focus();
-    }, 50);
+    // keyboard ergonomics. The body is already in place because the
+    // caller awaited the htmx.ajax Promise before opening, so no
+    // setTimeout dance needed.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
 }
 function closeIndexerModal() {
     const modal = document.getElementById('indexer-modal');
     if (modal) modal.style.display = 'none';
 }
-function openIndexerEditModal(id, name) {
-    openIndexerModal('Editing ' + (name || 'indexer'));
-    if (window.htmx) {
-        window.htmx.ajax(
-            'GET',
-            '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
-            { target: '#indexer-modal-body', swap: 'innerHTML' }
-        );
+function fetchThenOpenIndexerModal(url, title) {
+    const show = function() { openIndexerModal(title); };
+    if (!window.htmx) { show(); return; }
+    const p = window.htmx.ajax(
+        'GET',
+        url,
+        { target: '#indexer-modal-body', swap: 'innerHTML' }
+    );
+    if (p && typeof p.then === 'function') {
+        p.then(show, show);
+    } else {
+        show();
     }
 }
+function openIndexerEditModal(id, name) {
+    fetchThenOpenIndexerModal(
+        '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
+        'Editing ' + (name || 'indexer')
+    );
+}
 function openIndexerAddModal(slug, name) {
-    openIndexerModal('Add ' + (name || 'indexer'));
-    if (window.htmx) {
-        const url = slug
-            ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
-            : '/settings/indexers/add-form';
-        window.htmx.ajax(
-            'GET',
-            url,
-            { target: '#indexer-modal-body', swap: 'innerHTML' }
-        );
-    }
+    const url = slug
+        ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
+        : '/settings/indexers/add-form';
+    fetchThenOpenIndexerModal(url, 'Add ' + (name || 'indexer'));
 }
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #indexer-section

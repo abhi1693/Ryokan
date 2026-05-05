@@ -58,6 +58,94 @@ pub fn kind_label(kind: &str) -> &'static str {
     }
 }
 
+/// Per-kind copy (placeholders, hint text, label names, visibility)
+/// for the Add/Edit form body. Mirrors `DC_KIND_COPY` in
+/// `static/js/settings.js` — keep both in lockstep when a new kind
+/// lands or copy is updated. Server-rendered into the templates so
+/// the modal opens with the kind-correct shape on first paint;
+/// without this the form rendered the qBit-style defaults and the
+/// JS path swapped them in async on `htmx:afterSettle`, which read
+/// as a structural flash on Edit-on-SAB / Edit-on-Deluge clicks.
+/// JS still owns the live kind-flip case (user toggles the dropdown
+/// after the modal opens).
+pub struct DcKindCopy {
+    pub url_placeholder: &'static str,
+    pub url_hint: &'static str,
+    pub username_visible: bool,
+    pub username_hint: &'static str,
+    pub password_label: &'static str,
+    /// HTML `input type` — `password` masks, `text` reveals (used
+    /// for SAB API keys where visual verification of the pasted
+    /// value is more useful than masking).
+    pub password_type: &'static str,
+    pub password_hint: &'static str,
+    pub label_label: &'static str,
+    pub label_hint: &'static str,
+}
+
+pub fn copy_for_kind(kind: &str) -> DcKindCopy {
+    match kind {
+        KIND_DELUGE => DcKindCopy {
+            url_placeholder: "http://localhost:8112",
+            url_hint: "Point at Deluge's Web UI base.",
+            username_visible: false,
+            username_hint: "",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "Deluge Web UI password. Deluge has no per-user auth at the API layer; the password is the only credential.",
+            label_label: "Label",
+            label_hint: "Deluge's Label plugin tag. The plugin must be enabled; Ryokan auto-enables it on first connect when Label shows up in available_plugins but not enabled_plugins.",
+        },
+        KIND_TRANSMISSION => DcKindCopy {
+            url_placeholder: "http://localhost:9091",
+            url_hint: "Point at Transmission's RPC endpoint base.",
+            username_visible: true,
+            username_hint: "Transmission HTTP Basic auth user (matches rpc-username in settings.json).",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "Transmission HTTP Basic auth password (matches rpc-password in settings.json).",
+            label_label: "Label",
+            label_hint: "Transmission native label (4.x+). On 3.x and earlier Ryokan falls back to a save-path prefix for scoping.",
+        },
+        KIND_RTORRENT => DcKindCopy {
+            url_placeholder: "http://localhost/RPC2",
+            url_hint: "Point at rtorrent's XML-RPC endpoint (typically /RPC2 under the SCGI / nginx proxy).",
+            username_visible: true,
+            username_hint: "HTTP Basic auth user if the RPC endpoint is fronted by nginx with auth_basic. Leave blank for unauthenticated RPC.",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "HTTP Basic auth password matching the username above.",
+            label_label: "Label",
+            label_hint: "Sets the custom1 field on every added torrent (the ruTorrent label convention). Ryokan filters list_scoped by this tag.",
+        },
+        KIND_SABNZBD => DcKindCopy {
+            url_placeholder: "http://localhost:8080",
+            url_hint: "Point at SABnzbd's Web UI base. Ryokan appends /api. If your SAB has URL_BASE set (e.g. /sabnzbd), include it: http://host:8080/sabnzbd.",
+            username_visible: false,
+            username_hint: "",
+            password_label: "API Key",
+            password_type: "text",
+            password_hint: "SABnzbd's API key. Find it in SABnzbd \u{2192} Config \u{2192} General \u{2192} Security \u{2192} API Key.",
+            label_label: "Category",
+            label_hint: "SAB category. Determines the post-processing target directory. Ryokan filters list_scoped by category so it only sees jobs it added.",
+        },
+        // qBit + unknown fall through to the qBit default. Matches the
+        // JS map's `DC_KIND_COPY[kind] || DC_KIND_COPY.qbittorrent`
+        // shape.
+        _ => DcKindCopy {
+            url_placeholder: "http://localhost:8080",
+            url_hint: "Point at qBittorrent's Web UI base. Ryokan handles the API path internally.",
+            username_visible: true,
+            username_hint: "qBit's Web UI username (default is admin).",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "qBit's Web UI password. qBittorrent 4.6.1+ generates a random temporary password on first start. Pre-4.6.1's default password is 'adminadmin'.",
+            label_label: "Category",
+            label_hint: "qBit category Ryokan tags every torrent with. Determines scoping (Ryokan only sees torrents in this category) AND the post-processing target directory if qBit's category-rule has one set.",
+        },
+    }
+}
+
 /// Section partial — the entire card list + add slot wrapped in
 /// `#dc-section`. Every successful HTMX action (upsert / delete /
 /// set-default) returns this so a single swap re-renders the
