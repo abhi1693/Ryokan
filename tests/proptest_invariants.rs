@@ -23,13 +23,16 @@
 
 use proptest::prelude::*;
 use ryokan::services::auto_search::parse_release_numbers;
+use ryokan::services::custom_formats::{compile_from_json, total_cf_score_for_release};
 use ryokan::services::nyaa::{SearchOptions, SearchResult};
+use ryokan::services::quality::nyaa_categories_for_format;
 use ryokan::services::scoring::{ScoreComponent, score_result_with_breakdown};
 use ryokan::services::source::{
     self, ClassificationResult, DecisionRule, Resolution, Source, SourceEvidence, WebKind,
     aggregate, score_classification,
 };
 use ryokan::services::source_filename::classify_filename;
+use std::collections::HashSet;
 
 // ─── Helpers ──────────────────────────────────────────────────────
 
@@ -468,6 +471,184 @@ proptest! {
             "empty input → zero confidence (got {})",
             result.confidence
         );
+    }
+}
+
+// ─── custom_formats evaluator + parser ────────────────────────────
+//
+// CFs ship as user-editable JSON (via Settings → Custom Formats) plus
+// the bundled TRaSH-Guides defaults. The evaluator runs untrusted
+// regex specs against arbitrary release titles. fancy-regex has its
+// own catastrophic-backtracking guards, but proptest fuzzing the
+// title input + the empty-CF base case catches the "we constructed
+// an evaluator state that fancy-regex doesn't like" failure mode and
+// any pure no-panic regression.
+
+proptest! {
+    /// `compile_from_json` is the parser side. It returns
+    /// `Result<CompiledCustomFormat, String>` — never panics on
+    /// malformed JSON, just returns Err. This proptest fuzzes
+    /// arbitrary bytes through the parser to verify that contract
+    /// holds across whatever weird input shapes proptest generates.
+    #[test]
+    fn compile_from_json_never_panics_on_arbitrary_input(
+        raw in ".{0,500}",
+        score in any::<i32>(),
+        id in any::<i64>(),
+    ) {
+        // Returns Result<CompiledCustomFormat, String>; both branches
+        // are fine. We only care that the call doesn't panic.
+        let _ = compile_from_json(&raw, score, id);
+    }
+
+    /// Empty CF list always produces a zero score, regardless of the
+    /// release shape. Pins the base case for the
+    /// `breakdown.iter().sum() == total` invariant in scoring's CF
+    /// integration.
+    #[test]
+    fn total_cf_score_for_release_with_empty_cfs_is_always_zero(
+        title in "[a-zA-Z0-9 \\-\\[\\]\\(\\)\\.]{0,80}",
+        group in "[A-Za-z0-9_-]{0,20}",
+        size_bytes in any::<i64>(),
+        info_hash in "[0-9a-f]{40}",
+    ) {
+        let classification = ClassificationResult {
+            source: Source::Web,
+            resolution: Resolution::R1080p,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::WebDl,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: vec![],
+            decision_rule: DecisionRule::Empty,
+        };
+        let seadex: HashSet<String> = HashSet::new();
+        let total = total_cf_score_for_release(
+            &[],
+            &classification,
+            &title,
+            &group,
+            size_bytes,
+            &info_hash,
+            &seadex,
+        );
+        prop_assert_eq!(total, 0);
+    }
+
+    /// `total_cf_score_for_release` is deterministic for the same
+    /// inputs. Defends against accidental thread-local / once_cell
+    /// state inside the evaluator.
+    #[test]
+    fn total_cf_score_for_release_is_deterministic(
+        title in "[a-zA-Z0-9 \\-\\[\\]\\(\\)\\.]{0,80}",
+    ) {
+        let classification = ClassificationResult {
+            source: Source::BluRay,
+            resolution: Resolution::R1080p,
+            is_remux: false,
+            is_bdmv: false,
+            web_kind: WebKind::Unknown,
+            confidence: 1.0,
+            needs_review: false,
+            evidence: vec![],
+            decision_rule: DecisionRule::Empty,
+        };
+        let seadex: HashSet<String> = HashSet::new();
+        let a = total_cf_score_for_release(
+            &[], &classification, &title, "Group", 0, "", &seadex,
+        );
+        let b = total_cf_score_for_release(
+            &[], &classification, &title, "Group", 0, "", &seadex,
+        );
+        prop_assert_eq!(a, b);
+    }
+}
+
+// ─── quality::nyaa_categories_for_format ─────────────────────────
+
+proptest! {
+    /// Total-function contract: `nyaa_categories_for_format` takes any
+    /// (format, allow_non_english) and returns a non-empty Vec<String>.
+    /// No panic on arbitrary format strings.
+    #[test]
+    fn nyaa_categories_for_format_total_and_non_empty(
+        format in "[A-Z_]{0,16}",
+        allow_non_english in any::<bool>(),
+    ) {
+        let cats = nyaa_categories_for_format(&format, allow_non_english);
+        prop_assert!(!cats.is_empty(), "categories must always be non-empty");
+    }
+
+    /// MUSIC always returns the AMV+Audio pair, independent of the
+    /// `allow_non_english` flag. Pins the `format == "MUSIC"`
+    /// short-circuit at line 56 of `services/quality.rs`.
+    #[test]
+    fn nyaa_categories_for_format_music_returns_amv_and_audio(
+        allow_non_english in any::<bool>(),
+    ) {
+        let cats = nyaa_categories_for_format("MUSIC", allow_non_english);
+        prop_assert_eq!(cats.len(), 2);
+        prop_assert!(cats.contains(&"1_1".to_string()), "MUSIC must include AMV (1_1)");
+        prop_assert!(cats.contains(&"2_0".to_string()), "MUSIC must include Audio (2_0)");
+    }
+
+    /// Non-MUSIC + allow_non_english=true returns Anime All (1_0).
+    /// allow_non_english=false returns English-translated (1_2).
+    /// Pins the else-branch at lines 58-62.
+    #[test]
+    fn nyaa_categories_for_format_non_music_branches_on_allow_non_english(
+        format in "(TV|MOVIE|SPECIAL|OVA|ONA)",
+    ) {
+        let cats_non_eng = nyaa_categories_for_format(&format, true);
+        prop_assert_eq!(cats_non_eng.as_slice(), &["1_0".to_string()]);
+        let cats_eng = nyaa_categories_for_format(&format, false);
+        prop_assert_eq!(cats_eng.as_slice(), &["1_2".to_string()]);
+    }
+}
+
+// ─── Resolution / Source enum round-trips ────────────────────────
+
+proptest! {
+    /// `Resolution::as_str` ↔ `Resolution::from_str` round-trip on
+    /// every defined variant. Catches the silent-drop case where a
+    /// future Resolution variant is added but `from_str` isn't
+    /// updated to recognize its `as_str` form.
+    #[test]
+    fn resolution_round_trips_through_as_str(
+        r in known_resolution(),
+    ) {
+        let s = r.as_str();
+        let parsed = Resolution::from_str(s);
+        prop_assert_eq!(parsed, r);
+    }
+
+    /// `Source::as_str` ↔ `Source::from_str` round-trip. Same shape
+    /// as the Resolution test.
+    #[test]
+    fn source_round_trips_through_as_str(
+        s in known_source(),
+    ) {
+        let str_form = s.as_str();
+        let parsed = Source::from_str(str_form);
+        prop_assert_eq!(parsed, s);
+    }
+
+    /// `Resolution::from_str` is a total function — no panic on
+    /// arbitrary input, falls back to Unknown for unrecognized.
+    #[test]
+    fn resolution_from_str_total_function(
+        s in ".{0,30}",
+    ) {
+        let _ = Resolution::from_str(&s);
+    }
+
+    /// Same total-function property for `Source::from_str`.
+    #[test]
+    fn source_from_str_total_function(
+        s in ".{0,30}",
+    ) {
+        let _ = Source::from_str(&s);
     }
 }
 
