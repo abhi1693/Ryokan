@@ -516,6 +516,173 @@ async fn find_all_for_target_skips_group_pass_when_restrict_user_active() {
     unset_nyaa_base();
 }
 
+/// Seed the franchise-alias data path that `find_all_for_target`'s
+/// absolute-offset gate at line 229 walks. Three pieces of state:
+///
+///   1. `series.cumulative_prior_episodes = N` so resolve_search_overrides
+///      produces `absolute_offset = N`.
+///   2. A `provider_relations_cache` PREQUEL row from the series's
+///      anilist_id back to a synthetic root.
+///   3. A `provider_metadata_cache` row for that root carrying
+///      title_romaji in its detail_json.
+///
+/// `resolve_franchise_aliases` joins the two cache tables and returns
+/// the root's title slot, which then drives the franchise-pass query
+/// fan-out.
+async fn seed_franchise_chain(
+    db: &sqlx::SqlitePool,
+    series_anilist_id: i64,
+    series_title: &str,
+    root_provider_id: i64,
+    root_title_romaji: &str,
+    cumulative_prior: i32,
+) -> i64 {
+    sqlx::query(
+        "INSERT INTO series (anilist_id, title, title_romaji, folder_name, status, format, \
+         cumulative_prior_episodes) \
+         VALUES (?, ?, ?, '', 'FINISHED', 'TV', ?)",
+    )
+    .bind(series_anilist_id)
+    .bind(series_title)
+    .bind(series_title)
+    .bind(cumulative_prior)
+    .execute(db)
+    .await
+    .unwrap();
+    let series_id: i64 = sqlx::query_scalar("SELECT id FROM series WHERE anilist_id = ?")
+        .bind(series_anilist_id)
+        .fetch_one(db)
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "INSERT INTO provider_relations_cache \
+         (provider_id, related_provider_id, related_mal_id, title_romaji, title_english, \
+          title_native, cover_url, format, status, episodes, relation_type, season_year, \
+          media_type) \
+         VALUES (?, ?, NULL, ?, '', '', '', 'TV', 'FINISHED', 24, 'PREQUEL', 2020, 'ANIME')",
+    )
+    .bind(series_anilist_id)
+    .bind(root_provider_id)
+    .bind(root_title_romaji)
+    .execute(db)
+    .await
+    .unwrap();
+
+    let detail_json = serde_json::json!({
+        "title_romaji": root_title_romaji,
+        "title_english": "",
+        "title_native": "",
+        "cover_url": "",
+        "format": "TV",
+        "status": "FINISHED",
+    })
+    .to_string();
+    sqlx::query(
+        "INSERT INTO provider_metadata_cache (provider_id, mal_id, detail_json) \
+         VALUES (?, NULL, ?)",
+    )
+    .bind(root_provider_id)
+    .bind(detail_json)
+    .execute(db)
+    .await
+    .unwrap();
+
+    series_id
+}
+
+#[tokio::test]
+async fn find_all_for_target_runs_franchise_pass_when_absolute_offset_set() {
+    // Pin the franchise-alias / absolute-offset query pass at lines
+    // 227-259. With `absolute_offset = 47` and franchise_aliases =
+    // ["Test Franchise"], the third pass runs queries against
+    // `<franchise_root> <ep+offset>` ("Test Franchise 56" for ep=9
+    // and offset=47). Catches several distinct mutants:
+    //
+    //   * Line 229 `> with ==` / `<` on `absolute_offset > 0`: gate
+    //     fails, no franchise queries, .expect(1..) on the franchise
+    //     query fails.
+    //   * Line 230 `delete !` on `!franchise_aliases.is_empty()`:
+    //     same observable failure.
+    //   * Line 244 `delete field aliases` (struct-spread mutation):
+    //     franchise_ctx.aliases falls back to canonical via spread,
+    //     so the franchise queries use `Test Show` aliases instead
+    //     of `Test Franchise`. The .expect(0) on
+    //     `q="Test Show 56"` catches it.
+    //   * Line 246 `delete field target`: franchise_ctx.target falls
+    //     back to canonical `Episode(9)`, so queries get "9" not
+    //     "56". The .expect(0) on `q="Test Franchise 9"` catches it.
+    let _gate = ENV_LOCK.lock().await;
+
+    let server = MockServer::start().await;
+    // Franchise pass fires with the franchise root title + absolute
+    // target (9 + 47 = 56). build_queries_from_aliases produces
+    // "<alias> <ep:02>" and "<alias> - <ep:02>" non-collapsed.
+    Mock::given(method("GET"))
+        .and(query_param("q", "Test Franchise 56"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(1..)
+        .mount(&server)
+        .await;
+    // Mutations 244 and 246 would route the franchise pass through
+    // wrong aliases or wrong target. Both shapes must NOT fire.
+    Mock::given(method("GET"))
+        .and(query_param("q", "Test Show 56"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "Test Franchise 9"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    // Catch-all for canonical-pass queries against `Test Show`. The
+    // canonical pass fires with the relative target (9), so queries
+    // include "Test Show 09" / "Test Show - 09" / etc. Return empty
+    // bodies; we don't care about their content for this test.
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let db = in_memory_pool().await;
+    let _series_id = seed_franchise_chain(
+        &db,
+        1008,
+        "Test Show",
+        9000, // synthetic root provider_id, won't collide with seeded series
+        "Test Franchise",
+        47,
+    )
+    .await;
+    let state = ryokan::test_support::build_test_app_state(db, None);
+    let detail = detail_for(1008, "Test Show");
+    let cfg = default_config();
+    let target = SearchTarget::Episode(9);
+    let cfs: Vec<ryokan::services::custom_formats::CompiledCustomFormat> = vec![];
+
+    let _results = find_all_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &target,
+        true,
+        &cfs,
+        &state.indexers,
+    )
+    .await;
+
+    // Expectations on the wiremock mocks fire at server-drop. If the
+    // franchise pass didn't run with the right aliases + target, one
+    // of the .expect(N) constraints will panic.
+
+    unset_nyaa_base();
+}
+
 #[tokio::test]
 async fn find_all_for_target_dedups_same_info_hash_across_query_passes() {
     // The query sweep fans out across multiple title aliases. If two
