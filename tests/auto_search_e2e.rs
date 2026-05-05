@@ -460,6 +460,24 @@ async fn find_all_for_target_skips_group_pass_when_restrict_user_active() {
         .expect(0)
         .mount(&server)
         .await;
+    // Also fail any request whose query string has the group prefix.
+    // build_group_queries produces "<Group> <alias> - <ep>" and
+    // "<Group> <alias> <ep>". With original code these never fire
+    // because the gate at line 206 short-circuits when restrict_user
+    // is set. Mutating `&&` to `||` would let the group pass fire
+    // anyway → these query params would land. .expect(0) catches it.
+    Mock::given(method("GET"))
+        .and(query_param("q", "Trusted Test Show 04"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(query_param("q", "Trusted Test Show - 04"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(0)
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/user/Trusted"))
         .respond_with(
