@@ -1881,7 +1881,7 @@ async fn main() {
         });
     }
 
-    // Issue #62 PR B — watch-list sync. Eleventh supervised task.
+    // Issue #62 PR B — watch-list sync. One of the supervised tasks.
     // Same minute-tick + minutes_since_last cadence pattern as
     // rss_sync (so a process restart respects the persisted
     // last-finished timestamp instead of forcing an immediate
