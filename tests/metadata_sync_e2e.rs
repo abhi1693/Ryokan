@@ -126,12 +126,39 @@ async fn refresh_series_metadata_writes_cache_on_happy_al_response() {
         .respond_with(ResponseTemplate::new(200).set_body_json(media_detail_response(2026)))
         .mount(&mock)
         .await;
+    // Jikan must NOT be called for MOVIE+episodes=1: episodic_format
+    // is false AND ep_count > 1 is false, so should_fetch_jikan is
+    // false. Pins line 232's `delete !` on episodic_format (mutation
+    // would set it to true, triggering Jikan) and line 233's `> with
+    // >=` (mutation would let ep_count=1 satisfy the gate).
+    Mock::given(method("GET"))
+        .and(path("/anime/1/episodes")) // unreached path, just a sentinel
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    // Wide-path Jikan match — any /anime/*/episodes call should fail.
+    Mock::given(method("GET"))
+        .and(wiremock::matchers::path_regex(r"^/anime/\d+/episodes$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
+    // Kitsu must NOT be called either (ep_count > 1 is false).
+    Mock::given(method("GET"))
+        .and(path("/anime"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
+        .expect(0)
+        .mount(&mock)
+        .await;
 
     // SAFETY: serialized via ENV_LOCK; no concurrent reader/writer
     // within this binary, and other test binaries get their own
     // process.
     unsafe {
         std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        std::env::set_var("JIKAN_API_BASE", mock.uri());
+        std::env::set_var("RYOKAN_KITSU_API_BASE", mock.uri());
     }
 
     let db = in_memory_pool().await;
@@ -178,6 +205,8 @@ async fn refresh_series_metadata_writes_cache_on_happy_al_response() {
 
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        std::env::remove_var("JIKAN_API_BASE");
+        std::env::remove_var("RYOKAN_KITSU_API_BASE");
     }
     anilist::reset_state_for_tests();
 }
