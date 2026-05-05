@@ -1388,12 +1388,14 @@ mod handler_endpoints {
     }
 
     #[tokio::test]
-    async fn grab_batch_result_records_per_episode_tags_for_parsed_range() {
-        // Batch shape: title carries an episode range (01-12), so
-        // batch_episode_numbers parses 12 episodes and the handler
-        // writes a quality tag per episode plus one grabbed_torrents
-        // row marked is_batch=true. Pins the batch fan-out which
-        // grab_interactive_result doesn't exercise.
+    async fn grab_batch_result_records_per_episode_tags_with_anilist_count_fallback() {
+        // Realistic complete-batch shape — title carries `(BD 1080p)`
+        // but no episode range, so batch_episode_numbers falls back
+        // to AnimeDetail.episodes (the AniList-reported count).
+        // empty_anime_detail seeds episodes: Some(26), so the
+        // handler fans out 26 per-episode quality tags. Pins the
+        // fallback path that real-world batches actually exercise —
+        // most release groups don't tag the range in the title.
         use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
 
         let db = in_memory_pool().await;
@@ -1414,7 +1416,7 @@ mod handler_endpoints {
 
         let body = serde_json::json!({
             "url": "magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
-            "title": "[Group] Batch Show 01-12 (BD 1080p)",
+            "title": "[Group] Batch Show (BD 1080p)",
             "group": "Group",
             "resolution": "1080p",
             "info_hash": "",
@@ -1432,13 +1434,15 @@ mod handler_endpoints {
         // is_batch=true on the grabbed_torrents row.
         let is_batch: i64 =
             sqlx::query_scalar("SELECT is_batch FROM grabbed_torrents WHERE torrent_name = ?")
-                .bind("[Group] Batch Show 01-12 (BD 1080p)")
+                .bind("[Group] Batch Show (BD 1080p)")
                 .fetch_one(&db)
                 .await
                 .unwrap();
         assert_eq!(is_batch, 1, "batch grab must mark is_batch=true");
 
-        // 12 per-episode quality tags written.
+        // 26 per-episode quality tags written — empty_anime_detail
+        // seeds episodes: Some(26), and the no-range title falls
+        // through to that AL count.
         let tag_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM episode_quality_tags WHERE series_id = ?")
                 .bind(series_id)
@@ -1446,9 +1450,9 @@ mod handler_endpoints {
                 .await
                 .unwrap();
         assert_eq!(
-            tag_count, 12,
-            "batch_episode_numbers must produce 12 episodes from `01-12` and \
-             record_grab fans out one tag per episode"
+            tag_count, 26,
+            "no-range batch title must fall back to AnimeDetail.episodes (26) \
+             and record_grab fans out one tag per episode"
         );
     }
 
