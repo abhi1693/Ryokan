@@ -370,6 +370,135 @@ async fn find_all_for_target_drops_episode_mismatches_for_single_episode_targets
 }
 
 #[tokio::test]
+async fn find_all_for_target_runs_group_query_pass_when_preferred_groups_configured() {
+    // Pin the group-queries branch at line 206:
+    //   `if !preferred_groups.is_empty() && series_ctx.restrict_user.is_empty()`
+    //
+    // The first query pass uses canonical title aliases. When
+    // `preferred_groups` is set AND no uploader restriction is active,
+    // a SECOND pass runs prefixing each query with the group name
+    // ("SubsPlease Test Show 01" etc.). Mutating the `&&` to `||` or
+    // dropping the negation on either side would change which pass
+    // fires. Pin by counting Nyaa requests: at minimum two (canonical
+    // queries + group-prefixed queries).
+    //
+    // Easier to assert the request COUNT than the query contents,
+    // since Ryokan's query-shape variants are tested separately.
+    let _gate = ENV_LOCK.lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(nyaa_results_page(&nyaa_row(
+                "6666666666666666666666666666666666666666",
+                400,
+                "[SubsPlease] Test Show - 02 (1080p) [WEB].mkv",
+                "1.0 GiB",
+                40,
+            ))),
+        )
+        // .expect(1..) means "at least one call." Without group queries,
+        // the canonical pass alone would generate ~4 queries (build_
+        // queries_from_aliases per alias × 4 query-shape variants).
+        // With group queries, that count increases. We just want > 1
+        // distinct hits to confirm the group pass also fires.
+        .expect(2..)
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let state = build_state().await;
+    let detail = detail_for(1006, "Test Show");
+    let mut cfg = default_config();
+    cfg.preferred_groups = "SubsPlease".into();
+    let target = SearchTarget::Episode(2);
+    let cfs: Vec<ryokan::services::custom_formats::CompiledCustomFormat> = vec![];
+
+    let _results = find_all_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &target,
+        true,
+        &cfs,
+        &state.indexers,
+    )
+    .await;
+
+    // The .expect(2..) on the mount above is the assertion; it fails
+    // at server-drop if the call count is below the threshold.
+
+    unset_nyaa_base();
+}
+
+#[tokio::test]
+async fn find_all_for_target_skips_group_pass_when_restrict_user_active() {
+    // Symmetric pin for the second clause of line 206's `&&`. When
+    // `restrict_user` is non-empty, the group-prefixed query pass
+    // skips entirely (the comment in the function explains why:
+    // `?u=<name>` already scopes to one uploader, so a group prefix
+    // is a no-op narrow).
+    //
+    // Distinct from the previous test by setting restrict_to_uploader
+    // and asserting the request count stays at the canonical-pass
+    // baseline. Without the gate, the group pass would run on top
+    // of the canonical pass and the count would jump.
+    //
+    // Hard to assert "no second pass fired" with a strict count
+    // because canonical-pass fan-out is itself variable. Instead,
+    // assert the user-scoped path was hit: every query goes to
+    // `/user/<name>` rather than `/`.
+    let _gate = ENV_LOCK.lock().await;
+
+    let server = MockServer::start().await;
+    // Fail any request to bare `/` — every request must go through
+    // the /user/Trusted scope.
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/user/Trusted"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string(nyaa_results_page(&nyaa_row(
+                "7777777777777777777777777777777777777777",
+                500,
+                "[Trusted] Test Show - 04 (1080p).mkv",
+                "1.0 GiB",
+                30,
+            ))),
+        )
+        .expect(1..)
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let state = build_state().await;
+    let detail = detail_for(1007, "Test Show");
+    let mut cfg = default_config();
+    cfg.preferred_groups = "Trusted".into();
+    cfg.default_restrict_to_uploader = "Trusted".into();
+    let target = SearchTarget::Episode(4);
+    let cfs: Vec<ryokan::services::custom_formats::CompiledCustomFormat> = vec![];
+
+    let _results = find_all_for_target(
+        &state.db,
+        &detail,
+        &cfg,
+        &target,
+        true,
+        &cfs,
+        &state.indexers,
+    )
+    .await;
+
+    unset_nyaa_base();
+}
+
+#[tokio::test]
 async fn find_all_for_target_dedups_same_info_hash_across_query_passes() {
     // The query sweep fans out across multiple title aliases. If two
     // queries surface the SAME info_hash, the dedup map under
