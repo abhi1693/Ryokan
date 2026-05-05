@@ -143,6 +143,25 @@ pub struct SearchResult {
     pub indexer_name: String,
 }
 
+impl SearchResult {
+    /// `upload_date` trimmed to just the date portion ("YYYY-MM-DD").
+    /// Nyaa publishes timestamps as `YYYY-MM-DD HH:MM` UTC; the search
+    /// page renders only the date in the cell with the full UTC
+    /// datetime on hover. Server-pre-rendering this avoids the
+    /// "full date flashes for a second" symptom under hx-boost — the
+    /// template emits the trimmed form directly + a `data-utc-rendered`
+    /// marker so the JS renderer skips it via its idempotency guard.
+    /// Falls back to the full string when shorter than 10 chars
+    /// (defensive — a malformed cell still shows something readable).
+    pub fn upload_date_short(&self) -> &str {
+        if self.upload_date.len() >= 10 && self.upload_date.is_char_boundary(10) {
+            &self.upload_date[..10]
+        } else {
+            &self.upload_date
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SearchOptions {
     pub query: String,

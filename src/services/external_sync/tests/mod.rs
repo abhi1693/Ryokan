@@ -1281,6 +1281,15 @@ fn is_auth_rejection_matches_known_dead_token_strings() {
     assert!(is_auth_rejection(
         "AniList rejected the watch-list token (status 401); user may need to re-link"
     ));
+    // OAuth-shaped 400s carry the same prefix so the same matcher
+    // fires. The body excerpt distinguishes invalid_token vs
+    // invalid_grant for the operator log but the prefix is stable.
+    assert!(is_auth_rejection(
+        "AniList rejected the watch-list token (status 400, invalid_token); user may need to re-link"
+    ));
+    assert!(is_auth_rejection(
+        "AniList rejected the watch-list token (status 400, invalid_grant); user may need to re-link"
+    ));
     assert!(is_auth_rejection(
         "MAL access token expired and no refresh token stored — re-link required"
     ));

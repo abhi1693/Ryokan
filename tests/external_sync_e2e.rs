@@ -254,3 +254,73 @@ async fn watch_list_sync_imports_series_with_resolved_monitor_mode() {
     }
     anilist::reset_state_for_tests();
 }
+
+/// Pin the OAuth-shaped 400 -> auth-rejection branch added so the
+/// "Re-link required" badge fires when the upstream identity layer
+/// rejects a malformed/revoked access token at the HTTP edge (vs.
+/// the GraphQL `errors[]` shape AL normally uses for token issues).
+/// Without this branch the failure routed through "AniList
+/// unavailable" which `is_auth_rejection` treats as transient — the
+/// flag stayed false and the banner never fired.
+#[tokio::test]
+async fn watch_list_sync_flips_auth_failed_on_400_invalid_token_response() {
+    anilist::reset_state_for_tests();
+
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":"invalid_token","error_description":"The access token is invalid"}"#,
+        ))
+        .mount(&mock)
+        .await;
+
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db.clone(), None);
+    external_accounts::link(
+        &db,
+        LinkRequest {
+            provider: PROVIDER_ANILIST.to_string(),
+            provider_user_id: "42".to_string(),
+            username: "e2e_user".to_string(),
+            access_token: "fake-al-access-token".to_string(),
+            refresh_token: String::new(),
+            access_token_expires_at: None,
+            score_format: "POINT_10".to_string(),
+        },
+    )
+    .await
+    .expect("seed external account");
+
+    let err = external_sync::tick_once(&state)
+        .await
+        .expect_err("400 + invalid_token must surface as Err");
+    assert!(
+        err.contains("AniList rejected the watch-list token"),
+        "error string must carry the auth-rejection prefix so is_auth_rejection() matches; got: {err}"
+    );
+    assert!(
+        err.contains("invalid_token"),
+        "error must surface the OAuth error code for operator log; got: {err}"
+    );
+
+    // The sticky flag flipped to true — the Settings UI's
+    // "Re-link required" badge keys off this column.
+    let acct = external_accounts::get_current(&db)
+        .await
+        .expect("get_current")
+        .expect("linked account should still exist");
+    assert!(
+        acct.last_sync_auth_failed,
+        "auth-rejection 400 must flip last_sync_auth_failed; without this the Settings badge never fires"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}

@@ -142,10 +142,20 @@ function closeCfEditorModal() {
 
 // ── Settings → Download Clients shared add/edit modal ──────────────
 // One modal serves both flows. Per-card click → openDcEditModal(id,
-// name); "+ Add" tile → openDcAddModal(). Each routes through
-// htmx.ajax() to fetch the right form body into `#dc-modal-body`
-// AND opens the modal immediately (no wait for the round-trip — the
-// modal shows a brief loading-flash on the body until the swap lands).
+// name); "+ Add" tile → openDcAddModal(). Each clears the modal body
+// (so the previous form's content doesn't briefly show through),
+// opens the modal immediately for instant feedback, and fires
+// htmx.ajax() to fetch the right form body into `#dc-modal-body`.
+//
+// The form is rendered server-side with the kind-aware shape
+// (visibility, label names, input types) baked in for the row's
+// kind, so when the swap lands it's already correct — no async JS
+// relabel pass on first paint, no structural flash. The JS path in
+// `applyDcKindCopy` still owns the live kind-flip case (user toggles
+// the dropdown after the modal is open). Keep `DC_KIND_COPY` in JS
+// in lockstep with `copy_for_kind` in
+// `src/handlers/settings/download_clients.rs`.
+//
 // After a successful save the form's hx-target="#dc-section" causes
 // the server's section-partial response to replace the entire
 // section, including the modal, at display:none with the Add form
@@ -162,9 +172,18 @@ function openDownloadClientModal(title) {
         if (titleEl) titleEl.textContent = title;
     }
     modal.style.display = 'flex';
-    // Focus first text/url input in the freshly-swapped body for
-    // keyboard ergonomics. querySelector matches in DOM order so
-    // the Name field wins on both Add and Edit forms.
+    // Focus the first text/url input in the body for keyboard
+    // ergonomics. The body may be empty here (we clear it on click
+    // so the previous form doesn't flash through while the fetch
+    // is in flight); the htmx:afterSettle listener below picks up
+    // the focus once the form lands. querySelector matches in DOM
+    // order so the Name field wins on both Add and Edit forms.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function focusDcModalFirstInput() {
+    const modal = document.getElementById('dc-modal');
+    if (!modal || modal.style.display === 'none') return;
     const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
     if (firstInput) firstInput.focus();
 }
@@ -172,25 +191,34 @@ function closeDownloadClientModal() {
     const modal = document.getElementById('dc-modal');
     if (modal) modal.style.display = 'none';
 }
-function openDcEditModal(id, name) {
-    openDownloadClientModal('Editing ' + (name || 'download client'));
+function fetchAndOpenDcModal(url, title) {
+    // Clear the modal body so the previous form's content doesn't
+    // briefly show through while the fetch is in flight. The form
+    // rebuilds in place when the swap lands — kind-aware rendering
+    // is server-side now, so the swap is correct on arrival and no
+    // JS relabel pass is needed on first paint.
+    const body = document.getElementById('dc-modal-body');
+    if (body) body.innerHTML = '';
+    openDownloadClientModal(title);
     if (window.htmx) {
         window.htmx.ajax(
             'GET',
-            '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+            url,
             { target: '#dc-modal-body', swap: 'innerHTML' }
         );
     }
 }
+function openDcEditModal(id, name) {
+    fetchAndOpenDcModal(
+        '/settings/download-clients/' + encodeURIComponent(id) + '/edit-form',
+        'Editing ' + (name || 'download client')
+    );
+}
 function openDcAddModal() {
-    openDownloadClientModal('Add download client');
-    if (window.htmx) {
-        window.htmx.ajax(
-            'GET',
-            '/api/download-clients/add-form',
-            { target: '#dc-modal-body', swap: 'innerHTML' }
-        );
-    }
+    fetchAndOpenDcModal(
+        '/api/download-clients/add-form',
+        'Add download client'
+    );
 }
 // One-shot guard wraps every `addEventListener` at module scope in this
 // file. hx-boost re-runs the script on each nav-back, so an unguarded
@@ -470,6 +498,11 @@ if (!window.__ryokanSettingsDcModalListeners) {
         if (ev.target && ev.target.id === 'dc-modal-body') {
             const form = ev.target.querySelector('form');
             if (form) bindDcKindCopyToForm(form);
+            // Pick up the focus the body-clear-on-open dance left
+            // pending — `openDownloadClientModal` ran before the swap
+            // landed so its querySelector found nothing, and the
+            // user's first keystroke would otherwise go nowhere.
+            focusDcModalFirstInput();
         }
     });
     // Initial load (the section partial pre-renders the Add form body
@@ -489,14 +522,22 @@ if (!window.__ryokanSettingsDcModalListeners) {
 }
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────
-// Mirrors the DC modal flow. Catalog seed cards →
-// `openIndexerAddModal(slug, name)` fetches the Add form pre-filled
-// with that seed's defaults; existing-indexer cards →
-// `openIndexerEditModal(id, name)` fetches the row's Edit form. Both
-// land in `#indexer-modal-body`. After a successful save the form's
-// hx-target="#indexer-section" causes the server's section-partial
-// response to replace the entire section, including the modal, at
-// display:none — closing + resetting in one shot.
+// Mirrors the DC modal flow: clear the body on click, open the
+// modal immediately for instant feedback, fire htmx.ajax to fill
+// the body. Indexer kind-aware copy (URL placeholder + API-key
+// hint) is server-rendered for `row.kind` (see commit 723fac4),
+// so the swap is correct on first paint and we don't need to
+// pre-pass the relabel before opening — same one-shape-for-both
+// the review pass landed on.
+//
+// Catalog seed cards → `openIndexerAddModal(slug, name)` fetches
+// the Add form pre-filled with that seed's defaults; existing-
+// indexer cards → `openIndexerEditModal(id, name)` fetches the
+// row's Edit form. Both land in `#indexer-modal-body`. After a
+// successful save the form's hx-target="#indexer-section" causes
+// the server's section-partial response to replace the entire
+// section, including the modal, at display:none — closing +
+// resetting in one shot.
 function openIndexerModal(title) {
     const modal = document.getElementById('indexer-modal');
     if (!modal) return;
@@ -505,40 +546,52 @@ function openIndexerModal(title) {
         if (titleEl) titleEl.textContent = title;
     }
     modal.style.display = 'flex';
-    // Focus first text/url input in the freshly-swapped body for
-    // keyboard ergonomics. Run after a microtask so the htmx.ajax
-    // call below has a chance to swap the body in first.
-    setTimeout(function() {
-        const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
-        if (firstInput) firstInput.focus();
-    }, 50);
+    // Focus the first text/url input in the body for keyboard
+    // ergonomics. The body may be empty here (we clear it on click
+    // so the previous form doesn't flash through while the fetch is
+    // in flight); the htmx:afterSettle listener below picks up the
+    // focus once the form lands.
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function focusIndexerModalFirstInput() {
+    const modal = document.getElementById('indexer-modal');
+    if (!modal || modal.style.display === 'none') return;
+    const firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
 }
 function closeIndexerModal() {
     const modal = document.getElementById('indexer-modal');
     if (modal) modal.style.display = 'none';
 }
-function openIndexerEditModal(id, name) {
-    openIndexerModal('Editing ' + (name || 'indexer'));
+function fetchAndOpenIndexerModal(url, title) {
+    // Same clear-then-open shape as `fetchAndOpenDcModal` — drops
+    // the previous form's content so a rapid Edit↔Add toggle
+    // doesn't flash the prior row's fields into view, opens the
+    // modal immediately for instant click feedback, lets htmx fill
+    // the body in.
+    const body = document.getElementById('indexer-modal-body');
+    if (body) body.innerHTML = '';
+    openIndexerModal(title);
     if (window.htmx) {
-        window.htmx.ajax(
-            'GET',
-            '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
-            { target: '#indexer-modal-body', swap: 'innerHTML' }
-        );
-    }
-}
-function openIndexerAddModal(slug, name) {
-    openIndexerModal('Add ' + (name || 'indexer'));
-    if (window.htmx) {
-        const url = slug
-            ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
-            : '/settings/indexers/add-form';
         window.htmx.ajax(
             'GET',
             url,
             { target: '#indexer-modal-body', swap: 'innerHTML' }
         );
     }
+}
+function openIndexerEditModal(id, name) {
+    fetchAndOpenIndexerModal(
+        '/settings/indexers/' + encodeURIComponent(id) + '/edit-form',
+        'Editing ' + (name || 'indexer')
+    );
+}
+function openIndexerAddModal(slug, name) {
+    const url = slug
+        ? '/settings/indexers/add-form?template=' + encodeURIComponent(slug)
+        : '/settings/indexers/add-form';
+    fetchAndOpenIndexerModal(url, 'Add ' + (name || 'indexer'));
 }
 // Backdrop-click + Escape dismissal. Re-bound on every section swap
 // because the modal element is replaced when #indexer-section
@@ -614,6 +667,10 @@ if (!window.__ryokanSettingsIndexerModalListener) {
         if (ev.target && ev.target.id === 'indexer-modal-body') {
             const form = ev.target.querySelector('form');
             if (form) bindIndexerKindCopyToForm(form);
+            // Pick up focus the body-clear-on-open dance left
+            // pending — `openIndexerModal` ran before the swap
+            // landed, so its querySelector found nothing.
+            focusIndexerModalFirstInput();
         }
     });
 }
@@ -902,7 +959,14 @@ function buildCfImportResolvePayload(form) {
 // active. Only the active client's badge is populated — the others
 // stay blank (no stale "Disconnected" on a client the user isn't
 // even trying to use).
-(function() {
+// Settings → Connections health-badge poller. Mounted via
+// `ryokanRegisterPageInit` so the getElementById lookups happen
+// AFTER htmx commits the body swap. Pre-fix this was a bare IIFE
+// that ran at script-load time; under boost the script could
+// finish loading before the swap settled, no badges in DOM, the
+// `if (!anyClientBadge && !jellyfinHealth) return` early-exit
+// fired, and the user saw blank health badges until F5.
+var bindConnectionHealthBadges = function () {
     const badges = {
         QBittorrent: document.getElementById('qbit-health'),
         Deluge: document.getElementById('deluge-health'),
@@ -912,6 +976,13 @@ function buildCfImportResolvePayload(form) {
     const jellyfinHealth = document.getElementById('jellyfin-health');
     const anyClientBadge = Object.values(badges).some(b => b);
     if (!anyClientBadge && !jellyfinHealth) return;
+    // Idempotency guard: re-mounting on the same DOM (no body
+    // swap in between) would fire a duplicate /api/health request
+    // and re-populate the same badges. Cheap, but a stacked fetch
+    // could race itself if the user toggles tabs fast.
+    const guardEl = jellyfinHealth || Object.values(badges).find(b => b);
+    if (!guardEl || guardEl.dataset.ryokanHealthBound === '1') return;
+    guardEl.dataset.ryokanHealthBound = '1';
 
     fetch('/api/health')
         .then(r => r.json())
@@ -951,28 +1022,76 @@ function buildCfImportResolvePayload(form) {
             }
         })
         .catch(() => {});
-})();
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-connection-health', {
+        check: function () {
+            return !!(document.getElementById('qbit-health')
+                || document.getElementById('deluge-health')
+                || document.getElementById('transmission-health')
+                || document.getElementById('rtorrent-health')
+                || document.getElementById('jellyfin-health'));
+        },
+        mount: bindConnectionHealthBadges,
+    });
+} else {
+    bindConnectionHealthBadges();
+}
 
 // Dirty-state guard on the Settings form. Flips a flag on any input
 // change, prompts the user on nav-away (topbar click, browser back, tab
 // close). Clears the flag on submit so the save itself doesn't trigger
 // the prompt.
-(function () {
-    if (window.__ryokanSettingsDirtyGuardInit) return;
-    window.__ryokanSettingsDirtyGuardInit = true;
+//
+// Mounted via `ryokanRegisterPageInit` so the form lookup happens
+// AFTER htmx commits the body swap. Pre-fix the bare IIFE could
+// run at script-load before the form was committed under boost
+// (dynamically-injected scripts ignore `defer`, see relations
+// carousel commit), the early-return at the null check fired,
+// and a user editing settings via boost-nav would see no
+// unsaved-changes prompt on accidental nav-away.
+//
+// `dirty` lives at module scope so the beforeunload window
+// listener (registered once via __ryokanSettingsDirtyGuardInit)
+// reads the latest value across re-mounts.
+var __ryokanSettingsDirty = false;
+var bindSettingsDirtyGuard = function () {
     const form = document.querySelector('form.settings-form[action="/settings"]');
     if (!form) return;
-    let dirty = false;
-    const markDirty = () => { dirty = true; };
+    if (form.dataset.ryokanDirtyBound === '1') return;
+    form.dataset.ryokanDirtyBound = '1';
+    const markDirty = () => { __ryokanSettingsDirty = true; };
     form.addEventListener('input', markDirty);
     form.addEventListener('change', markDirty);
-    form.addEventListener('submit', () => { dirty = false; });
-    window.addEventListener('beforeunload', (ev) => {
-        if (!dirty) return;
-        ev.preventDefault();
-        ev.returnValue = '';
+    form.addEventListener('submit', () => { __ryokanSettingsDirty = false; });
+
+    // Window-scoped beforeunload attaches once per process. Reads
+    // module-scope `__ryokanSettingsDirty` rather than a closure
+    // var so it stays current across boost-nav re-mounts.
+    if (!window.__ryokanSettingsDirtyGuardInit) {
+        window.__ryokanSettingsDirtyGuardInit = true;
+        window.addEventListener('beforeunload', (ev) => {
+            if (!__ryokanSettingsDirty) return;
+            ev.preventDefault();
+            ev.returnValue = '';
+        });
+    }
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-dirty-guard', {
+        check: function () { return !!document.querySelector('form.settings-form[action="/settings"]'); },
+        mount: bindSettingsDirtyGuard,
+        unmount: function () {
+            // Clear the dirty flag on nav-away — a saved-and-now-stale
+            // form shouldn't carry its dirty state into a future visit.
+            __ryokanSettingsDirty = false;
+        },
     });
-})();
+} else {
+    bindSettingsDirtyGuard();
+}
 
 // ── External Accounts (AL / MAL, issue #62 PR A) ──────────────────────
 //

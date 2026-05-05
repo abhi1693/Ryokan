@@ -289,6 +289,20 @@ pub async fn fetch_media_list_collection(
             set_anilist_cooldown(retry_after_secs, ANILIST_COOLDOWN_DEFAULT);
         }
         let body = resp.text().await.unwrap_or_default();
+        // OAuth2-shaped 400 responses with an `invalid_token` /
+        // `invalid_grant` error code mean the token is dead — same
+        // remediation as a 401/403 (user must re-link). AL's
+        // GraphQL endpoint normally returns 200+errors[] for token
+        // issues, but the upstream OAuth identity provider can
+        // surface a 400 directly when the access token is malformed
+        // or revoked at the identity layer. Without this branch the
+        // failure routes through the generic "AniList unavailable"
+        // path which is_auth_rejection treats as transient — the
+        // Settings UI's "Re-link required" banner never fires and
+        // the user keeps seeing failed-sync rows on every tick.
+        let body_lower = body.to_ascii_lowercase();
+        let is_oauth_token_400 = status == reqwest::StatusCode::BAD_REQUEST
+            && (body_lower.contains("invalid_token") || body_lower.contains("invalid_grant"));
         return Err(match status.as_u16() {
             429 => format!(
                 "AniList rate-limited (status 429): {} [{}]",
@@ -298,6 +312,15 @@ pub async fn fetch_media_list_collection(
             401 | 403 => format!(
                 "AniList rejected the watch-list token (status {}); user may need to re-link [{}]",
                 status, rate_limit_summary
+            ),
+            400 if is_oauth_token_400 => format!(
+                "AniList rejected the watch-list token (status 400, {}); user may need to re-link [{}]",
+                if body_lower.contains("invalid_token") {
+                    "invalid_token"
+                } else {
+                    "invalid_grant"
+                },
+                rate_limit_summary
             ),
             code => format!(
                 "AniList unavailable (status {code}): {} [{}]",

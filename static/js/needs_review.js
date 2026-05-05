@@ -28,7 +28,16 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
 // a chosen source/resolution to every selected row in one request via
 // /api/library/bulk-manual-override. Rows fade and self-remove on
 // success, matching the single-row flow.
-(function () {
+//
+// Mounted via `ryokanRegisterPageInit` so element-bound listeners
+// attach AFTER htmx commits the body swap. A bare IIFE here would
+// race ahead of the swap on hx-boost navs (dynamically-injected
+// `<script src=...>` tags ignore `defer` — they're async by spec
+// — and the script could finish loading before the swap settles
+// → review-bulk-bar / review-select-all not in DOM yet → early
+// return at the null check → bulk action bar silently never wires
+// up until the user F5s).
+var bindReviewBulkActions = function () {
     const bar = document.getElementById('review-bulk-bar');
     const countEl = document.getElementById('review-bulk-count-n');
     const selectAll = document.getElementById('review-select-all');
@@ -37,12 +46,14 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
     const bulkSource = document.getElementById('review-bulk-source');
     const bulkResolution = document.getElementById('review-bulk-resolution');
     if (!bar || !selectAll || !applyBtn) return;
-    // Element-bound listeners (selectAll/clearBtn/applyBtn) attach to
-    // these specific DOM nodes; on a hx-boost nav-back, these elements
-    // are fresh nodes that need fresh listeners. The document-scoped
-    // listeners (`change` / `keydown` event delegation) are gated by a
-    // separate singleton guard further down — `document` persists
-    // across body swaps so re-attaching there would accumulate.
+    // Idempotency guard: ryokanRegisterPageInit's immediate-mount
+    // fires BEFORE htmx.onLoad if the registration arrives after
+    // htmx already finished its initial pass — so the same DOM
+    // could see two mount calls. Without this guard,
+    // selectAll/clearBtn/applyBtn would each get duplicate click
+    // listeners → one click fires the action twice.
+    if (bar.dataset.ryokanReviewBound === '1') return;
+    bar.dataset.ryokanReviewBound = '1';
 
     function rowChecks() {
         return Array.from(document.querySelectorAll('.review-row-check'));
@@ -59,11 +70,34 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
         selectAll.indeterminate = n > 0 && n < total;
     }
 
-    document.addEventListener('change', function (ev) {
-        if (ev.target && ev.target.classList && ev.target.classList.contains('review-row-check')) {
-            refresh();
-        }
-    });
+    // Document-scope delegated listeners: attach ONCE per process
+    // (window-flag guard) so a user nav-loop in/out of the page
+    // doesn't stack handlers. They re-find the live `.review-bulk-bar`
+    // each fire (rather than capturing the mount-time closure refs)
+    // because boost-nav replaces the bar with a fresh node each visit.
+    if (!window.__ryokanReviewDocListeners) {
+        window.__ryokanReviewDocListeners = true;
+        document.addEventListener('change', function (ev) {
+            if (ev.target && ev.target.classList && ev.target.classList.contains('review-row-check')) {
+                const liveBar = document.getElementById('review-bulk-bar');
+                if (liveBar) liveBar.dispatchEvent(new CustomEvent('ryokan-review-refresh'));
+            }
+        });
+        document.addEventListener('keydown', function (ev) {
+            if (ev.key !== 'Escape') return;
+            const liveBar = document.getElementById('review-bulk-bar');
+            if (!liveBar || liveBar.hidden) return;
+            document.querySelectorAll('.review-row-check').forEach(function (cb) {
+                cb.checked = false;
+            });
+            liveBar.dispatchEvent(new CustomEvent('ryokan-review-refresh'));
+        });
+    }
+    // Per-mount listener on the live bar so the doc-scope listeners
+    // can fire `refresh()` via a custom event without capturing the
+    // mount-time closure refs.
+    bar.addEventListener('ryokan-review-refresh', function () { refresh(); });
+
     selectAll.addEventListener('change', function () {
         const on = selectAll.checked;
         rowChecks().forEach(cb => { cb.checked = on; });
@@ -72,12 +106,6 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
     clearBtn.addEventListener('click', function () {
         rowChecks().forEach(cb => { cb.checked = false; });
         refresh();
-    });
-    document.addEventListener('keydown', function (ev) {
-        if (ev.key === 'Escape' && !bar.hidden) {
-            rowChecks().forEach(cb => { cb.checked = false; });
-            refresh();
-        }
     });
 
     applyBtn.addEventListener('click', function () {
@@ -159,4 +187,16 @@ var REVIEW_OVERRIDE_SOURCE_MAP = {
     });
 
     refresh();
-})();
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('needs-review-bulk', {
+        check: function () { return !!document.getElementById('review-bulk-bar'); },
+        mount: bindReviewBulkActions,
+    });
+} else {
+    // Defensive fallback — if page_lifecycle.js failed to load,
+    // run the bind directly so the page still works (just without
+    // the boost-nav guarantees).
+    bindReviewBulkActions();
+}

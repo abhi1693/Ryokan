@@ -93,7 +93,7 @@
                        is deliberately not used here — it mixes "5d ago" /
                        absolute date depending on age and reads as
                        inconsistent across rows. #}
-                    <td class="col-date">{% if !r.upload_date.is_empty() %}<span data-utc="{{ r.upload_date }}">{{ r.upload_date }}</span>{% else %}—{% endif %}</td>
+                    <td class="col-date">{% if !r.upload_date.is_empty() %}<span data-utc="{{ r.upload_date }}" data-utc-rendered="1" title="{{ r.upload_date }} UTC">{{ r.upload_date_short() }}</span>{% else %}—{% endif %}</td>
                     <td class="col-seed"><span class="seed-count">{{ r.seeders }}</span></td>
                     <td class="col-leech"><span class="leech-count">{{ r.leechers }}</span></td>
                     <td class="col-dl"><span class="dl-count">{{ r.downloads }}</span></td>

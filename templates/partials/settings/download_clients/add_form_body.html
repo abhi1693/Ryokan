@@ -3,7 +3,13 @@
    section render so the modal opens fast on first click without
    waiting for a fetch. The HTMX target on the click handlers is
    `#dc-modal-body innerHTML`, so this is the entire content of
-   that div (no header, no backdrop). #}
+   that div (no header, no backdrop).
+
+   Kind-aware copy is server-rendered with the qBittorrent default
+   (matches the dropdown's `selected` option). The JS relabel in
+   static/js/settings.js handles live kind-flip after the modal is
+   open. Mirror in edit_form_body.html. #}
+{% let copy = crate::handlers::settings::download_clients::copy_for_kind("qbittorrent") %}
 <form method="post" action="/settings/download-clients/upsert"
       class="dc-modal-form"
       hx-post="/settings/download-clients/upsert"
@@ -32,30 +38,30 @@
         </div>
         <div class="form-group">
             <label for="dc-add-url">URL</label>
-            <input id="dc-add-url" type="url" name="url" required placeholder="http://localhost:8080" data-dc-url-input>
-            <span class="form-hint" data-dc-url-hint>Point at the client's Web UI / RPC endpoint base. Ryokan appends the per-client path suffix automatically.</span>
+            <input id="dc-add-url" type="url" name="url" required placeholder="{{ copy.url_placeholder }}" data-dc-url-input>
+            <span class="form-hint" data-dc-url-hint>{{ copy.url_hint }}</span>
         </div>
         {# `data-dc-credentials` marks the credential row so the
            relabel helper can hide the username field for SAB (SAB
            has no per-user auth — the password column carries the
            API key) and relabel the password field as "API Key". #}
         <div class="form-row" data-dc-credentials>
-            <div class="form-group" data-dc-username-group>
+            <div class="form-group" data-dc-username-group{% if !copy.username_visible %} style="display:none"{% endif %}>
                 <label for="dc-add-username" data-dc-username-label>Username</label>
                 <input id="dc-add-username" type="text" name="username" autocomplete="off">
-                <span class="form-hint" data-dc-username-hint>Deluge ignores the username and uses password only; leave blank.</span>
+                <span class="form-hint" data-dc-username-hint>{{ copy.username_hint }}</span>
             </div>
             <div class="form-group">
-                <label for="dc-add-password" data-dc-password-label>Password</label>
-                <input id="dc-add-password" type="password" name="password" autocomplete="new-password" data-dc-password-input>
-                <span class="form-hint" data-dc-password-hint style="display:none"></span>
+                <label for="dc-add-password" data-dc-password-label>{{ copy.password_label }}</label>
+                <input id="dc-add-password" type="{{ copy.password_type }}" name="password" autocomplete="new-password" data-dc-password-input>
+                <span class="form-hint" data-dc-password-hint{% if copy.password_hint.is_empty() %} style="display:none"{% endif %}>{{ copy.password_hint }}</span>
             </div>
         </div>
         <div class="form-row">
             <div class="form-group">
-                <label for="dc-add-label" data-dc-label-label>Category / label</label>
+                <label for="dc-add-label" data-dc-label-label>{{ copy.label_label }}</label>
                 <input id="dc-add-label" type="text" name="label" placeholder="anime">
-                <span class="form-hint" data-dc-label-hint>qBit calls this a "category", the others call it a "label". Ryokan tags every torrent it adds with this value and filters by it when listing.</span>
+                <span class="form-hint" data-dc-label-hint>{{ copy.label_hint }}</span>
             </div>
             <div class="form-group">
                 <label for="dc-add-download-path">Download path (as Ryokan sees it)</label>

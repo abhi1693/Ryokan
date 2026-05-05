@@ -45,6 +45,10 @@ const CACHE_TTL: Duration = REFRESH_INTERVAL;
 /// ~9MB mappings blob because the disk cache write silently fails
 /// with `Permission denied (os error 13)` and falls through to a
 /// fresh fetch.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
 fn cache_file_path() -> PathBuf {
     let base = std::env::var("RYOKAN_ANIBRIDGE_CACHE_DIR")
         .ok()
@@ -1285,11 +1289,20 @@ mod tests {
     // RYOKAN_NYAA_API_BASE / RYOKAN_KITSU_API_BASE seams) lets us point
     // the downloader at a wiremock'd GitHub mappings URL.
 
-    /// Set both env vars (mappings URL → wiremock, cache dir → tempdir)
-    /// and return the tempdir handle so the caller keeps it alive.
-    /// Call before each wiremock test so the disk-cache writes don't
-    /// pollute the user's real cache directory.
-    fn anibridge_e2e_env(server_url: &str) -> tempfile::TempDir {
+    /// Set both env vars (mappings URL → wiremock, cache dir → tempdir),
+    /// holding the process-wide `ENV_LOCK` so peer tests in the same
+    /// binary (anibridge's own siblings + handlers/system's
+    /// `api_anibridge_reload_returns_502_…` test) can't race on the
+    /// same env vars under `cargo test`'s parallel scheduler.
+    /// Returns `(guard, tempdir)` — the guard releases on drop.
+    /// nextest gives each test its own process so the lock would be
+    /// no-op there, but `cargo llvm-cov`'s underlying `cargo test`
+    /// does interleave; the lock is the difference between green
+    /// and a flaky 2/41-failed coverage run.
+    async fn anibridge_e2e_env(
+        server_url: &str,
+    ) -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = super::ENV_LOCK.lock().await;
         let tmp = tempfile::tempdir().expect("tempdir");
         unsafe {
             std::env::set_var("RYOKAN_ANIBRIDGE_CACHE_DIR", tmp.path());
@@ -1298,7 +1311,7 @@ mod tests {
                 format!("{server_url}/mappings.min.json"),
             );
         }
-        tmp
+        (guard, tmp)
     }
 
     #[tokio::test]
@@ -1325,7 +1338,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         let cache = download_parse_and_persist()
             .await
@@ -1366,7 +1379,7 @@ mod tests {
             .expect(1)
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         // Pre-seed the disk cache and meta so the 304 path has bytes
         // to fall back on. Push the cache mtime backward so we can
@@ -1428,7 +1441,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(304))
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         // No write_disk_cache call → no disk bytes available for the
         // 304 path's fallback read.
@@ -1464,7 +1477,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         download_parse_and_persist().await.expect("succeeds");
         let meta = read_disk_cache_meta()
@@ -1491,7 +1504,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         // Pre-seed cache + a meta with the OLD Last-Modified.
         let cached_bytes = serde_json::to_vec(&serde_json::json!({
@@ -1529,7 +1542,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let _tmp = anibridge_e2e_env(&server.uri());
+        let (_guard, _tmp) = anibridge_e2e_env(&server.uri()).await;
 
         let err = download_parse_and_persist()
             .await

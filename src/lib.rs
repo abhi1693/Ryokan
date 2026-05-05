@@ -173,7 +173,46 @@ pub struct AppState {
     /// [`services::task_registry`] for the registry's threading
     /// model (lock-free hot path, snapshot-on-read).
     pub tasks: TaskRegistry,
+    /// Per-client probe-status cache for the Settings → Connections
+    /// status pills. Each card on the Download Clients tab fires a
+    /// `hx-trigger="load"` GET to `/api/download-clients/{id}/status`;
+    /// without this cache, every page load AND every hx-boost-nav
+    /// into the tab re-runs the network probe (typically 50-500ms
+    /// for healthy clients, up to 5s for unreachable ones), and the
+    /// "Probing…" placeholder pills flash to real status pills at
+    /// staggered times → user perceives flashing on the cards. With
+    /// the cache, fresh entries (within TTL) get rendered server-side
+    /// in the list partial directly and bypass the probe entirely.
+    /// In-memory only; rebuilds on process restart and on every
+    /// `download_clients` row CRUD (the rebuild step also wipes the
+    /// cache for the affected id so a fresh edit re-probes
+    /// immediately).
+    pub dc_status_cache: DcStatusCache,
 }
+
+/// `(probed_at, version-or-error)` keyed by `download_clients.id`.
+/// `Instant` not `SystemTime` so the TTL check is monotonic across
+/// system clock adjustments. The status itself is the same shape
+/// the probe handler returns (Some(version) on success, error
+/// string on failure).
+pub type DcStatusCache =
+    Arc<std::sync::Mutex<std::collections::HashMap<i64, (std::time::Instant, DcStatusEntry)>>>;
+
+#[derive(Clone, Debug)]
+pub struct DcStatusEntry {
+    pub version: Option<String>,
+    pub error: String,
+}
+
+/// TTL for the DC status cache. 10 minutes covers a normal
+/// "open Settings, configure other tabs, come back" loop without
+/// re-probing — the 60s the cache shipped with was too short for
+/// users who dwell on Indexers / Custom Formats between trips back
+/// to Connections, so they still saw a "Probing…" flash on every
+/// re-entry. The cache is wiped explicitly on every download_clients
+/// CRUD so a credential edit re-probes immediately rather than
+/// masking failures for the full TTL.
+pub const DC_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl AppState {
     /// Resolve a download client for a grab attributable to
@@ -430,6 +469,7 @@ mod resolve_grab_client_tests {
             oauth_state: crate::services::oauth_state::new(),
             start_time: chrono::Utc::now(),
             tasks: crate::services::task_registry::TaskRegistry::new(),
+            dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

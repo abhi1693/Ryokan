@@ -531,6 +531,206 @@ mod episodes_ci {
         );
     }
 
+    // ─── series_episodes_json + mark_episode_failed (cache-seeded) ──
+    //
+    // These two handlers gate on `resolve_series_context`, which on a
+    // cold DB falls through to a live AniList request. Pre-seeding
+    // `series_metadata_cache` short-circuits the resolver at line 263
+    // of `handlers/library/reconcile.rs` — `cached.is_fresh = true`
+    // returns immediately without any network. Without these tests
+    // both handlers stayed dark in coverage; with them, the happy path
+    // through `series_episodes_json` (which renders an episode list
+    // from cached AnimeDetail + on-disk file walk) plus the early-
+    // error branches of `mark_episode_failed` are pinned.
+
+    fn detail_fixture(id: i64, romaji: &str) -> crate::services::anilist::AnimeDetail {
+        crate::services::anilist::AnimeDetail {
+            id,
+            id_mal: None,
+            title_romaji: romaji.into(),
+            title_english: romaji.into(),
+            title_native: romaji.into(),
+            cover_url: String::new(),
+            banner_url: String::new(),
+            format: "TV".into(),
+            status: "FINISHED".into(),
+            status_display: "Finished".into(),
+            episodes: Some(3),
+            duration: Some(24),
+            season: String::new(),
+            season_year: Some(2024),
+            end_year: Some(2024),
+            description: String::new(),
+            genres: vec![],
+            average_score: None,
+            average_score_display: None,
+            score_is_ten_point: false,
+            score_class: String::new(),
+            next_airing_episode: None,
+            next_airing_at: None,
+            synonyms: vec![],
+            streaming_episodes: vec![],
+            relations: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn series_episodes_json_returns_episodes_from_cached_metadata() {
+        // Cache hit → resolver returns immediately, build_episodes
+        // synthesizes one Episode row per episodes count, JSON
+        // round-trips clean. Pins both the resolver short-circuit
+        // and the basic build_episodes plumbing — a refactor that
+        // dropped `episodes` from the response (or returned nested
+        // JSON shape) would surface here as a count mismatch.
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 500;
+        let series_id = seed_series(&db, anilist_id, "Cached Show").await;
+        crate::models::metadata_cache::upsert(
+            &db,
+            series_id,
+            anilist_id,
+            None,
+            &detail_fixture(anilist_id, "Cached Show"),
+        )
+        .await
+        .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let AxumJson(episodes) = series_episodes_json(State(state), Path(anilist_id))
+            .await
+            .expect("cache-hit path must succeed without network");
+        assert_eq!(
+            episodes.len(),
+            3,
+            "build_episodes must synthesize one Episode row per `episodes` count"
+        );
+        // Episode numbers are 1..=ep_count and contiguous. The
+        // template renders newest-first so build_episodes returns
+        // them descending — pin both ends to catch a future sort
+        // direction flip.
+        assert_eq!(episodes[0].number, 3);
+        assert_eq!(episodes[2].number, 1);
+    }
+
+    #[tokio::test]
+    async fn mark_episode_failed_returns_400_when_series_not_in_library() {
+        // No `series` row + no metadata cache + no live AniList →
+        // `resolve_series_context` returns Err (502 in the handler).
+        // Path is therefore: `request_id=99999` → resolver fails at
+        // network step → handler returns 502, NOT 400. Pin the
+        // actual outcome so a refactor that flipped the error
+        // mapping (the file is full of similar error-mapping
+        // chains) gets caught.
+        //
+        // Why not 400: the handler's 400 branch fires when
+        // `resolve_series_context` returns Ok with `tracked_row =
+        // None` — a known-bad provider id where AL had a "found
+        // no series" answer. Network failure produces a 502
+        // because we couldn't tell whether the series exists at
+        // all, only that we couldn't ask.
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let result = mark_episode_failed(
+            State(state),
+            Path((99_999, 1)),
+            AxumJson(MarkEpisodeFailedForm {
+                history_id: 1,
+                blocklist: false,
+            }),
+        )
+        .await;
+        match result {
+            Err((status, _)) => {
+                assert!(
+                    status == StatusCode::BAD_GATEWAY || status == StatusCode::BAD_REQUEST,
+                    "untracked series with no cache must surface as a 4xx/5xx error; got {status}"
+                );
+            }
+            Ok(_) => panic!("untracked series must return Err, not Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_episode_failed_returns_500_when_history_id_does_not_exist() {
+        // Series is tracked + metadata cached → resolver succeeds.
+        // `mark_grab_failed` then queries `episode_grab_history`
+        // by id; an unknown id maps to `sqlx::Error::RowNotFound`
+        // which the handler maps to 500. Pin the contract: a
+        // refactor that swallowed the model error and returned
+        // an empty AutoSearchReport would silently report
+        // "no upgrades found" instead of surfacing the bad
+        // history_id, leaving the user confused why their
+        // mark-failed click did nothing.
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 501;
+        let series_id = seed_series(&db, anilist_id, "Tracked With Cache").await;
+        crate::models::metadata_cache::upsert(
+            &db,
+            series_id,
+            anilist_id,
+            None,
+            &detail_fixture(anilist_id, "Tracked With Cache"),
+        )
+        .await
+        .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let result = mark_episode_failed(
+            State(state),
+            Path((anilist_id, 1)),
+            AxumJson(MarkEpisodeFailedForm {
+                history_id: 99_999,
+                blocklist: false,
+            }),
+        )
+        .await;
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+                assert!(
+                    !body.is_empty(),
+                    "the mark-failed model error must propagate to the response body"
+                );
+            }
+            Ok(_) => panic!("bogus history_id must return Err, not Ok"),
+        }
+    }
+
+    // ─── episode_download_progress: pending grab + no clients ────────
+
+    #[tokio::test]
+    async fn episode_download_progress_returns_empty_when_pool_has_no_clients() {
+        // The handler's "no configured clients" branch (line 1089
+        // of mod.rs) returns an empty Vec rather than 500 when there
+        // are pending grabs but no `DownloadClient` to query. The
+        // poll runs every 5s on the series page; a 500 here would
+        // spam the console and the rendering loop. Companion to
+        // `episode_download_progress_returns_empty_for_tracked_series_with_no_pending_grabs`,
+        // which covers the other empty branch (no pending grabs).
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 502;
+        let series_id = seed_series(&db, anilist_id, "Pending No Client").await;
+        let _ = crate::test_support::seed_grabbed_torrent(
+            &db,
+            series_id,
+            "abc123abc123abc123abc123abc123abc123abcd",
+            "[Group] Pending No Client - 03.mkv",
+            &[3],
+        )
+        .await;
+        // build_test_app_state(db, None) constructs an empty
+        // download_clients pool, so the handler's pool.clients
+        // .is_empty() branch fires.
+        let state = build_test_app_state(db, None);
+
+        let result = episode_download_progress(State(state), Path(anilist_id)).await;
+        let AxumJson(progress) = result.expect("no-clients-with-pending-grab path must succeed");
+        assert!(
+            progress.is_empty(),
+            "no configured clients → empty list, not 500 — the polling loop calls this every 5s"
+        );
+    }
+
     #[test]
     fn episode_progress_wire_shape_carries_both_state_fields() {
         // The series-page download-progress poller (series.js)
@@ -647,6 +847,7 @@ mod cancel_pending_sab_e2e {
             start_time: chrono::DateTime::<chrono::Utc>::from_timestamp(1_704_067_200, 0)
                 .expect("epoch"),
             tasks: crate::services::task_registry::TaskRegistry::new(),
+            dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

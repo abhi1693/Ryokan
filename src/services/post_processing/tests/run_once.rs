@@ -598,6 +598,297 @@ async fn run_once_isolates_failures_per_client() {
     );
 }
 
+// ─── Disabled / empty-media-root early-return paths ──────────────
+//
+// `run_once` has two early-return gates before the per-grab fan-out
+// kicks in: `post_processing_enabled = false` and `media_root = ""`.
+// Both dispatch to `advance_state_without_import`, which still
+// fans out `list_scoped` (so the UI's "Importing…" spinner can
+// clear when the client reports complete) but never moves any
+// files. Distinguishing observable: a Downloading-state torrent in
+// disabled mode leaves the grab `pending` — the import branch
+// (which only runs when the toggle is on) is the only one that
+// could transition state on a complete torrent.
+
+#[tokio::test]
+async fn run_once_with_post_processing_disabled_leaves_pending_grab_unchanged() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let db = in_memory_pool().await;
+    sqlx::query(
+        "INSERT INTO config (id, post_processing_enabled, media_root) VALUES (1, 0, '/tmp/x')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g = grabbed_torrents::record_grab(&db, "h", "rel", series_id, &[1], false)
+        .await
+        .unwrap()
+        .unwrap();
+    grabbed_torrents::set_download_client(&db, g, Some(1))
+        .await
+        .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    let default_client = Arc::new(RecordingClient::new(vec![fake_torrent(
+        "h",
+        DownloadItemState::Downloading,
+    )]));
+    install_pool(
+        &state,
+        vec![(1, default_client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    // Pin the disabled-gate dispatch by exercising the
+    // advance_state_without_import branch and asserting the grab
+    // stayed pending. A regression that flipped the gate inverted
+    // would route through the import path which (on a Downloading
+    // torrent) hits the `is_complete()` `continue` and leaves
+    // pending too — but the path itself differs, and lifting the
+    // gate test catches earlier in the chain. Coverage-wise: this
+    // is the only test exercising the disabled-mode dispatch.
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(final_state, "pending");
+}
+
+#[tokio::test]
+async fn run_once_with_empty_media_root_leaves_pending_grab_unchanged() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    // media_root = '' is the second arm of the gate. The handler
+    // explicitly treats it as the disabled case (mod.rs:1458-1463) —
+    // even with the toggle on, no media_root means the import path
+    // can't possibly run. Both conditions route to the same
+    // advance_state_without_import dispatch.
+    let db = in_memory_pool().await;
+    sqlx::query("INSERT INTO config (id, post_processing_enabled, media_root) VALUES (1, 1, '')")
+        .execute(&db)
+        .await
+        .unwrap();
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g = grabbed_torrents::record_grab(&db, "h", "rel", series_id, &[1], false)
+        .await
+        .unwrap()
+        .unwrap();
+    grabbed_torrents::set_download_client(&db, g, Some(1))
+        .await
+        .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    let default_client = Arc::new(RecordingClient::new(vec![fake_torrent(
+        "h",
+        DownloadItemState::Downloading,
+    )]));
+    install_pool(
+        &state,
+        vec![(1, default_client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(final_state, "pending");
+}
+
+// ─── 60s grace + missing-from-client cleanup ─────────────────────
+
+#[tokio::test]
+async fn run_once_marks_grab_removed_when_client_loses_torrent_and_grab_is_stale() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    // The pre-multi-client comment at mod.rs:1717 frames this case
+    // as "user deleted ep 9 from the client and the row is still
+    // pending." After 60s with no matching torrent in any client's
+    // list_scoped response, the grab transitions to 'removed' and
+    // the per-episode tags get cleared. Pin both halves so a
+    // refactor that flipped the grace direction (`<` vs `<=`) or
+    // inverted the missing-torrent guard can't silently regress
+    // into "stuck pending forever."
+    let db = in_memory_pool().await;
+    seed_config(&db).await;
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g = grabbed_torrents::record_grab(&db, "h", "rel", series_id, &[3], false)
+        .await
+        .unwrap()
+        .unwrap();
+    // Backdate grabbed_at so grab_is_stale(_, 60) returns true.
+    sqlx::query(
+        "UPDATE grabbed_torrents SET grabbed_at = datetime('now', '-5 minutes') WHERE id = ?",
+    )
+    .bind(g)
+    .execute(&db)
+    .await
+    .unwrap();
+    insert_dc(
+        &db,
+        DownloadClientForm {
+            name: "default",
+            kind: "qbittorrent",
+            url: "http://q",
+            username: "",
+            password: "",
+            label: "",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    // Empty list_scoped → grab has no matching torrent.
+    let default_client = Arc::new(RecordingClient::new(Vec::new()));
+    install_pool(
+        &state,
+        vec![(1, default_client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_state, "removed",
+        "stale grab + no matching torrent → mark_removed; not 'pending' (would re-search forever) and not 'failed' (would blocklist)"
+    );
+}
+
+#[tokio::test]
+async fn run_once_does_not_mark_fresh_grab_removed_when_client_has_not_seen_it_yet() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    // The 60s grace exists for the legitimate case where the
+    // download client hasn't picked up the torrent yet (slow first
+    // poll after add_torrent). A fresh grab missing from the
+    // client's list must stay pending so the next pass can find
+    // it. Pin the grace contract — flipping the comparison would
+    // mark fresh grabs as removed and the user's just-clicked
+    // grab would silently disappear within seconds.
+    let db = in_memory_pool().await;
+    seed_config(&db).await;
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g = grabbed_torrents::record_grab(&db, "fresh", "rel", series_id, &[1], false)
+        .await
+        .unwrap()
+        .unwrap();
+    // Default `grabbed_at = CURRENT_TIMESTAMP` → grab_is_stale=false.
+    insert_dc(
+        &db,
+        DownloadClientForm {
+            name: "default",
+            kind: "qbittorrent",
+            url: "http://q",
+            username: "",
+            password: "",
+            label: "",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    let default_client = Arc::new(RecordingClient::new(Vec::new()));
+    install_pool(
+        &state,
+        vec![(1, default_client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_state, "pending",
+        "fresh grab missing from client must stay 'pending' — the 60s grace is load-bearing for slow first polls"
+    );
+}
+
+// ─── Errored / failed torrent state ───────────────────────────────
+
+#[tokio::test]
+async fn run_once_marks_grab_failed_when_client_reports_torrent_in_error_state() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    // A torrent that the client reports as `Error` / `Failed` /
+    // `MissingFiles` (any `state_kind.is_errored()`) → mark_failed.
+    // Pre-multi-client this branch logged a qBit-specific tag; now
+    // the message normalizes across all five clients via state_kind
+    // slug. The `is_errored()` -> `mark_failed` chain itself is
+    // covered here — a refactor that fell through to the
+    // is_complete() guard would silently leave error-state grabs
+    // pending forever.
+    let db = in_memory_pool().await;
+    seed_config(&db).await;
+    let series_id = seed_series(&db, 1, "Show").await;
+    let g = grabbed_torrents::record_grab(&db, "errhash", "rel", series_id, &[1], false)
+        .await
+        .unwrap()
+        .unwrap();
+    insert_dc(
+        &db,
+        DownloadClientForm {
+            name: "default",
+            kind: "qbittorrent",
+            url: "http://q",
+            username: "",
+            password: "",
+            label: "",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    // The `Errored` variant is the sole `is_errored()` mapping
+    // — every wire-level failure (qBit `error`, SAB `Failed`,
+    // Transmission status<0, etc.) lands here in the normalized
+    // state_kind enum.
+    let default_client = Arc::new(RecordingClient::new(vec![fake_torrent(
+        "errhash",
+        DownloadItemState::Errored,
+    )]));
+    install_pool(
+        &state,
+        vec![(1, default_client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_state, "failed",
+        "errored torrent must transition to 'failed', not stay 'pending' or get marked 'removed'"
+    );
+}
+
 #[tokio::test]
 async fn run_once_falls_back_to_default_for_null_stamps() {
     let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;

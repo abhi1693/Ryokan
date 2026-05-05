@@ -739,3 +739,288 @@ async fn find_all_for_target_dedups_same_info_hash_across_query_passes() {
 
     unset_nyaa_base();
 }
+
+// ─── Handler-level coverage ──────────────────────────────────────
+//
+// Everything above tests the `find_all_for_target` service entry
+// point. The HTTP handler `auto_search_episode` sits one layer up:
+// it resolves the series context, builds the SearchTarget,
+// dispatches via `run_auto_search_targets_with_upgrades` (which
+// calls find_best_for_target then dispatches the winning result
+// to a configured `DownloadClient`), and persists a grab row. The
+// full-stack happy path requires (a) cache-seeded metadata so the
+// resolver doesn't hit AL, (b) Nyaa wiremock returning a matching
+// release, (c) a recording DownloadClient in the pool's torrent
+// default slot. Pre-this-test handlers/library/search/auto_search.rs
+// was 5% covered.
+
+use async_trait::async_trait;
+use ryokan::DownloadClientPool;
+use ryokan::handlers::library::search::{AutoSearchQuery, auto_search_episode};
+use ryokan::services::download_client::{
+    AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+};
+use std::sync::Mutex as StdMutex;
+
+/// Recording mock that captures `add_torrent_returning_id` calls
+/// and reports them via `add_calls()`. Other trait methods no-op.
+struct AutoSearchRecordingClient {
+    add_calls: StdMutex<Vec<(String, String)>>, // (url, info_hash)
+}
+
+impl AutoSearchRecordingClient {
+    fn new() -> Self {
+        Self {
+            add_calls: StdMutex::new(Vec::new()),
+        }
+    }
+    fn add_calls(&self) -> Vec<(String, String)> {
+        self.add_calls.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl DownloadClient for AutoSearchRecordingClient {
+    async fn test(&self) -> Result<String, String> {
+        Ok("mock".into())
+    }
+    async fn add_torrent(&self, url: &str, info_hash: &str) -> Result<AddOutcome, String> {
+        self.add_calls
+            .lock()
+            .unwrap()
+            .push((url.to_string(), info_hash.to_string()));
+        Ok(AddOutcome::Added)
+    }
+    async fn add_torrent_with_file_filter(
+        &self,
+        _url: &str,
+        _hash: &str,
+        _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+    ) -> Result<SelectiveOutcome, String> {
+        Ok(SelectiveOutcome::FullDownload)
+    }
+    async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+        Ok(vec![])
+    }
+    async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+        Ok(vec![])
+    }
+    async fn pause(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn resume(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_file_wanted(
+        &self,
+        _hash: &str,
+        _files: &[usize],
+        _wanted: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn sonarr_impl_name(&self) -> &'static str {
+        "QBittorrent"
+    }
+}
+
+/// Install a `DownloadClientPool` carrying one default-torrent
+/// recording client at id 1. Returns the Arc so the test can read
+/// `add_calls()` after the handler runs.
+async fn install_recording_default_torrent_client(
+    state: &AppState,
+) -> std::sync::Arc<AutoSearchRecordingClient> {
+    let client = std::sync::Arc::new(AutoSearchRecordingClient::new());
+    let mut clients: std::collections::HashMap<i64, std::sync::Arc<dyn DownloadClient>> =
+        std::collections::HashMap::new();
+    clients.insert(1, client.clone() as std::sync::Arc<dyn DownloadClient>);
+    let pool = DownloadClientPool {
+        clients,
+        default_torrent_id: Some(1),
+        default_usenet_id: None,
+    };
+    *state.download_clients.write().await = std::sync::Arc::new(pool);
+    client
+}
+
+/// Cache-seeded series + AnimeDetail for `request_id = anilist_id`.
+/// resolve_series_context will short-circuit on the metadata cache
+/// and never hit AL.
+async fn seed_series_with_cache(state: &AppState, anilist_id: i64, title: &str) -> i64 {
+    let series_id = ryokan::test_support::seed_series(&state.db, anilist_id, title).await;
+    let detail = detail_for(anilist_id, title);
+    ryokan::models::metadata_cache::upsert(&state.db, series_id, anilist_id, None, &detail)
+        .await
+        .unwrap();
+    series_id
+}
+
+#[tokio::test]
+async fn auto_search_episode_handler_grabs_matching_release_end_to_end() {
+    // Full happy path: cache-seeded series, Nyaa wiremock returning
+    // a single matching release, recording torrent default in the
+    // pool. Handler resolves context, find_best_for_target picks
+    // the only candidate, dispatch routes through Nyaa's
+    // client_for_nyaa fallback to the torrent default, the
+    // grabbed_torrents row + episode_quality_tags row land, and
+    // the AutoSearchReport.grabbed list carries one entry. Pins
+    // the entire HTTP entry point on auto_search.rs which had no
+    // direct end-to-end coverage before this test.
+    let _gate = ENV_LOCK.lock().await;
+
+    let server = MockServer::start().await;
+    let html = nyaa_results_page(&nyaa_row(
+        "fedcba9876543210fedcba9876543210fedcba98",
+        99001,
+        "[Group] Auto Search Show - 03 (1080p) [WEB].mkv",
+        "1.4 GiB",
+        80,
+    ));
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(html))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let anilist_id: i64 = 9001;
+    let state = build_state().await;
+    let _series_id = seed_series_with_cache(&state, anilist_id, "Auto Search Show").await;
+    let client = install_recording_default_torrent_client(&state).await;
+
+    let result = auto_search_episode(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((anilist_id, 3_i32)),
+        axum::extract::Query(AutoSearchQuery::default()),
+    )
+    .await;
+    let axum::response::Json(report) = result.expect("auto-search must succeed");
+    assert_eq!(
+        report.grabbed.len(),
+        1,
+        "exactly one grab expected from a single matching Nyaa row; report={report:?}"
+    );
+    assert!(
+        report.grabbed[0].release_title.contains("Auto Search Show"),
+        "grabbed entry must reference the seeded title"
+    );
+
+    // Recording client saw exactly one add call.
+    let calls = client.add_calls();
+    assert_eq!(calls.len(), 1, "exactly one add_torrent call expected");
+    // qBit-shape add: url is the magnet, hash is the precomputed v1
+    // infohash from the magnet xt parse.
+    assert!(calls[0].0.starts_with("magnet:?xt="));
+    assert!(calls[0].1.starts_with("fedcba9876543210"));
+
+    // grabbed_torrents row landed for the right series + episode.
+    let row: (i64, String, String) = sqlx::query_as(
+        "SELECT series_id, episode_numbers, hash FROM grabbed_torrents WHERE torrent_name LIKE ?",
+    )
+    .bind("%Auto Search Show%")
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(row.1, "[3]");
+    assert!(row.2.starts_with("fedcba9876543210"));
+
+    // Per-episode quality tag written.
+    let tag_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(row.0)
+    .bind(3_i32)
+    .fetch_one(&state.db)
+    .await
+    .unwrap();
+    assert_eq!(tag_count, 1);
+
+    unset_nyaa_base();
+}
+
+#[tokio::test]
+async fn auto_search_episode_handler_returns_empty_grabbed_when_nyaa_has_no_results() {
+    // No matching rows in Nyaa -> find_best_for_target returns None
+    // -> the per-target arm pushes a "skipped" entry and returns an
+    // AutoSearchReport with grabbed.len() == 0. Pins the no-results
+    // path so a refactor that fabricated synthetic results on miss
+    // wouldn't ship.
+    let _gate = ENV_LOCK.lock().await;
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(nyaa_results_page("")))
+        .mount(&server)
+        .await;
+    set_nyaa_base(&server.uri());
+
+    let anilist_id: i64 = 9002;
+    let state = build_state().await;
+    let _series_id = seed_series_with_cache(&state, anilist_id, "Empty Show").await;
+    let client = install_recording_default_torrent_client(&state).await;
+
+    let result = auto_search_episode(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((anilist_id, 1_i32)),
+        axum::extract::Query(AutoSearchQuery::default()),
+    )
+    .await;
+    let axum::response::Json(report) = result.expect("auto-search returns Ok with empty grabbed");
+    assert!(
+        report.grabbed.is_empty(),
+        "no Nyaa hits → empty grabbed list; got {report:?}"
+    );
+    assert!(
+        client.add_calls().is_empty(),
+        "no add_torrent calls when there are no candidates"
+    );
+
+    let grab_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM grabbed_torrents")
+        .fetch_one(&state.db)
+        .await
+        .unwrap();
+    assert_eq!(grab_count, 0, "no DB-side grab row when no match found");
+
+    unset_nyaa_base();
+}
+
+#[tokio::test]
+async fn auto_search_episode_handler_returns_400_when_no_download_client_configured() {
+    // The up-front guard at run_auto_search_targets_with_upgrades:274
+    // returns 400 with "Download client not configured" when
+    // default_download_client() is None — fail fast rather than
+    // wasting a Nyaa round trip on a setup the user can't act on.
+    // The error surfaces from the spawned task back through the
+    // handler's awaiter. No Nyaa wiremock needed.
+    let _gate = ENV_LOCK.lock().await;
+    // Even though no Nyaa traffic is expected, guarantee no leaked
+    // env var from a prior failing test.
+    unset_nyaa_base();
+
+    let anilist_id: i64 = 9003;
+    let state = build_state().await;
+    let _series_id = seed_series_with_cache(&state, anilist_id, "No Client Show").await;
+    // Deliberately do NOT install a download client pool — the
+    // default state has an empty pool.
+
+    let result = auto_search_episode(
+        axum::extract::State(state),
+        axum::extract::Path((anilist_id, 1_i32)),
+        axum::extract::Query(AutoSearchQuery::default()),
+    )
+    .await;
+    match result {
+        Err((status, body)) => {
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert!(
+                body.contains("Download client not configured"),
+                "must surface the up-front guard's error message; got {body}"
+            );
+        }
+        Ok(_) => panic!("missing-client must surface as 400, not Ok"),
+    }
+}

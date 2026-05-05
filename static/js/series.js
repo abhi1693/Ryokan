@@ -1745,53 +1745,90 @@ function syncDeleteFileButton(epNum) {
 // the user crosses the first or last position. For series whose relations
 // already fit in view, the `.no-scroll` class removes the buttons entirely so
 // short lists aren't padded with dead space.
-(function initRelationsCarousel() {
+//
+// Mount via `ryokanRegisterPageInit` so the bind fires on htmx.onLoad
+// (after the body swap commits) rather than at script-load time. On a
+// boost-nav, dynamically-injected `<script src=...>` tags ignore `defer`
+// and execute as soon as the file finishes loading — which can race
+// ahead of htmx finishing the swap. An IIFE here would measure
+// `track.scrollWidth` before the cards are in DOM (or with zero
+// dimensions) and `.no-scroll` would stick → no arrows. F5 reload
+// fixed it because the script ran post-DOM. Lifecycle helper defers
+// the mount to the right moment.
+// `var` (not `let` / `const`) per CLAUDE.md: top-level `let` throws
+// "redeclaration" SyntaxError when the script re-executes after a
+// hx-boost body swap. Re-execution is fine; redeclaration isn't.
+var initRelationsCarousel = function (section) {
     const EDGE_SLOP = 2; // pixels of tolerance for "reached the edge"
-    document.querySelectorAll('.relations-section').forEach(section => {
-        const row = section.querySelector('.relations-row');
-        const track = section.querySelector('.relation-cards');
-        const btnLeft = section.querySelector('.relation-scroll-btn-left');
-        const btnRight = section.querySelector('.relation-scroll-btn-right');
-        if (!row || !track || !btnLeft || !btnRight) return;
+    const row = section.querySelector('.relations-row');
+    const track = section.querySelector('.relation-cards');
+    const btnLeft = section.querySelector('.relation-scroll-btn-left');
+    const btnRight = section.querySelector('.relation-scroll-btn-right');
+    if (!row || !track || !btnLeft || !btnRight) return;
+    // Idempotent guard: page_lifecycle.js dedupes registrations by
+    // name, but the immediate-mount path can fire a second time if
+    // htmx.onLoad has already run before this script even loaded.
+    // Re-binding click listeners on the same buttons would stack
+    // duplicate handlers → one click scrolls twice. Skip the bind
+    // when we've already wired this section up.
+    if (section.dataset.ryokanRelationsBound === '1') return;
+    section.dataset.ryokanRelationsBound = '1';
 
-        const updateButtons = () => {
-            const scrollable = track.scrollWidth > track.clientWidth + EDGE_SLOP;
-            if (!scrollable) {
-                row.classList.add('no-scroll');
-                btnLeft.hidden = true;
-                btnRight.hidden = true;
-                return;
-            }
-            row.classList.remove('no-scroll');
-            btnLeft.hidden = track.scrollLeft <= EDGE_SLOP;
-            btnRight.hidden = track.scrollLeft >= track.scrollWidth - track.clientWidth - EDGE_SLOP;
-        };
-
-        const scrollByViewport = direction => {
-            // Scroll by roughly one viewport minus a card, so the card at the
-            // current edge remains visible as an anchor.
-            const delta = Math.max(track.clientWidth - 152, 200) * direction;
-            track.scrollBy({ left: delta, behavior: 'smooth' });
-        };
-
-        btnLeft.addEventListener('click', () => scrollByViewport(-1));
-        btnRight.addEventListener('click', () => scrollByViewport(1));
-        track.addEventListener('scroll', updateButtons, { passive: true });
-        // Per-section resize listener used to attach to `window` here.
-        // Under body-wide hx-boost, the script re-runs on every nav-back
-        // and a fresh `window.resize` listener attached for each visit
-        // (window persists across body swaps even when the section DOM
-        // doesn't). After N visits, N closures captured stale section
-        // refs and fired on every resize. Use ResizeObserver on `track`
-        // instead — the observer is GC'd with the detached section,
-        // so no cross-visit accumulation.
-        if (typeof ResizeObserver !== 'undefined') {
-            new ResizeObserver(updateButtons).observe(track);
+    const updateButtons = () => {
+        const scrollable = track.scrollWidth > track.clientWidth + EDGE_SLOP;
+        if (!scrollable) {
+            row.classList.add('no-scroll');
+            btnLeft.hidden = true;
+            btnRight.hidden = true;
+            return;
         }
+        row.classList.remove('no-scroll');
+        btnLeft.hidden = track.scrollLeft <= EDGE_SLOP;
+        btnRight.hidden = track.scrollLeft >= track.scrollWidth - track.clientWidth - EDGE_SLOP;
+    };
 
-        updateButtons();
+    const scrollByViewport = direction => {
+        // Scroll by roughly one viewport minus a card, so the card at the
+        // current edge remains visible as an anchor.
+        const delta = Math.max(track.clientWidth - 152, 200) * direction;
+        track.scrollBy({ left: delta, behavior: 'smooth' });
+    };
+
+    btnLeft.addEventListener('click', () => scrollByViewport(-1));
+    btnRight.addEventListener('click', () => scrollByViewport(1));
+    track.addEventListener('scroll', updateButtons, { passive: true });
+    // Per-section resize listener used to attach to `window` here.
+    // Under body-wide hx-boost, the script re-runs on every nav-back
+    // and a fresh `window.resize` listener attached for each visit
+    // (window persists across body swaps even when the section DOM
+    // doesn't). After N visits, N closures captured stale section
+    // refs and fired on every resize. Use ResizeObserver on `track`
+    // instead — the observer is GC'd with the detached section,
+    // so no cross-visit accumulation.
+    if (typeof ResizeObserver !== 'undefined') {
+        new ResizeObserver(updateButtons).observe(track);
+    }
+
+    updateButtons();
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('series-relations-carousel', {
+        check: () => !!document.querySelector('.relations-section'),
+        mount: () => {
+            document.querySelectorAll('.relations-section').forEach(section => {
+                initRelationsCarousel(section);
+            });
+        },
+        unmount: () => {
+            // No interval to clear; ResizeObservers are GC'd with the
+            // section DOM nodes when boost detaches them. The dataset
+            // bind-guard naturally resets because the new boost-nav
+            // brings in fresh `.relations-section` elements without
+            // the dataset attribute set.
+        },
     });
-})();
+}
 
 // --- Episode download progress polling ---
 //

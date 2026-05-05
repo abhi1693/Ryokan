@@ -35,7 +35,12 @@
         <div class="form-group">
             <label for="indexer-edit-key-{{ row.id }}">API Key</label>
             <input id="indexer-edit-key-{{ row.id }}" type="text" name="api_key" autocomplete="off" value="{{ row.api_key }}">
-            <span class="form-hint" data-indexer-api-key-hint>Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
+            {# Kind-aware hint text. Server-rendered to match the
+               row's current kind so opening Edit on a newznab row
+               doesn't flash the torznab default before
+               `applyIndexerKindCopy` swaps it. The JS path still
+               handles live kind-flips inside the open modal. #}
+            <span class="form-hint" data-indexer-api-key-hint>{{ crate::handlers::settings::indexers::api_key_hint_for_kind(row.kind.as_str()) }}</span>
         </div>
 
         <div class="form-row">

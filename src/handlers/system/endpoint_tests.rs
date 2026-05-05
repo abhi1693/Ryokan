@@ -530,3 +530,291 @@ fn truncate_to_page_returns_none_for_short_page() {
     assert_eq!(kept.len(), 42);
     assert_eq!(older, None);
 }
+
+// `mark_finished` is an UPDATE so it's a no-op without a pre-existing
+// row. Production seeds these at boot via `touch_definition`; tests
+// that assert on the audit row need to do the same setup. Helper to
+// keep the test bodies focused.
+async fn seed_task_definition(db: &sqlx::SqlitePool, key: &str) {
+    scheduled_tasks::touch_definition(db, key, key, "Manual", true)
+        .await
+        .unwrap();
+}
+
+// ── api_force_metadata_refresh ───────────────────────────────────
+
+#[tokio::test]
+async fn api_force_metadata_refresh_with_empty_library_reports_zero_zero() {
+    // Empty `series` table → run_metadata_sweep iterates nothing
+    // and returns (0, 0). The handler wraps the tuple into the
+    // user-facing JSON envelope. Pins the (refreshed, failed)
+    // unpacking + the `ok = failed == 0` boolean.
+    let db = in_memory_pool().await;
+    seed_task_definition(&db, "metadata_refresh").await;
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_force_metadata_refresh(axum::extract::State(state))
+        .await
+        .expect("ok");
+    assert_eq!(resp.0["ok"], true);
+    let msg = resp.0["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("Refreshed: 0") && msg.contains("Failed: 0"),
+        "message must surface both counts; got {msg}"
+    );
+
+    // Audit-trail row was written: scheduled_task_runs.metadata_refresh
+    // exits with `last_status = 'ok'`. Without this assertion, a
+    // refactor that drops the `mark_finished` call would leave the
+    // status row stuck at 'running' forever and System → Tasks would
+    // misreport task health.
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT last_status, last_detail FROM scheduled_task_runs WHERE task_key = 'metadata_refresh'",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    let (status, detail) = row.expect("scheduled_task_runs row written");
+    assert_eq!(status, "ok");
+    assert!(detail.contains("refreshed=0"), "detail: {detail}");
+}
+
+// ── api_force_post_processing ────────────────────────────────────
+
+#[tokio::test]
+async fn api_force_post_processing_runs_to_completion_with_no_pending_grabs() {
+    // Empty `grabbed_torrents` + no media_root → run_once is a fast
+    // no-op that bails at the early-return path. We just need to pin
+    // the handler's wrapper: ok=true, friendly message, audit row.
+    let db = in_memory_pool().await;
+    seed_task_definition(&db, "post_processing").await;
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_force_post_processing(axum::extract::State(state))
+        .await
+        .expect("ok");
+    assert_eq!(resp.0["ok"], true);
+    assert!(
+        resp.0["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Post-processing run completed")
+    );
+
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT last_status FROM scheduled_task_runs WHERE task_key = 'post_processing'",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert_eq!(row.as_deref(), Some("ok"));
+}
+
+// ── api_rss_clear_history ────────────────────────────────────────
+
+#[tokio::test]
+async fn api_rss_clear_history_deletes_only_grabbed_rows_and_reports_count() {
+    // The model-side test (`clear_grab_history_only_removes_grabbed_rows`)
+    // pins the SQL filter. This test pins the handler's *response
+    // shape* — `deleted` count rendered into the message and an
+    // audit log written into `logs`. A regression where the handler
+    // re-emits `Cleared 0` regardless of model output (e.g. a swap
+    // to `let _ = clear_grab_history(...);`) would surface here.
+    let db = in_memory_pool().await;
+    rss::record_decision(
+        &db,
+        rss::DecisionRecord {
+            item_key: "k:grabbed",
+            title: "grabbed item",
+            link: "",
+            series_id: None,
+            series_title: "",
+            group_name: "",
+            is_batch: false,
+            decision: "grabbed",
+            reason: "",
+            source: "",
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+    rss::record_decision(
+        &db,
+        rss::DecisionRecord {
+            item_key: "k:skipped",
+            title: "skipped item",
+            link: "",
+            series_id: None,
+            series_title: "",
+            group_name: "",
+            is_batch: false,
+            decision: "skipped",
+            reason: "",
+            source: "",
+            source_id: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_rss_clear_history(axum::extract::State(state))
+        .await
+        .expect("ok");
+    assert_eq!(resp.0["ok"], true);
+    let msg = resp.0["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("Cleared 1"),
+        "message must surface the deleted-row count; got {msg}"
+    );
+
+    // `skipped` row survives.
+    let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM rss_seen")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(remaining, 1);
+
+    // Audit log captured under the System category.
+    let logs = log::query(&db, &log::LogQuery::default()).await.unwrap();
+    assert!(
+        logs.iter().any(|l| l.message == "RSS grab history cleared"),
+        "audit log row must be present"
+    );
+}
+
+// ── api_rebuild_cached_metadata ──────────────────────────────────
+
+#[tokio::test]
+async fn api_rebuild_cached_metadata_with_empty_library_reports_all_zeros() {
+    // Empty series table → run_metadata_sweep returns (0, 0) which
+    // rebuild_cached_metadata_for_all wraps to (0, 0, 0). Pins the
+    // outer/middle/inner spawn orchestration's happy-path unwrap and
+    // the `ok = failed == 0` boolean.
+    let db = in_memory_pool().await;
+    seed_task_definition(&db, "metadata_rebuild").await;
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_rebuild_cached_metadata(axum::extract::State(state))
+        .await
+        .expect("ok");
+    assert_eq!(resp.0["ok"], true);
+    assert_eq!(resp.0["rebuilt"], 0);
+    assert_eq!(resp.0["skipped"], 0);
+    assert_eq!(resp.0["failed"], 0);
+
+    // Distinct task key from `metadata_refresh` — semantically
+    // different operations need separate audit rows.
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT last_status FROM scheduled_task_runs WHERE task_key = 'metadata_rebuild'",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert_eq!(row.as_deref(), Some("ok"));
+}
+
+// ── api_rss_sync ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn api_rss_sync_with_master_switch_off_returns_friendly_no_op_summary() {
+    // PR 112 review #3: when rss_master_enabled is false, the
+    // sync_once early-exits with a SyncSummary whose `detail`
+    // explains the kill switch. Pins the handler's success-wrapping
+    // of that branch (no rss_runs row, no log noise) and the
+    // `summary` field is preserved on the outbound JSON.
+    let db = in_memory_pool().await;
+    sqlx::query(
+        "INSERT INTO config (id, rss_master_enabled, post_processing_mode, cutoff_source, cutoff_resolution) \
+         VALUES (1, 0, 'hardlink', '', '')",
+    )
+    .execute(&db)
+    .await
+    .unwrap();
+    seed_task_definition(&db, "rss_sync").await;
+
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_rss_sync(axum::extract::State(state)).await.expect("ok");
+    assert_eq!(resp.0["ok"], true);
+    let msg = resp.0["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("master switch is off"),
+        "message must surface the kill-switch reason; got {msg}"
+    );
+    // Summary block round-trips so the toast can render the counts.
+    let summary = &resp.0["summary"];
+    assert_eq!(summary["items_seen"], 0);
+    assert_eq!(summary["matched"], 0);
+    assert_eq!(summary["grabbed"], 0);
+
+    let row: Option<String> = sqlx::query_scalar(
+        "SELECT last_status FROM scheduled_task_runs WHERE task_key = 'rss_sync'",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    assert_eq!(row.as_deref(), Some("ok"));
+}
+
+// ── api_anibridge_reload ─────────────────────────────────────────
+
+#[tokio::test]
+async fn api_anibridge_reload_returns_502_when_mappings_endpoint_5xxes() {
+    // Point the mappings URL at a wiremock that 503s; the underlying
+    // `reload()` returns false → handler returns 502 + "Failed to
+    // reload" + writes scheduled_task_runs.anibridge_refresh = error.
+    // Without this test, a refactor that drops the `mark_finished
+    // status='error'` branch (e.g. silently `_ = ...` on the failure
+    // arm) would still 502 the user but stick the audit row at
+    // `running` forever.
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    // Hold the same ENV_LOCK that anibridge.rs's tests use so a
+    // concurrent run under `cargo test` (and therefore `cargo
+    // llvm-cov`, which uses `cargo test` internally) can't race
+    // on RYOKAN_ANIBRIDGE_MAPPINGS_URL with anibridge's own
+    // wiremock tests. nextest gives each test its own process so
+    // the lock is a no-op there.
+    let _guard = crate::services::anibridge::ENV_LOCK.lock().await;
+    // SAFETY: serialized via ENV_LOCK; no concurrent reader/writer
+    // racing on these process-global env vars.
+    unsafe {
+        std::env::set_var("RYOKAN_ANIBRIDGE_CACHE_DIR", tmp.path());
+        std::env::set_var(
+            "RYOKAN_ANIBRIDGE_MAPPINGS_URL",
+            format!("{}/mappings.min.json", server.uri()),
+        );
+    }
+
+    let db = in_memory_pool().await;
+    seed_task_definition(&db, "anibridge_refresh").await;
+    let state = build_test_app_state(db.clone(), None);
+    let resp = api_anibridge_reload(axum::extract::State(state)).await;
+    let (status, body) = resp.expect_err("5xx mappings endpoint must surface as Err");
+    assert_eq!(status, axum::http::StatusCode::BAD_GATEWAY);
+    assert!(
+        body.contains("Failed to reload"),
+        "body must explain the failure; got {body}"
+    );
+
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT last_status, last_detail FROM scheduled_task_runs WHERE task_key = 'anibridge_refresh'",
+    )
+    .fetch_optional(&db)
+    .await
+    .unwrap();
+    let (last_status, last_detail) = row.expect("audit row must exist");
+    assert_eq!(last_status, "error");
+    assert!(last_detail.contains("Failed to download mappings"));
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANIBRIDGE_CACHE_DIR");
+        std::env::remove_var("RYOKAN_ANIBRIDGE_MAPPINGS_URL");
+    }
+}

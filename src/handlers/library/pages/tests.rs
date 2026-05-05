@@ -646,6 +646,50 @@ fn normalize_system_tab_help_alias_resolves_to_scoring() {
 }
 
 #[test]
+fn series_template_title_cell_is_always_clickable() {
+    // Pins that the title-cell fallback (every row without a title)
+    // renders as a clickable `ep-title-btn` button, never an
+    // unclickable `<span class="ep-missing-text">` standalone.
+    //
+    // History: the original tag-overflow fix (b959c0c) widened a guard
+    // to include `quality_state` and `downloaded`, but missed
+    // main-loop rows where empty-title placeholder rows in
+    // `series_episode_metadata` had promoted ep_count past the real
+    // aired count (the One Piece 1157-1160 case — Jikan / Kitsu
+    // hadn't seen the eps yet, the metadata-sync wrote
+    // `source="series"` placeholders, which inflated cached_eps.len()
+    // and pushed those rows into the main 1..=ep_count loop with no
+    // tag, no disk file, no title → branch 3 → unclickable).
+    //
+    // Collapsing branches 2 and 3 makes this whole class of bug
+    // impossible: every title-less row goes through the same
+    // button. The grab-history modal renders fine on empty data
+    // (the JS at series.js:145 covers the missing bits).
+    let template = include_str!("../../../../templates/series.html");
+    // Pin: the title-less span lives inside the click handler row of
+    // the title-cell button. `data-on-disk="{{ ep.on_disk }}">` is
+    // the LAST attribute on the open tag, so the very next line
+    // being our span proves the span is wrapped by a button.
+    let inside_button = "data-on-disk=\"{{ ep.on_disk }}\">\n                            <span class=\"ep-missing-text\">Episode {{ ep.number }}</span>";
+    assert!(
+        template.contains(inside_button),
+        "series.html must keep the title-less row's `<span class=\"ep-missing-text\">Episode N</span>` immediately inside an `ep-title-btn` button (after the `data-on-disk=...` attribute) so the row is clickable for grab history"
+    );
+    // Pin: there's no second `<span class="ep-missing-text">Episode {{ ep.number }}</span>`
+    // outside the button — we expect exactly one occurrence in the
+    // whole template, and it's the one inside the button. A
+    // standalone duplicate would be the unclickable branch we
+    // removed.
+    let occurrences = template
+        .matches("<span class=\"ep-missing-text\">Episode {{ ep.number }}</span>")
+        .count();
+    assert_eq!(
+        occurrences, 1,
+        "series.html must contain exactly one `<span class=\"ep-missing-text\">Episode N</span>` (inside the title-cell button); a second occurrence would be the unclickable standalone branch the title-cell collapse removed"
+    );
+}
+
+#[test]
 fn normalize_system_tab_unknown_or_missing_defaults_to_logs() {
     // Logs is the safest landing — the user can always see what's
     // going on from the logs tab.

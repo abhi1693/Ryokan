@@ -518,6 +518,7 @@ async fn main() {
         oauth_state: services::oauth_state::new(),
         start_time: chrono::Utc::now(),
         tasks: services::task_registry::TaskRegistry::new(),
+        dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.
@@ -528,6 +529,24 @@ async fn main() {
     // Downloads) or one row with `is_default = 1` mirroring the
     // legacy `active_client` choice.
     services::download_client::rebuild_clients_cache(&state.download_clients, &db).await;
+    // Pre-warm the DC status cache in the background so the first
+    // visit to Settings → Connections renders the probed pills
+    // server-side instead of flashing through the "Probing…"
+    // placeholder. Spawned because a slow probe (SAB on a
+    // tarpitting tracker, an unreachable seedbox) shouldn't delay
+    // the listener bind by ~5s. Subsequent visits within
+    // DC_STATUS_CACHE_TTL pick up the warmed entries.
+    {
+        let pool_cache = state.download_clients.clone();
+        let status_cache = state.dc_status_cache.clone();
+        tokio::spawn(async move {
+            handlers::settings::download_clients::prewarm_dc_status_cache(
+                &pool_cache,
+                &status_cache,
+            )
+            .await;
+        });
+    }
     if let Ok(Some(config)) = models::config::get_config(&db).await
         && !config.jellyfin_url.is_empty()
         && !config.jellyfin_api_key.is_empty()

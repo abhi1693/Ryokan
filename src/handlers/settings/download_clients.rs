@@ -58,6 +58,94 @@ pub fn kind_label(kind: &str) -> &'static str {
     }
 }
 
+/// Per-kind copy (placeholders, hint text, label names, visibility)
+/// for the Add/Edit form body. Mirrors `DC_KIND_COPY` in
+/// `static/js/settings.js` — keep both in lockstep when a new kind
+/// lands or copy is updated. Server-rendered into the templates so
+/// the modal opens with the kind-correct shape on first paint;
+/// without this the form rendered the qBit-style defaults and the
+/// JS path swapped them in async on `htmx:afterSettle`, which read
+/// as a structural flash on Edit-on-SAB / Edit-on-Deluge clicks.
+/// JS still owns the live kind-flip case (user toggles the dropdown
+/// after the modal opens).
+pub struct DcKindCopy {
+    pub url_placeholder: &'static str,
+    pub url_hint: &'static str,
+    pub username_visible: bool,
+    pub username_hint: &'static str,
+    pub password_label: &'static str,
+    /// HTML `input type` — `password` masks, `text` reveals (used
+    /// for SAB API keys where visual verification of the pasted
+    /// value is more useful than masking).
+    pub password_type: &'static str,
+    pub password_hint: &'static str,
+    pub label_label: &'static str,
+    pub label_hint: &'static str,
+}
+
+pub fn copy_for_kind(kind: &str) -> DcKindCopy {
+    match kind {
+        KIND_DELUGE => DcKindCopy {
+            url_placeholder: "http://localhost:8112",
+            url_hint: "Point at Deluge's Web UI base.",
+            username_visible: false,
+            username_hint: "",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "Deluge Web UI password. Deluge has no per-user auth at the API layer; the password is the only credential.",
+            label_label: "Label",
+            label_hint: "Deluge's Label plugin tag. The plugin must be enabled; Ryokan auto-enables it on first connect when Label shows up in available_plugins but not enabled_plugins.",
+        },
+        KIND_TRANSMISSION => DcKindCopy {
+            url_placeholder: "http://localhost:9091",
+            url_hint: "Point at Transmission's RPC endpoint base.",
+            username_visible: true,
+            username_hint: "Transmission HTTP Basic auth user (matches rpc-username in settings.json).",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "Transmission HTTP Basic auth password (matches rpc-password in settings.json).",
+            label_label: "Label",
+            label_hint: "Transmission native label (4.x+). On 3.x and earlier Ryokan falls back to a save-path prefix for scoping.",
+        },
+        KIND_RTORRENT => DcKindCopy {
+            url_placeholder: "http://localhost/RPC2",
+            url_hint: "Point at rtorrent's XML-RPC endpoint (typically /RPC2 under the SCGI / nginx proxy).",
+            username_visible: true,
+            username_hint: "HTTP Basic auth user if the RPC endpoint is fronted by nginx with auth_basic. Leave blank for unauthenticated RPC.",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "HTTP Basic auth password matching the username above.",
+            label_label: "Label",
+            label_hint: "Sets the custom1 field on every added torrent (the ruTorrent label convention). Ryokan filters list_scoped by this tag.",
+        },
+        KIND_SABNZBD => DcKindCopy {
+            url_placeholder: "http://localhost:8080",
+            url_hint: "Point at SABnzbd's Web UI base. Ryokan appends /api. If your SAB has URL_BASE set (e.g. /sabnzbd), include it: http://host:8080/sabnzbd.",
+            username_visible: false,
+            username_hint: "",
+            password_label: "API Key",
+            password_type: "text",
+            password_hint: "SABnzbd's API key. Find it in SABnzbd \u{2192} Config \u{2192} General \u{2192} Security \u{2192} API Key.",
+            label_label: "Category",
+            label_hint: "SAB category. Determines the post-processing target directory. Ryokan filters list_scoped by category so it only sees jobs it added.",
+        },
+        // qBit + unknown fall through to the qBit default. Matches the
+        // JS map's `DC_KIND_COPY[kind] || DC_KIND_COPY.qbittorrent`
+        // shape.
+        _ => DcKindCopy {
+            url_placeholder: "http://localhost:8080",
+            url_hint: "Point at qBittorrent's Web UI base. Ryokan handles the API path internally.",
+            username_visible: true,
+            username_hint: "qBit's Web UI username (default is admin).",
+            password_label: "Password",
+            password_type: "password",
+            password_hint: "qBit's Web UI password. qBittorrent 4.6.1+ generates a random temporary password on first start. Pre-4.6.1's default password is 'adminadmin'.",
+            label_label: "Category",
+            label_hint: "qBit category Ryokan tags every torrent with. Determines scoping (Ryokan only sees torrents in this category) AND the post-processing target directory if qBit's category-rule has one set.",
+        },
+    }
+}
+
 /// Section partial — the entire card list + add slot wrapped in
 /// `#dc-section`. Every successful HTMX action (upsert / delete /
 /// set-default) returns this so a single swap re-renders the
@@ -75,6 +163,15 @@ struct DownloadClientsListPartial {
     // both protocols.
     first_torrent_client: bool,
     first_usenet_client: bool,
+    /// Per-row cached probe status, keyed by `download_clients.id`.
+    /// Populated from `AppState.dc_status_cache` for entries fresh
+    /// within `DC_STATUS_CACHE_TTL`. When the row's id is present
+    /// here, the template renders the full pill server-side (same
+    /// shape as `partials/settings/download_clients/status_pill.html`)
+    /// instead of emitting the `hx-trigger="load"` placeholder. When
+    /// absent (cold cache, expired entry), the placeholder + JS-driven
+    /// probe runs as before.
+    cached_status: std::collections::HashMap<i64, crate::DcStatusEntry>,
 }
 
 impl DownloadClientsListPartial {
@@ -191,12 +288,84 @@ async fn render_section(state: &AppState) -> Response {
     let first_usenet_client = !rows
         .iter()
         .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
+    // Snapshot fresh entries from the per-process cache so the
+    // template can render the probed pill server-side and skip the
+    // hx-trigger="load" placeholder for those cards. Stale entries
+    // (older than DC_STATUS_CACHE_TTL) and disabled rows fall through
+    // to the placeholder path. The lock window is tiny — a single
+    // lookup per row, no async work — so a std Mutex is fine.
+    let cached_status = snapshot_fresh_dc_status(&state.dc_status_cache);
     DownloadClientsListPartial {
         rows,
         first_torrent_client,
         first_usenet_client,
+        cached_status,
     }
     .into_html_ok()
+}
+
+/// Pre-warm the DC status cache at server startup so the first-paint
+/// of Settings → Connections doesn't flash through the "Probing…"
+/// placeholder. Probes every client in the active pool in parallel
+/// (one tokio task per client) and writes results into the cache.
+/// Failures are silently captured as "Unreachable" entries; the
+/// cache reflects current reality and the user sees a stable pill on
+/// first visit either way.
+///
+/// Called once from `main.rs` after `rebuild_clients_cache` populates
+/// the pool. Runs in the background so a slow probe (e.g. SAB on a
+/// tarpitting tracker) can't delay the listener bind.
+pub async fn prewarm_dc_status_cache(
+    pool_cache: &crate::DownloadClientsCache,
+    status_cache: &crate::DcStatusCache,
+) {
+    let pool = pool_cache.read().await.clone();
+    let probes: Vec<_> = pool
+        .clients
+        .iter()
+        .map(|(id, client)| {
+            let id = *id;
+            let client = client.clone();
+            async move { (id, client.test().await) }
+        })
+        .collect();
+    let results = futures_util::future::join_all(probes).await;
+    let mut guard = status_cache.lock().unwrap();
+    let now = std::time::Instant::now();
+    for (id, res) in results {
+        let entry = match res {
+            Ok(version) => crate::DcStatusEntry {
+                version: Some(version),
+                error: String::new(),
+            },
+            Err(e) => crate::DcStatusEntry {
+                version: None,
+                error: e,
+            },
+        };
+        guard.insert(id, (now, entry));
+    }
+}
+
+/// Walk the DC status cache and return only the entries still within
+/// TTL. Stale entries get evicted on the same pass so the map can't
+/// grow unboundedly across hours of use without a server restart
+/// (the entries themselves are small but a never-evicting cache is a
+/// latent leak). `pub(super)` so the parent settings module's full-
+/// page render path can read the same cache for its inline include
+/// of `download_clients/list.html`.
+pub(super) fn snapshot_fresh_dc_status(
+    cache: &crate::DcStatusCache,
+) -> std::collections::HashMap<i64, crate::DcStatusEntry> {
+    use std::time::Instant;
+    let mut guard = cache.lock().unwrap();
+    let now = Instant::now();
+    let ttl = crate::DC_STATUS_CACHE_TTL;
+    guard.retain(|_, (probed_at, _)| now.duration_since(*probed_at) < ttl);
+    guard
+        .iter()
+        .map(|(id, (_, entry))| (*id, entry.clone()))
+        .collect()
 }
 
 /// Form payload for create/update. `id == None` creates a new row;
@@ -317,6 +486,10 @@ pub async fn settings_download_clients_upsert(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             if is_htmx {
                 // Re-render the whole section in one swap — picks up
                 // the new card, the moved "default" badge if the user
@@ -380,6 +553,10 @@ pub async fn settings_download_clients_delete(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             crate::services::indexers::refresh_cache_in_place(&state.indexers, &state.db).await;
             // HTMX redesign (#129 follow-up) — re-render the whole
             // section so the "+ Add" button + empty-state CTA both
@@ -447,6 +624,10 @@ pub async fn settings_download_clients_set_default(
                 &state.db,
             )
             .await;
+            // Wipe the status cache so a freshly-edited row re-probes
+            // on its next render rather than showing a stale "ok" pill
+            // against the old credentials for up to DC_STATUS_CACHE_TTL.
+            state.dc_status_cache.lock().unwrap().clear();
             if is_htmx {
                 // Section re-render so the "default" badge moves
                 // between cards in one swap. Per-card swap would
@@ -720,6 +901,33 @@ pub async fn settings_download_clients_status(
         .map(|r| kind_label(&r.kind))
         .unwrap_or("Client");
 
+    // Cache hit (entry within DC_STATUS_CACHE_TTL) → return the
+    // cached pill without re-probing. Lets the placeholder swap
+    // resolve in microseconds rather than the 50-500ms+ the
+    // network probe takes, which is what the user perceived as
+    // flashing on every boost-nav into Settings → Connections.
+    // The render_section path also reads this cache and skips the
+    // placeholder entirely; this branch handles cards whose
+    // initial render predated the cache (cold first paint) or whose
+    // cache entry expired between the placeholder render and the
+    // hx-trigger="load" fire.
+    {
+        let mut guard = state.dc_status_cache.lock().unwrap();
+        if let Some((probed_at, entry)) = guard.get(&id)
+            && probed_at.elapsed() < crate::DC_STATUS_CACHE_TTL
+        {
+            return DownloadClientStatusPillPartial {
+                version: entry.version.clone(),
+                error: entry.error.clone(),
+                kind_label,
+            }
+            .into_html_ok();
+        }
+        // Drop expired entry on the way through so the lookup-then-
+        // probe path doesn't leave a dead row behind.
+        guard.remove(&id);
+    }
+
     // Pull the cached `Arc<dyn DownloadClient>` out of the pool
     // under the read lock and clone it; release the lock before
     // running the network probe so a slow client can't stall a
@@ -740,6 +948,19 @@ pub async fn settings_download_clients_status(
             "Client not in active pool (disabled or invalid kind)".into(),
         ),
     };
+
+    // Write the result back into the cache so render_section
+    // (and the next probe within TTL) skip the network round-trip.
+    state.dc_status_cache.lock().unwrap().insert(
+        id,
+        (
+            std::time::Instant::now(),
+            crate::DcStatusEntry {
+                version: version.clone(),
+                error: error.clone(),
+            },
+        ),
+    );
 
     DownloadClientStatusPillPartial {
         version,
