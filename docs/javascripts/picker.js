@@ -1,8 +1,7 @@
 // Stack-builder generator. Renders a docker-compose.yml + Ryokan
 // settings snippet from the form on `docs/stack-builder.md`. Pure
-// vanilla JS, no framework — lives at the document level so MkDocs
-// Material's `extra_javascript` config wires it in without a build
-// step.
+// vanilla JS, no framework — lives at the document level so the
+// site's `extra_javascript` config wires it in without a build step.
 //
 // Design discipline: every option the form exposes must produce a
 // compose snippet that runs as-is. No "edit before use" knobs except
@@ -643,10 +642,10 @@ services:
   }
 
   // The output `<pre>` blocks use `data-picker="..."` selectors rather
-  // than ids on purpose. MkDocs Material's `content.code.copy` rewrites
-  // any `<pre id="x">` to `<pre id="__code_x">` so its own copy-button
+  // than ids on purpose. The `content.code.copy` feature rewrites any
+  // `<pre id="x">` to `<pre id="__code_x">` so its own copy-button
   // wiring can find it — which makes `getElementById('compose-output')`
-  // return null at runtime. Data attributes survive Material's pass.
+  // return null at runtime. Data attributes survive that rewrite.
   function rerender() {
     const cfg = readForm();
     if (!cfg) return;
@@ -680,7 +679,7 @@ services:
     }, 1500);
   }
 
-  // Idempotent init. Material's `document$` observable can fire more
+  // Idempotent init. The site's `document$` observable can fire more
   // than once (instant navigation, theme toggle, etc.) — guarding via
   // a dataset flag so we don't stack duplicate listeners on the form.
   function init() {
@@ -715,11 +714,11 @@ services:
     }
   }
 
-  // MkDocs Material exposes a `document$` observable (its RxJS
+  // The site theme exposes a `document$` observable (an RxJS
   // document-state subject) that fires once on initial load and
   // again on instant-navigation transitions. Subscribing to it is
-  // the canonical Material integration pattern; falling back to
-  // DOMContentLoaded when Material's runtime isn't present.
+  // the canonical integration pattern; fall back to DOMContentLoaded
+  // when the theme's runtime isn't present.
   if (typeof window !== 'undefined' && window.document$ &&
       typeof window.document$.subscribe === 'function') {
     window.document$.subscribe(init);

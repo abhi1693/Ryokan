@@ -23,7 +23,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="zensical-0.0.39">
+      <meta name="generator" content="zensical-0.0.40">
     
     
       
@@ -34,7 +34,7 @@
       
         
       
-      <link rel="stylesheet" href="../assets/stylesheets/modern/main.1e981d71.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.fba56155.min.css">
       
         
           
@@ -60,7 +60,7 @@
     
       <link rel="stylesheet" href="../stylesheets/picker.css">
     
-    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
     
       
 
@@ -402,8 +402,7 @@
   <span class="md-ellipsis">
     
   
-    Home
-  
+  Home
 
     
   </span>
@@ -438,8 +437,7 @@
   <span class="md-ellipsis">
     
   
-    Install
-  
+  Install
 
     
   </span>
@@ -456,8 +454,7 @@
   <span class="md-ellipsis">
     
   
-    Install
-  
+  Install
 
     
   </span>
@@ -548,8 +545,7 @@
   <span class="md-ellipsis">
     
   
-    Stack builder
-  
+  Stack builder
 
     
   </span>
@@ -575,8 +571,7 @@
   <span class="md-ellipsis">
     
   
-    Docker
-  
+  Docker
 
     
   </span>
@@ -602,8 +597,7 @@
   <span class="md-ellipsis">
     
   
-    Configuration
-  
+  Configuration
 
     
   </span>
@@ -629,8 +623,7 @@
   <span class="md-ellipsis">
     
   
-    Download clients
-  
+  Download clients
 
     
   </span>
@@ -656,8 +649,7 @@
   <span class="md-ellipsis">
     
   
-    External accounts
-  
+  External accounts
 
     
   </span>
@@ -683,8 +675,7 @@
   <span class="md-ellipsis">
     
   
-    Troubleshooting
-  
+  Troubleshooting
 
     
   </span>
@@ -710,8 +701,7 @@
   <span class="md-ellipsis">
     
   
-    FAQ
-  
+  FAQ
 
     
   </span>
@@ -858,7 +848,7 @@
 <h2 id="healthcheck-and-ports">Healthcheck and ports<a class="headerlink" href="#healthcheck-and-ports" title="Anchor link">&para;</a></h2>
 <p>Ryokan listens on <code>0.0.0.0:8978</code> by default (override with <code>LISTEN_ADDR</code>). The Docker image's healthcheck probes <code>GET /login</code> since that's the canonical "is Ryokan up" endpoint. There is no <code>/healthz</code>; <code>/login</code> returns 200 once the auth UI is live, or 303 redirecting to <code>/setup</code> on a fresh container with no users yet (both are valid "up" signals).</p>
 <h2 id="first-run-setup">First-run setup<a class="headerlink" href="#first-run-setup" title="Anchor link">&para;</a></h2>
-<p>The first time Ryokan boots, navigating to <code>/</code> redirects to <code>/setup</code>. Create an admin account there. Once that's done, <code>/setup</code> is locked behind auth and won't accept further submissions.</p>
+<p>The first time Ryokan boots, navigating to <code>/</code> redirects to <code>/setup</code>. Create an admin account there. Once a user has been created, <code>/setup</code> redirects to <code>/login</code> and won't accept further submissions.</p>
 <p>If you need to reset the admin account (forgot password, username, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart: see the <code>RYOKAN_RESET_AUTH</code> env var in the <a href="../docker/#environment-variables">Docker page</a>.</p>
 
 

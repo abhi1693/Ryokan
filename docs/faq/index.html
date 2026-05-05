@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="zensical-0.0.39">
+      <meta name="generator" content="zensical-0.0.40">
     
     
       
@@ -32,7 +32,7 @@
       
         
       
-      <link rel="stylesheet" href="../assets/stylesheets/modern/main.1e981d71.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/modern/main.fba56155.min.css">
       
         
           
@@ -58,7 +58,7 @@
     
       <link rel="stylesheet" href="../stylesheets/picker.css">
     
-    <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,a=__md_scope)=>JSON.parse(t.getItem(a.pathname+"."+e)),__md_set=(e,t,a=localStorage,_=__md_scope)=>{try{a.setItem(_.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
+    <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
     
       
 
@@ -400,8 +400,7 @@
   <span class="md-ellipsis">
     
   
-    Home
-  
+  Home
 
     
   </span>
@@ -427,8 +426,7 @@
   <span class="md-ellipsis">
     
   
-    Install
-  
+  Install
 
     
   </span>
@@ -454,8 +452,7 @@
   <span class="md-ellipsis">
     
   
-    Stack builder
-  
+  Stack builder
 
     
   </span>
@@ -481,8 +478,7 @@
   <span class="md-ellipsis">
     
   
-    Docker
-  
+  Docker
 
     
   </span>
@@ -508,8 +504,7 @@
   <span class="md-ellipsis">
     
   
-    Configuration
-  
+  Configuration
 
     
   </span>
@@ -535,8 +530,7 @@
   <span class="md-ellipsis">
     
   
-    Download clients
-  
+  Download clients
 
     
   </span>
@@ -562,8 +556,7 @@
   <span class="md-ellipsis">
     
   
-    External accounts
-  
+  External accounts
 
     
   </span>
@@ -589,8 +582,7 @@
   <span class="md-ellipsis">
     
   
-    Troubleshooting
-  
+  Troubleshooting
 
     
   </span>
@@ -625,8 +617,7 @@
   <span class="md-ellipsis">
     
   
-    FAQ
-  
+  FAQ
 
     
   </span>
@@ -643,8 +634,7 @@
   <span class="md-ellipsis">
     
   
-    FAQ
-  
+  FAQ
 
     
   </span>
@@ -896,7 +886,7 @@
 <li><strong>Batch releases are a first-class search target, not a fan-out.</strong> Sonarr's anime mode searches every episode individually, which scales poorly with multiple indexers since searches time out before results aggregate. Ryokan sends one search per batch.</li>
 <li><strong>Anime release naming is the default-handled path, not an edge case.</strong> Anitomy parses titles, anitomy-aware Custom Formats are first-class, and AniList is the primary metadata source.</li>
 <li><strong>SeaDex is integrated as an authoritative-pick layer.</strong> Sonarr has nothing equivalent.</li>
-<li><strong>Source classification runs through six layers.</strong> Filename, Nyaa description scrape, release-group reputation, ffprobe, directory walk, and a temporal heuristic ("is this airing right now") before deciding BD vs WEB. Sonarr's source classification is release-title pattern-matched (it can read MediaInfo for resolution / runtime / codec, but not for source).</li>
+<li><strong>Source classification runs through six layers.</strong> Filename, Nyaa description scrape, release-group reputation, ffprobe, directory walk, and a temporal heuristic ("is this airing right now") before deciding BD vs WEB. Sonarr classifies quality via the release title plus Custom Formats; it has no automatic multi-layer source-of-truth pipeline (description scrape, ffprobe-on-disk, group-reputation table, temporal heuristic) the way Ryokan does.</li>
 </ul>
 <h2 id="is-this-a-fork-of-sonarr">Is this a fork of Sonarr?<a class="headerlink" href="#is-this-a-fork-of-sonarr" title="Anchor link">&para;</a></h2>
 <p>No. Different language (Rust vs C#), different architecture, different release ecosystem. Some conventions are deliberately Sonarr/Radarr-shaped (Custom Format JSON format, source taxonomy) for compatibility with TRaSH-Guides and similar community resources, but the codebase is independent.</p>
