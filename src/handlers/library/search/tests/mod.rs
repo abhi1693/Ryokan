@@ -1128,6 +1128,330 @@ mod handler_endpoints {
         assert_eq!(results[0].title, "[Group] Cached Show - 05.mkv");
     }
 
+    // ─── grab_interactive_result + grab_batch_result happy path ──
+    //
+    // The two grab handlers gate on `resolve_series_context` (cache-
+    // seeded so no AL traffic), then dispatch through
+    // `client_for_nyaa_with_id` -> torrent default -> the recording
+    // mock client below. Both write a `grabbed_torrents` row and
+    // per-episode `episode_quality_tags` rows. These tests pin the
+    // full handler chain end-to-end.
+
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal recording client for the grab tests. Captures every
+    /// `add_torrent_returning_id` call and reports back via
+    /// `add_calls()`. Other trait methods are no-ops since the grab
+    /// handlers only touch the add path.
+    struct GrabRecordingClient {
+        add_calls: Mutex<Vec<(String, String)>>, // (url, info_hash)
+    }
+
+    impl GrabRecordingClient {
+        fn new() -> Self {
+            Self {
+                add_calls: Mutex::new(Vec::new()),
+            }
+        }
+        fn add_calls(&self) -> Vec<(String, String)> {
+            self.add_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl crate::services::download_client::DownloadClient for GrabRecordingClient {
+        async fn test(&self) -> Result<String, String> {
+            Ok("mock".into())
+        }
+        async fn add_torrent(
+            &self,
+            url: &str,
+            info_hash: &str,
+        ) -> Result<crate::services::download_client::AddOutcome, String> {
+            self.add_calls
+                .lock()
+                .unwrap()
+                .push((url.to_string(), info_hash.to_string()));
+            Ok(crate::services::download_client::AddOutcome::Added)
+        }
+        async fn add_torrent_with_file_filter(
+            &self,
+            _url: &str,
+            _hash: &str,
+            _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+        ) -> Result<crate::services::download_client::SelectiveOutcome, String> {
+            Ok(crate::services::download_client::SelectiveOutcome::FullDownload)
+        }
+        async fn list_scoped(
+            &self,
+        ) -> Result<Vec<crate::services::download_client::DownloadItem>, String> {
+            Ok(vec![])
+        }
+        async fn get_files(
+            &self,
+            _hash: &str,
+        ) -> Result<Vec<crate::services::download_client::DownloadFile>, String> {
+            Ok(vec![])
+        }
+        async fn pause(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn resume(&self, _hash: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_file_wanted(
+            &self,
+            _hash: &str,
+            _files: &[usize],
+            _wanted: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn sonarr_impl_name(&self) -> &'static str {
+            "QBittorrent"
+        }
+    }
+
+    async fn install_grab_pool(
+        state: &crate::AppState,
+        client: Arc<dyn crate::services::download_client::DownloadClient>,
+    ) {
+        let mut clients: std::collections::HashMap<
+            i64,
+            Arc<dyn crate::services::download_client::DownloadClient>,
+        > = std::collections::HashMap::new();
+        clients.insert(1, client);
+        let pool = crate::DownloadClientPool {
+            clients,
+            default_torrent_id: Some(1),
+            default_usenet_id: None,
+        };
+        *state.download_clients.write().await = Arc::new(pool);
+    }
+
+    #[tokio::test]
+    async fn grab_interactive_result_records_grab_and_writes_episode_tag() {
+        // Cache-seeded series + recording torrent default -> the
+        // handler resolves series context without network, picks the
+        // torrent default for Nyaa-flavored grabs, calls
+        // add_torrent_returning_id, persists a grabbed_torrents row,
+        // writes the per-episode quality tag, and returns Json{ok}.
+        // Pins the full happy-path chain. Pre-this-test grab.rs was
+        // 0% covered.
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 800;
+        let series_id = seed_series(&db, anilist_id, "Grab Show").await;
+        let detail = empty_anime_detail(anilist_id, "Grab Show");
+        crate::models::metadata_cache::upsert(&db, series_id, anilist_id, None, &detail)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        let client = Arc::new(GrabRecordingClient::new());
+        install_grab_pool(
+            &state,
+            client.clone() as Arc<dyn crate::services::download_client::DownloadClient>,
+        )
+        .await;
+
+        // Empty info_hash so wants_selective short-circuits to false
+        // and we go straight through add_torrent_returning_id —
+        // exercises the dominant path, not the rare selective one.
+        let body = serde_json::json!({
+            "url": "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567",
+            "title": "[Group] Grab Show - 03 (1080p) [WEB].mkv",
+            "group": "Group",
+            "resolution": "1080p",
+            "info_hash": "",
+            "size_bytes": 1_400_000_000_i64,
+        });
+        let result = super::super::grab::grab_interactive_result(
+            axum::extract::State(state),
+            axum::extract::Path((anilist_id, 3_i32)),
+            axum::extract::Json(body),
+        )
+        .await;
+        let axum::response::Json(resp) = result.expect("grab must succeed");
+        assert_eq!(resp["ok"], true);
+
+        // The recording client saw exactly one add_torrent call.
+        let calls = client.add_calls();
+        assert_eq!(calls.len(), 1, "exactly one add_torrent call expected");
+        assert!(
+            calls[0].0.starts_with("magnet:?xt=urn:btih:"),
+            "url passed through verbatim"
+        );
+
+        // grabbed_torrents row exists, scoped to the series, with the
+        // expected episode list and download_client_id stamp.
+        let row: (i64, String, i64) = sqlx::query_as(
+            "SELECT series_id, episode_numbers, download_client_id FROM grabbed_torrents WHERE torrent_name = ?",
+        )
+        .bind("[Group] Grab Show - 03 (1080p) [WEB].mkv")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(row.0, series_id);
+        assert_eq!(row.1, "[3]");
+        assert_eq!(row.2, 1, "stamped with the resolved client id");
+
+        // episode_quality_tags row was written for the grabbed episode.
+        let tag_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM episode_quality_tags WHERE series_id = ? AND episode_number = ?",
+        )
+        .bind(series_id)
+        .bind(3_i32)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+        assert_eq!(tag_count, 1);
+    }
+
+    #[tokio::test]
+    async fn grab_interactive_result_returns_400_when_url_is_empty() {
+        // The handler's url-empty guard is BEFORE the cache /
+        // resolve / client resolution chain, but cache-seeded so we
+        // can isolate the 400 surface. Pinning this branch protects
+        // against a refactor that swallowed the empty-URL case as a
+        // silent success.
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 801;
+        let series_id = seed_series(&db, anilist_id, "Empty URL").await;
+        let detail = empty_anime_detail(anilist_id, "Empty URL");
+        crate::models::metadata_cache::upsert(&db, series_id, anilist_id, None, &detail)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db, None);
+        let body = serde_json::json!({
+            "url": "",
+            "title": "[Group] Empty URL - 01.mkv",
+        });
+        let result = super::super::grab::grab_interactive_result(
+            axum::extract::State(state),
+            axum::extract::Path((anilist_id, 1_i32)),
+            axum::extract::Json(body),
+        )
+        .await;
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+                assert!(body.contains("No URL provided"));
+            }
+            Ok(_) => panic!("empty url must surface as 400, not Ok"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grab_interactive_result_returns_400_when_no_download_client_configured() {
+        // Cache hit + empty pool -> client_for_nyaa_with_id returns
+        // None -> handler 400s with "Download client not configured".
+        // Pins the resolved-client.ok_or branch which previously had
+        // no direct test.
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 802;
+        let series_id = seed_series(&db, anilist_id, "No Client").await;
+        let detail = empty_anime_detail(anilist_id, "No Client");
+        crate::models::metadata_cache::upsert(&db, series_id, anilist_id, None, &detail)
+            .await
+            .unwrap();
+
+        // Default state has no download_clients pool entries.
+        let state = build_test_app_state(db, None);
+        let body = serde_json::json!({
+            "url": "magnet:?xt=urn:btih:1111111111111111111111111111111111111111",
+            "title": "[Group] No Client - 02.mkv",
+        });
+        let result = super::super::grab::grab_interactive_result(
+            axum::extract::State(state),
+            axum::extract::Path((anilist_id, 2_i32)),
+            axum::extract::Json(body),
+        )
+        .await;
+        match result {
+            Err((status, body)) => {
+                assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+                assert!(body.contains("Download client not configured"));
+            }
+            Ok(_) => panic!("no-client must surface as 400"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grab_batch_result_records_per_episode_tags_for_parsed_range() {
+        // Batch shape: title carries an episode range (01-12), so
+        // batch_episode_numbers parses 12 episodes and the handler
+        // writes a quality tag per episode plus one grabbed_torrents
+        // row marked is_batch=true. Pins the batch fan-out which
+        // grab_interactive_result doesn't exercise.
+        use crate::test_support::{build_test_app_state, in_memory_pool, seed_series};
+
+        let db = in_memory_pool().await;
+        let anilist_id: i64 = 803;
+        let series_id = seed_series(&db, anilist_id, "Batch Show").await;
+        let detail = empty_anime_detail(anilist_id, "Batch Show");
+        crate::models::metadata_cache::upsert(&db, series_id, anilist_id, None, &detail)
+            .await
+            .unwrap();
+
+        let state = build_test_app_state(db.clone(), None);
+        let client = Arc::new(GrabRecordingClient::new());
+        install_grab_pool(
+            &state,
+            client.clone() as Arc<dyn crate::services::download_client::DownloadClient>,
+        )
+        .await;
+
+        let body = serde_json::json!({
+            "url": "magnet:?xt=urn:btih:2222222222222222222222222222222222222222",
+            "title": "[Group] Batch Show 01-12 (BD 1080p)",
+            "group": "Group",
+            "resolution": "1080p",
+            "info_hash": "",
+            "size_bytes": 12_000_000_000_i64,
+        });
+        let result = super::super::grab::grab_batch_result(
+            axum::extract::State(state),
+            axum::extract::Path(anilist_id),
+            axum::extract::Json(body),
+        )
+        .await;
+        let axum::response::Json(resp) = result.expect("batch grab must succeed");
+        assert_eq!(resp["ok"], true);
+
+        // is_batch=true on the grabbed_torrents row.
+        let is_batch: i64 =
+            sqlx::query_scalar("SELECT is_batch FROM grabbed_torrents WHERE torrent_name = ?")
+                .bind("[Group] Batch Show 01-12 (BD 1080p)")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(is_batch, 1, "batch grab must mark is_batch=true");
+
+        // 12 per-episode quality tags written.
+        let tag_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM episode_quality_tags WHERE series_id = ?")
+                .bind(series_id)
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(
+            tag_count, 12,
+            "batch_episode_numbers must produce 12 episodes from `01-12` and \
+             record_grab fans out one tag per episode"
+        );
+    }
+
     #[tokio::test]
     async fn interactive_search_batches_returns_cached_results_when_present() {
         // Same shape as the per-episode test above, but the batch
