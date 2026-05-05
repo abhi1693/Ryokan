@@ -339,13 +339,34 @@
 }
 
 .rss-reason-cell {
-    min-width: 420px;
+    /* Pre-fix this was `min-width: 420px`, which combined with
+     * the Time/Series/Release/Decision columns' natural widths
+     * pushed the whole table past the viewport on the System →
+     * RSS tab. Browser-level horizontal scroll is the wrong
+     * affordance for a tabular wall-of-rows — the user has to
+     * scroll horizontally on every row to see the reason, which
+     * is exactly the column they came here to read. The reason
+     * text already has `white-space: pre-wrap` + `word-break:
+     * break-word` so it wraps cleanly into a narrow column.
+     * Keep a soft floor so a short reason like "below seed
+     * threshold" doesn't squish to a 1-word-per-line strip. */
+    min-width: 200px;
 }
 
 .rss-reason-text {
     white-space: pre-wrap;
     word-break: break-word;
     line-height: 1.45;
+}
+
+/* Release column wraps long release titles instead of forcing the
+ * column wider. Same justification as the reason cell: horizontal
+ * scroll on a per-row table is the wrong affordance. The release
+ * title was the dominant width-forcer alongside the reason cell's
+ * old 420px min — wrap both and the table fits in viewport. */
+#rss-decision-table td:nth-child(3) {
+    word-break: break-word;
+    max-width: 360px;
 }
 
 .rss-release-meta {

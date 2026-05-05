@@ -53,7 +53,15 @@
             <label for="indexer-add-key">API Key</label>
             <input id="indexer-add-key" type="text" name="api_key" autocomplete="off"
                    placeholder="from Prowlarr Settings &rarr; General">
-            <span class="form-hint" data-indexer-api-key-hint>Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them.</span>
+            {# Kind-aware hint text. When the catalog seed is
+               newznab-flavored (e.g. NZBGeek), render the newznab
+               copy directly so the user doesn't see the torznab
+               default flash before `applyIndexerKindCopy` runs. #}
+            {% if let Some(seed) = seed %}
+            <span class="form-hint" data-indexer-api-key-hint>{{ crate::handlers::settings::indexers::api_key_hint_for_kind(seed.default_kind) }}</span>
+            {% else %}
+            <span class="form-hint" data-indexer-api-key-hint>{{ crate::handlers::settings::indexers::api_key_hint_for_kind("torznab") }}</span>
+            {% endif %}
         </div>
 
         <div class="form-row">

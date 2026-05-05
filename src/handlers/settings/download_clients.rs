@@ -216,6 +216,49 @@ async fn render_section(state: &AppState) -> Response {
     .into_html_ok()
 }
 
+/// Pre-warm the DC status cache at server startup so the first-paint
+/// of Settings → Connections doesn't flash through the "Probing…"
+/// placeholder. Probes every client in the active pool in parallel
+/// (one tokio task per client) and writes results into the cache.
+/// Failures are silently captured as "Unreachable" entries; the
+/// cache reflects current reality and the user sees a stable pill on
+/// first visit either way.
+///
+/// Called once from `main.rs` after `rebuild_clients_cache` populates
+/// the pool. Runs in the background so a slow probe (e.g. SAB on a
+/// tarpitting tracker) can't delay the listener bind.
+pub async fn prewarm_dc_status_cache(
+    pool_cache: &crate::DownloadClientsCache,
+    status_cache: &crate::DcStatusCache,
+) {
+    let pool = pool_cache.read().await.clone();
+    let probes: Vec<_> = pool
+        .clients
+        .iter()
+        .map(|(id, client)| {
+            let id = *id;
+            let client = client.clone();
+            async move { (id, client.test().await) }
+        })
+        .collect();
+    let results = futures_util::future::join_all(probes).await;
+    let mut guard = status_cache.lock().unwrap();
+    let now = std::time::Instant::now();
+    for (id, res) in results {
+        let entry = match res {
+            Ok(version) => crate::DcStatusEntry {
+                version: Some(version),
+                error: String::new(),
+            },
+            Err(e) => crate::DcStatusEntry {
+                version: None,
+                error: e,
+            },
+        };
+        guard.insert(id, (now, entry));
+    }
+}
+
 /// Walk the DC status cache and return only the entries still within
 /// TTL. Stale entries get evicted on the same pass so the map can't
 /// grow unboundedly across hours of use without a server restart

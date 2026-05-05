@@ -25,6 +25,36 @@ use crate::models::log::LogCategory;
 use crate::services::indexer_catalog::{SEEDED, SeededIndexer, find_seed};
 use crate::services::logger;
 
+/// Per-kind hint text + URL placeholder, surfaced server-side so the
+/// initial Add/Edit form render carries the right copy for the
+/// selected kind. Pre-this-helper the templates hardcoded the torznab
+/// hint and the JS `applyIndexerKindCopy` ran post-paint to swap it
+/// for newznab rows — visible flash on every Edit-on-newznab open.
+/// Keep these strings in lockstep with `INDEXER_KIND_COPY` in
+/// `static/js/settings.js`; the JS path still owns the live
+/// kind-flip case (user toggles the dropdown after the form is open).
+pub const TORZNAB_API_KEY_HINT: &str = "Sent in the request URL per torznab spec; appears in Prowlarr / Jackett access logs and any reverse-proxy logs in front of them. Find this key in Prowlarr Settings \u{2192} General (or Jackett's UI).";
+pub const NEWZNAB_API_KEY_HINT: &str = "Sent in the request URL per newznab spec; the same key Sonarr/Radarr/Prowlarr use against this indexer. For Prowlarr-fronted indexers, find it in Prowlarr Settings \u{2192} General; for direct-to-indexer setups, find it on the indexer's site (e.g. NZBGeek \u{2192} Profile \u{2192} API Key).";
+
+/// Map a kind string to the matching API-key hint text. Falls back
+/// to the torznab hint for unknown values (matches the JS
+/// `INDEXER_KIND_COPY[kind] || INDEXER_KIND_COPY.torznab` shape).
+pub fn api_key_hint_for_kind(kind: &str) -> &'static str {
+    match kind {
+        KIND_NEWZNAB => NEWZNAB_API_KEY_HINT,
+        _ => TORZNAB_API_KEY_HINT,
+    }
+}
+
+/// URL placeholder per-kind. Same pattern as
+/// [`api_key_hint_for_kind`].
+pub fn url_placeholder_for_kind(kind: &str) -> &'static str {
+    match kind {
+        KIND_NEWZNAB => "https://nzb.indexer.example/api",
+        _ => "https://prowlarr.local/{N}/api",
+    }
+}
+
 /// Section partial — the entire Indexers fieldset (catalog grid +
 /// existing-row card grid + shared edit/add modal). Every successful
 /// HTMX action (upsert / delete) returns this so a single swap

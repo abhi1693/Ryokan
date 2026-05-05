@@ -204,12 +204,15 @@ pub struct DcStatusEntry {
     pub error: String,
 }
 
-/// TTL for the DC status cache. 60s is conservative enough that a
-/// just-misconfigured client surfaces its failure on the next
-/// boost-nav (rather than masking it for an hour with stale `ok`
-/// pills) but long enough to cover the typical Settings-tab dwell
-/// time without a re-probe.
-pub const DC_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// TTL for the DC status cache. 10 minutes covers a normal
+/// "open Settings, configure other tabs, come back" loop without
+/// re-probing — the 60s the cache shipped with was too short for
+/// users who dwell on Indexers / Custom Formats between trips back
+/// to Connections, so they still saw a "Probing…" flash on every
+/// re-entry. The cache is wiped explicitly on every download_clients
+/// CRUD so a credential edit re-probes immediately rather than
+/// masking failures for the full TTL.
+pub const DC_STATUS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl AppState {
     /// Resolve a download client for a grab attributable to
