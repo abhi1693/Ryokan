@@ -775,12 +775,15 @@ async fn api_anibridge_reload_returns_502_when_mappings_endpoint_5xxes() {
         .await;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    // SAFETY: env vars are process-global. `cargo nextest` (the
-    // canonical runner) gives each #[test] its own subprocess so
-    // these writes are isolated. Plain `cargo test` runs everything
-    // in one process — risk if anibridge.rs's wiremock tests are
-    // running concurrently — but those use the same env-var pattern
-    // and have been stable.
+    // Hold the same ENV_LOCK that anibridge.rs's tests use so a
+    // concurrent run under `cargo test` (and therefore `cargo
+    // llvm-cov`, which uses `cargo test` internally) can't race
+    // on RYOKAN_ANIBRIDGE_MAPPINGS_URL with anibridge's own
+    // wiremock tests. nextest gives each test its own process so
+    // the lock is a no-op there.
+    let _guard = crate::services::anibridge::ENV_LOCK.lock().await;
+    // SAFETY: serialized via ENV_LOCK; no concurrent reader/writer
+    // racing on these process-global env vars.
     unsafe {
         std::env::set_var("RYOKAN_ANIBRIDGE_CACHE_DIR", tmp.path());
         std::env::set_var(
