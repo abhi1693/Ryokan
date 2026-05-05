@@ -902,7 +902,14 @@ function buildCfImportResolvePayload(form) {
 // active. Only the active client's badge is populated — the others
 // stay blank (no stale "Disconnected" on a client the user isn't
 // even trying to use).
-(function() {
+// Settings → Connections health-badge poller. Mounted via
+// `ryokanRegisterPageInit` so the getElementById lookups happen
+// AFTER htmx commits the body swap. Pre-fix this was a bare IIFE
+// that ran at script-load time; under boost the script could
+// finish loading before the swap settled, no badges in DOM, the
+// `if (!anyClientBadge && !jellyfinHealth) return` early-exit
+// fired, and the user saw blank health badges until F5.
+var bindConnectionHealthBadges = function () {
     const badges = {
         QBittorrent: document.getElementById('qbit-health'),
         Deluge: document.getElementById('deluge-health'),
@@ -912,6 +919,13 @@ function buildCfImportResolvePayload(form) {
     const jellyfinHealth = document.getElementById('jellyfin-health');
     const anyClientBadge = Object.values(badges).some(b => b);
     if (!anyClientBadge && !jellyfinHealth) return;
+    // Idempotency guard: re-mounting on the same DOM (no body
+    // swap in between) would fire a duplicate /api/health request
+    // and re-populate the same badges. Cheap, but a stacked fetch
+    // could race itself if the user toggles tabs fast.
+    const guardEl = jellyfinHealth || Object.values(badges).find(b => b);
+    if (!guardEl || guardEl.dataset.ryokanHealthBound === '1') return;
+    guardEl.dataset.ryokanHealthBound = '1';
 
     fetch('/api/health')
         .then(r => r.json())
@@ -951,28 +965,76 @@ function buildCfImportResolvePayload(form) {
             }
         })
         .catch(() => {});
-})();
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-connection-health', {
+        check: function () {
+            return !!(document.getElementById('qbit-health')
+                || document.getElementById('deluge-health')
+                || document.getElementById('transmission-health')
+                || document.getElementById('rtorrent-health')
+                || document.getElementById('jellyfin-health'));
+        },
+        mount: bindConnectionHealthBadges,
+    });
+} else {
+    bindConnectionHealthBadges();
+}
 
 // Dirty-state guard on the Settings form. Flips a flag on any input
 // change, prompts the user on nav-away (topbar click, browser back, tab
 // close). Clears the flag on submit so the save itself doesn't trigger
 // the prompt.
-(function () {
-    if (window.__ryokanSettingsDirtyGuardInit) return;
-    window.__ryokanSettingsDirtyGuardInit = true;
+//
+// Mounted via `ryokanRegisterPageInit` so the form lookup happens
+// AFTER htmx commits the body swap. Pre-fix the bare IIFE could
+// run at script-load before the form was committed under boost
+// (dynamically-injected scripts ignore `defer`, see relations
+// carousel commit), the early-return at the null check fired,
+// and a user editing settings via boost-nav would see no
+// unsaved-changes prompt on accidental nav-away.
+//
+// `dirty` lives at module scope so the beforeunload window
+// listener (registered once via __ryokanSettingsDirtyGuardInit)
+// reads the latest value across re-mounts.
+var __ryokanSettingsDirty = false;
+var bindSettingsDirtyGuard = function () {
     const form = document.querySelector('form.settings-form[action="/settings"]');
     if (!form) return;
-    let dirty = false;
-    const markDirty = () => { dirty = true; };
+    if (form.dataset.ryokanDirtyBound === '1') return;
+    form.dataset.ryokanDirtyBound = '1';
+    const markDirty = () => { __ryokanSettingsDirty = true; };
     form.addEventListener('input', markDirty);
     form.addEventListener('change', markDirty);
-    form.addEventListener('submit', () => { dirty = false; });
-    window.addEventListener('beforeunload', (ev) => {
-        if (!dirty) return;
-        ev.preventDefault();
-        ev.returnValue = '';
+    form.addEventListener('submit', () => { __ryokanSettingsDirty = false; });
+
+    // Window-scoped beforeunload attaches once per process. Reads
+    // module-scope `__ryokanSettingsDirty` rather than a closure
+    // var so it stays current across boost-nav re-mounts.
+    if (!window.__ryokanSettingsDirtyGuardInit) {
+        window.__ryokanSettingsDirtyGuardInit = true;
+        window.addEventListener('beforeunload', (ev) => {
+            if (!__ryokanSettingsDirty) return;
+            ev.preventDefault();
+            ev.returnValue = '';
+        });
+    }
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-dirty-guard', {
+        check: function () { return !!document.querySelector('form.settings-form[action="/settings"]'); },
+        mount: bindSettingsDirtyGuard,
+        unmount: function () {
+            // Clear the dirty flag on nav-away — a saved-and-now-stale
+            // form shouldn't carry its dirty state into a future visit.
+            __ryokanSettingsDirty = false;
+        },
     });
-})();
+} else {
+    bindSettingsDirtyGuard();
+}
 
 // ── External Accounts (AL / MAL, issue #62 PR A) ──────────────────────
 //

@@ -1,8 +1,20 @@
 // ── localStorage search options persistence (always-present block) ─────
-
-(function () {
+//
+// Mounted via `ryokanRegisterPageInit` so the prefill + form-submit
+// listener fire AFTER htmx commits the body swap. Pre-fix this was
+// a bare IIFE that ran at script-load; under boost the script
+// could finish loading before `search-form` was committed (per the
+// relations-carousel diagnosis), the form lookup returned null,
+// and the localStorage save-on-submit listener never bound → the
+// user's category/filter/user choice didn't persist across boost-
+// nav-driven searches until F5.
+var bindSearchOptionsPersistence = function () {
     const fields = ['search-category', 'search-filter', 'search-user'];
     const KEY = 'nyaa_search_opts';
+    const form = document.getElementById('search-form');
+    if (!form) return;
+    if (form.dataset.ryokanOptsBound === '1') return;
+    form.dataset.ryokanOptsBound = '1';
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
     for (const id of fields) {
         if (saved[id] !== undefined && saved[id] !== '') {
@@ -10,18 +22,24 @@
             if (el) el.value = saved[id];
         }
     }
-    const form = document.getElementById('search-form');
-    if (form) {
-        form.addEventListener('submit', function () {
-            const opts = {};
-            for (const id of fields) {
-                const el = document.getElementById(id);
-                if (el) opts[id] = el.value;
-            }
-            localStorage.setItem(KEY, JSON.stringify(opts));
-        });
-    }
-})();
+    form.addEventListener('submit', function () {
+        const opts = {};
+        for (const id of fields) {
+            const el = document.getElementById(id);
+            if (el) opts[id] = el.value;
+        }
+        localStorage.setItem(KEY, JSON.stringify(opts));
+    });
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('search-options-persistence', {
+        check: function () { return !!document.getElementById('search-form'); },
+        mount: bindSearchOptionsPersistence,
+    });
+} else {
+    bindSearchOptionsPersistence();
+}
 
 // ── Results-present block (load-more + grab) ────────────────────────────
 //
@@ -37,20 +55,35 @@ var nextPage = 2;
 var hasMore = !!searchState.hasMore;
 var totalResults = Number(searchState.totalResults) || 0;
 
-// Handle prefill from library "Search Nyaa" button.
-(function () {
+// Handle prefill from library "Search Nyaa" button. Mounted via
+// `ryokanRegisterPageInit` so the form lookup happens after htmx
+// commits the swap. Pre-fix a deep link with `?prefill=Q` would
+// silently no-op on boost-nav (the IIFE ran before `search-form`
+// was in DOM), and only F5 fired the auto-search.
+var bindSearchPrefill = function () {
     const params = new URLSearchParams(window.location.search);
     const prefill = params.get('prefill');
-    if (prefill) {
-        const input = document.getElementById('search-query');
-        if (input) input.value = prefill;
-        if (!searchState.searched) {
-            // Auto-submit the form so results load immediately.
-            const form = document.getElementById('search-form');
-            if (form) form.submit();
-        }
+    if (!prefill) return;
+    const form = document.getElementById('search-form');
+    if (!form) return;
+    if (form.dataset.ryokanPrefillBound === '1') return;
+    form.dataset.ryokanPrefillBound = '1';
+    const input = document.getElementById('search-query');
+    if (input) input.value = prefill;
+    if (!searchState.searched) {
+        // Auto-submit so results load immediately.
+        form.submit();
     }
-})();
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('search-prefill', {
+        check: function () { return !!document.getElementById('search-form'); },
+        mount: bindSearchPrefill,
+    });
+} else {
+    bindSearchPrefill();
+}
 
 function getSearchParams() {
     return new URLSearchParams({
