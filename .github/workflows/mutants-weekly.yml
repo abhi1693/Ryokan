@@ -1,0 +1,156 @@
+# Weekly cargo-mutants regression tracker.
+#
+# Runs cargo-mutants against a curated subset of high-value files and
+# diffs the result against last week's baseline (stored in the GitHub
+# Actions cache). Posts the report to the workflow step summary on
+# every run; opens an issue ONLY when a regression is detected (a
+# previously-caught mutant is now missed).
+#
+# This is the deliberate "regression-detection only" tier. The full
+# 7785-mutant audit is too slow for any cadence; per-file targeted
+# runs are what we already do during active test development. This
+# workflow's job is to catch the "someone added a function and didn't
+# pin its branches" / "someone deleted a test that was the only thing
+# pinning a mutation" failure modes between active sessions.
+#
+# Per-PR mutation gating is NOT viable — even the curated subset takes
+# 3-5h. Weekly cron is the right cadence; manual `workflow_dispatch`
+# is available for ad-hoc runs.
+
+name: Mutation testing (weekly)
+
+on:
+  schedule:
+    # Sunday 03:17 UTC — off the hour to avoid scheduler contention.
+    - cron: '17 3 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Don't queue overlapping runs. If the previous run hasn't finished
+# (rare, given weekly cadence), the new one waits.
+concurrency:
+  group: mutants-weekly
+  cancel-in-progress: false
+
+jobs:
+  mutants:
+    runs-on: ubuntu-latest
+    # GH free-tier ubuntu-latest caps at 6h. The curated file list
+    # below targets ~500-700 mutants which finishes well under that
+    # ceiling at --jobs 2; the timeout is generous headroom against a
+    # slow link or flaky wiremock binding.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # mold + clang are the linker config in `.cargo/config.toml`;
+      # without them every link step fails. Same install pattern as
+      # `rust.yml`.
+      - name: Install mold + clang
+        run: sudo apt-get update && sudo apt-get install -y mold clang
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct cache key from rust.yml so the test profile
+          # (opt-level=1 deps) doesn't fight with verify-pass cache.
+          key: mutants-weekly
+
+      # Both binaries via prebuilt-action (avoids the ~2 min build).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest,cargo-mutants
+
+      # Restore last week's baseline. The save step at the bottom
+      # uses a unique key per run-id; this restore matches via prefix
+      # so the most recent saved baseline wins. First run finds
+      # nothing and the script handles the missing-baseline case.
+      - name: Restore previous baseline
+        id: restore-baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: mutants.baseline.json
+          key: mutants-baseline-v1-
+          restore-keys: |
+            mutants-baseline-v1-
+
+      # The curated subset. These are the files where targeted
+      # mutation work has produced the highest catch rates and where
+      # regression detection is most useful. Skip the big network-
+      # dependent ones (rss/mod.rs at 309 mutants, auto_search/mod.rs
+      # at 300+) — those need their own session-sized runs.
+      - name: Run cargo-mutants on curated subset
+        run: |
+          set -e
+          # Don't fail the workflow on cargo-mutants exit codes — the
+          # script reads the output bucket files directly and decides
+          # regression status itself.
+          cargo mutants \
+            --jobs 2 \
+            --test-tool nextest \
+            --features test-support \
+            --timeout-multiplier 5.0 \
+            --file 'src/services/scoring.rs' \
+            --file 'src/services/source/mod.rs' \
+            --file 'src/handlers/library/crud/mod.rs' \
+            --file 'src/services/anibridge.rs' \
+            --file 'src/services/metadata_sync.rs' \
+            || true
+
+      - name: Generate report and update baseline
+        id: report
+        run: |
+          set +e
+          ./scripts/mutants-weekly.sh \
+            --current-dir mutants.out \
+            --baseline mutants.baseline.json \
+            --output-baseline mutants.baseline.next.json \
+            --output-report mutants-report.md
+          echo "regression=$?" >> "$GITHUB_OUTPUT"
+          # The script writes the next baseline regardless of
+          # regression status — overwrite the input so the cache save
+          # step picks up the fresh snapshot.
+          mv mutants.baseline.next.json mutants.baseline.json
+
+      - name: Post report to workflow summary
+        run: cat mutants-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open issue on regression
+        if: steps.report.outputs.regression == '1'
+        run: |
+          gh issue create \
+            --title "Mutation regression — $(date -u +%F)" \
+            --body-file mutants-report.md \
+            --label "test-quality"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Save the new baseline. Unique key per run so we never miss the
+      # save (cache@v4 doesn't overwrite on key-hit). Restoration on
+      # the next run uses the prefix `mutants-baseline-v1-` to match
+      # whichever entry is most recent. GH evicts unmatched-prefix
+      # cache entries after 7 days of no access.
+      - name: Save baseline for next run
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: mutants.baseline.json
+          key: mutants-baseline-v1-${{ github.run_id }}
+
+      - name: Upload report as artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutants-report
+          path: |
+            mutants-report.md
+            mutants.baseline.json
+            mutants.out/caught.txt
+            mutants.out/missed.txt
+            mutants.out/timeout.txt
+            mutants.out/unviable.txt
+          retention-days: 30
