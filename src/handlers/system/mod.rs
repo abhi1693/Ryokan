@@ -115,6 +115,21 @@ struct SystemTemplate {
     /// the serial fan-out stays cheap.
     review_entries: Vec<episode_tags::NeedsReviewEntry>,
     title_language: String,
+    /// Issue gh-121 — notification provider rows for the System →
+    /// Notifications tab. Empty until the user adds the first one.
+    /// Only populated when `tab == "notifications"`. Each row is
+    /// pre-projected so the template doesn't need to re-deserialize
+    /// `config_json`.
+    notification_providers: Vec<notifications::ProviderView>,
+    /// Per-event matrix view for the inline edit form. When the page
+    /// renders without `?edit_id=`, this is the seed-default-on view
+    /// for a fresh create form. With `?edit_id=N`, this is the loaded
+    /// matrix for that provider.
+    notification_event_toggles: Vec<notifications::EventToggleView>,
+    /// Resolved edit-target row for the inline edit form. None when
+    /// no `?edit_id=` query param or the id doesn't match any current
+    /// provider — the template renders the create form in that case.
+    notification_edit: Option<notifications::ProviderView>,
 }
 
 #[derive(Deserialize)]
@@ -130,6 +145,11 @@ pub struct SystemQuery {
     /// the first page so the user always lands on the newest
     /// entries.
     before_id: Option<i64>,
+    /// Notifications-tab edit target (issue gh-121). When set on
+    /// `?tab=notifications`, the inline form on that tab pre-fills
+    /// with the matching provider row instead of showing a blank
+    /// create form.
+    edit_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +169,7 @@ fn normalize_system_tab(tab: Option<String>) -> String {
         Some("tasks") => "tasks".to_string(),
         Some("review") => "review".to_string(),
         Some("credits") => "credits".to_string(),
+        Some("notifications") => "notifications".to_string(),
         _ => "logs".to_string(),
     }
 }
@@ -266,6 +287,23 @@ pub async fn system_page(
             Vec::new()
         }
     };
+    // Issue gh-121 — Notifications tab. Only loads when the user is
+    // viewing this tab so the join below stays cheap on every other
+    // tab. Edit-target resolution + matrix view both run inside the
+    // future so they share the tab gate; they're sequential against
+    // each other (matrix depends on the resolved edit id).
+    let notification_edit_id = params.edit_id;
+    let notification_payload_fut = async {
+        if tab == "notifications" {
+            let providers = notifications::load_provider_views(&state.db).await;
+            let edit =
+                notification_edit_id.and_then(|id| providers.iter().find(|p| p.id == id).cloned());
+            let toggles = notifications::matrix_view(&state.db, edit.as_ref().map(|p| p.id)).await;
+            (providers, toggles, edit)
+        } else {
+            (Vec::new(), Vec::new(), None)
+        }
+    };
 
     let (
         logs,
@@ -275,6 +313,7 @@ pub async fn system_page(
         scheduled_tasks,
         log_count_res,
         review_entries,
+        (notification_providers, notification_event_toggles, notification_edit),
     ) = tokio::join!(
         logs_fut,
         config::get_config(&state.db),
@@ -283,6 +322,7 @@ pub async fn system_page(
         scheduled_tasks_fut,
         log::count(&state.db),
         review_entries_fut,
+        notification_payload_fut,
     );
     let cfg = cfg_res.ok().flatten();
     let rss_last_run = rss_last_run_res.unwrap_or(None);
@@ -363,6 +403,9 @@ pub async fn system_page(
         scheduled_tasks,
         review_entries,
         title_language,
+        notification_providers,
+        notification_event_toggles,
+        notification_edit,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -475,6 +518,9 @@ pub async fn debug_settings_submit(
         scheduled_tasks: scheduled_tasks::list(&state.db).await.unwrap_or_default(),
         review_entries: Vec::new(),
         title_language: cfg.title_language.clone(),
+        notification_providers: Vec::new(),
+        notification_event_toggles: Vec::new(),
+        notification_edit: None,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -1334,6 +1380,8 @@ pub async fn api_system_tasks(State(state): State<AppState>) -> Json<SystemTasks
     let tasks = state.tasks.snapshot().await;
     Json(SystemTasksResponse { tasks })
 }
+
+pub mod notifications;
 
 #[cfg(test)]
 mod endpoint_tests;

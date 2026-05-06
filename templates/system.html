@@ -25,6 +25,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
         Needs Review
     </a>
+    <a href="/system?tab=notifications" class="system-tab {% if tab == "notifications" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M6 8a6 6 0 0112 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 004 0"/></svg>
+        Notifications
+    </a>
     <a href="/system?tab=scoring" class="system-tab {% if tab == "scoring" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         Scoring
@@ -388,6 +392,8 @@
         {% endif %}
     </div>
 </div>
+{% else if tab == "notifications" %}
+{%~ include "partials/system/notifications.html" ~%}
 {% else if tab == "debug" %}
 <div class="debug-panel">
     {# The form wraps just the two checkbox cards. Maintenance and RSS

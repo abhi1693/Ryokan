@@ -43,7 +43,7 @@
                 </td>
                 <td>
                     <a href="?tab=notifications&edit_id={{ p.id }}" class="btn btn-small">Edit</a>
-                    <form method="post" action="/settings/notifications/delete" style="display:inline"
+                    <form method="post" action="/system/notifications/delete" style="display:inline"
                           data-ryokan-confirm-title="Delete provider?"
                           data-ryokan-confirm-body="Remove '{{ p.name }}'. Pending notifications using this provider will be dropped. This cannot be undone."
                           data-ryokan-confirm-yes="Delete"
@@ -69,7 +69,7 @@
     <h3>Add provider</h3>
     {% endif %}
 
-    <form method="post" action="/settings/notifications/upsert" class="settings-form">
+    <form method="post" action="/system/notifications/upsert" class="settings-form">
         {% if let Some(edit) = notification_edit %}
         <input type="hidden" name="id" value="{{ edit.id }}">
         {% endif %}

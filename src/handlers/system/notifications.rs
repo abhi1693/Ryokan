@@ -1,8 +1,9 @@
-//! Settings → Notifications CRUD handlers (issue gh-121).
+//! System → Notifications CRUD handlers (issue gh-121).
 //!
-//! Form-POST + server-side render style matching the indexers /
-//! groups / direct_rss_feeds tabs. No JSON API, no modals — provider
-//! CRUD goes through `<form method="post">` + redirect-back patterns.
+//! Form-POST + server-side render style matching the other System
+//! tabs (Logs, RSS, Scheduled Tasks). No JSON API, no modals —
+//! provider CRUD goes through `<form method="post">` + redirect-back
+//! patterns.
 //!
 //! The "Send test" button at `/api/notifications/{id}/test` already
 //! lives in `handlers::notifications` and stays JSON because its
@@ -82,7 +83,7 @@ pub struct ProviderView {
     pub discord_has_webhook_url: bool,
 }
 
-/// Form payload for `POST /settings/notifications/upsert`. `id`
+/// Form payload for `POST /system/notifications/upsert`. `id`
 /// distinguishes create (None) from update (Some). Per-kind fields
 /// are all `#[serde(default)]` so a webhook submission silently
 /// drops the discord field group and vice versa.
@@ -122,7 +123,7 @@ pub struct EditQuery {
 }
 
 /// Load every provider row + its per-event matrix and project into
-/// the shape the template renders. Called from the settings page
+/// the shape the template renders. Called from the system page
 /// builder when `tab == "notifications"`.
 pub async fn load_provider_views(db: &sqlx::SqlitePool) -> Vec<ProviderView> {
     let rows: Vec<store::ProviderRow> = sqlx::query_as::<_, store::ProviderRow>(
@@ -274,13 +275,13 @@ pub fn parse_webhook_headers(text: &str) -> Result<Vec<(String, String)>, String
     Ok(out)
 }
 
-/// `POST /settings/notifications/upsert` — create or update a
+/// `POST /system/notifications/upsert` — create or update a
 /// provider. `id` field present → update; missing → create. Calls
 /// `rebuild_notification_providers_cache` after a successful write
 /// so the next dispatch sees the new shape immediately. Per-event
 /// matrix rows are inserted/updated based on the form's
 /// `event_<kind>=on` checkboxes.
-pub async fn settings_notifications_upsert(
+pub async fn notifications_upsert(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Form(form): Form<UpsertForm>,
@@ -374,13 +375,13 @@ pub async fn settings_notifications_upsert(
     )
     .await;
 
-    htmx_aware_redirect(is_htmx, "/settings?tab=notifications&msg=Provider+saved").into_response()
+    htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+saved").into_response()
 }
 
-/// `POST /settings/notifications/delete` — drop the provider row.
+/// `POST /system/notifications/delete` — drop the provider row.
 /// `notification_settings` rows cascade out via the migration's FK.
 /// Rebuilds the cache after the delete.
-pub async fn settings_notifications_delete(
+pub async fn notifications_delete(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
     Form(form): Form<DeleteForm>,
@@ -402,7 +403,7 @@ pub async fn settings_notifications_delete(
         &format!("id={}", form.id),
     )
     .await;
-    htmx_aware_redirect(is_htmx, "/settings?tab=notifications&msg=Provider+deleted").into_response()
+    htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+deleted").into_response()
 }
 
 /// Build the webhook `config_json` blob from the form. Handles the
@@ -493,12 +494,12 @@ async fn persist_matrix(
     Ok(())
 }
 
-/// `GET /settings/notifications/{id}/edit-form` — minimal stub for
+/// `GET /system/notifications/{id}/edit-form` — minimal stub for
 /// future HTMX swap-in. v1 of this PR routes edit through the page-
 /// level `?edit_id=` query so a JS-disabled user can still get to
 /// the edit form. Endpoint reserved so a subsequent enhancement to
 /// modal-style editing has a stable path.
-pub async fn settings_notifications_edit_form(
+pub async fn notifications_edit_form(
     State(_state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Response {
@@ -506,7 +507,7 @@ pub async fn settings_notifications_edit_form(
         StatusCode::NOT_IMPLEMENTED,
         Html(format!(
             "<p>Edit form for provider #{id} renders inline on the Settings page; \
-             use <a href=\"/settings?tab=notifications&edit_id={id}\">link</a>.</p>"
+             use <a href=\"/system?tab=notifications&edit_id={id}\">link</a>.</p>"
         )),
     )
         .into_response()
@@ -514,11 +515,8 @@ pub async fn settings_notifications_edit_form(
 
 fn redirect_with_err(is_htmx: bool, err: &str) -> Response {
     let encoded = urlencoding_encode(err);
-    htmx_aware_redirect(
-        is_htmx,
-        &format!("/settings?tab=notifications&err={encoded}"),
-    )
-    .into_response()
+    htmx_aware_redirect(is_htmx, &format!("/system?tab=notifications&err={encoded}"))
+        .into_response()
 }
 
 /// Tiny in-line URL encoder for the redirect-with-err path. Avoids
