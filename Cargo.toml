@@ -249,6 +249,14 @@ regex-lite = "0.1"
 # they don't need look-around and we want the linear-time guarantee.
 fancy-regex = "0.18"
 sha2 = "0.11"
+# HMAC-SHA256 for outbound webhook signatures (issue #119). Tracks
+# the same `digest = 0.11` crate `sha2 = "0.11"` already uses — using
+# `hmac = "0.12"` would pull in the older `digest = 0.10` and produce
+# a "multiple versions of digest" type-bound error at hmac sites.
+# Project decision: don't hand-roll the
+# H(K ⊕ opad || H(K ⊕ ipad || msg)) shape — well-audited tiny crate
+# is the right tradeoff over a few dozen lines of error-prone manual code.
+hmac = "0.13"
 ammonia = "4"
 
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)

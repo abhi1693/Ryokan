@@ -2601,6 +2601,54 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Issue #118 — outbound notification provider rows. One row per
+    // configured provider (webhook / Discord / future), keyed by id.
+    // `kind` is the trait-impl discriminator (`"webhook"` / `"discord"`)
+    // and tells `services::notifications::rebuild_notification_providers_cache`
+    // which trait impl to construct. `config_json` is provider-shape-
+    // specific (URL + headers for webhook; webhook URL + username/avatar
+    // for Discord). `enabled` is the row-level kill switch the Settings
+    // UI flips. Schema is intentionally minimal — per-event toggling
+    // lives in `notification_settings` rather than denormalized columns
+    // here so the matrix stays sparse and adding a new event variant
+    // is one-line.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS notification_providers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            config_json TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        )",
+    )
+    .execute(db)
+    .await
+    .ok();
+
+    // Per-(provider, event_kind) opt-in matrix. `event_kind` is the
+    // serde discriminator string (`"Grabbed"`, `"Imported"`, etc.) —
+    // stored as TEXT because we need stable identifiers across schema
+    // changes and don't want a hard FK to a Rust enum. Default-on
+    // policy is applied at provider-creation time in the settings
+    // handler (Grabbed / Imported / ImportFailed / ExternalSyncReLinkRequired
+    // get rows seeded with enabled=1; everything else either gets
+    // enabled=0 or simply isn't seeded — both shapes mean "don't fire").
+    // ON DELETE CASCADE so removing a provider purges its matrix in one
+    // step rather than the settings handler having to chain a delete.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS notification_settings (
+            provider_id INTEGER NOT NULL REFERENCES notification_providers(id) ON DELETE CASCADE,
+            event_kind  TEXT    NOT NULL,
+            enabled     INTEGER NOT NULL DEFAULT 1,
+            PRIMARY KEY (provider_id, event_kind)
+        )",
+    )
+    .execute(db)
+    .await
+    .ok();
+
     Ok(())
 }
 

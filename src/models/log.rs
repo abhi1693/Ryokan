@@ -102,6 +102,14 @@ pub enum LogCategory {
     /// filter on `Rss` rather than wading through general System
     /// chatter. Plan decisions #10 and #11.
     Rss,
+    /// Outbound notification dispatch (issue #118). Per-provider send
+    /// outcomes — successful sends emit at info, send-side failures
+    /// (timeout, transport error, receiver-returned-error) emit at warn
+    /// with the provider name + event kind. Distinct from `System`
+    /// because users diagnosing "did my Discord webhook fire" want to
+    /// filter to just the dispatch chatter rather than wade through
+    /// startup / migration / supervisor noise.
+    Notifications,
 }
 
 impl LogCategory {
@@ -125,6 +133,7 @@ impl LogCategory {
             LogCategory::Scoring => "scoring",
             LogCategory::ExternalSync => "external_sync",
             LogCategory::Rss => "rss",
+            LogCategory::Notifications => "notifications",
         }
     }
 
@@ -152,6 +161,7 @@ impl LogCategory {
             "scoring" => Some(LogCategory::Scoring),
             "external_sync" => Some(LogCategory::ExternalSync),
             "rss" => Some(LogCategory::Rss),
+            "notifications" => Some(LogCategory::Notifications),
             _ => None,
         }
     }
@@ -176,6 +186,7 @@ impl LogCategory {
             LogCategory::Scoring => "Scoring",
             LogCategory::ExternalSync => "External Sync",
             LogCategory::Rss => "RSS",
+            LogCategory::Notifications => "Notifications",
         }
     }
 }
@@ -498,6 +509,7 @@ mod tests {
             LogCategory::Scoring,
             LogCategory::ExternalSync,
             LogCategory::Rss,
+            LogCategory::Notifications,
         ]
     }
 

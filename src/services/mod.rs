@@ -38,6 +38,7 @@ pub mod artwork;
 pub mod html;
 
 pub mod nfo;
+pub mod notifications;
 pub mod post_processing;
 
 pub mod anibridge;

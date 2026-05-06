@@ -111,7 +111,17 @@ impl TorznabIndexer {
     /// HTTP 200 with `<error/>` body, non-200 (Prowlarr 401), 429
     /// plus Retry-After. Doesn't try to parse — that's the caller's
     /// job since caps and search have different schemas.
+    ///
+    /// Short-circuits at the top with the active per-id cooldown
+    /// from `super::super::cooldown` if a prior 429 stamped one;
+    /// the cooldown's lifecycle is documented there.
     async fn fetch(&self, url: &str) -> Result<String, String> {
+        if let Some(remaining) = super::super::cooldown::remaining(self.id) {
+            return Err(format!(
+                "Indexer rate-limited (cooldown {}s remaining)",
+                remaining.as_secs()
+            ));
+        }
         let resp = self
             .http
             .get(url)
@@ -129,6 +139,7 @@ impl TorznabIndexer {
                 .get(reqwest::header::RETRY_AFTER)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.parse::<u64>().ok());
+            super::super::cooldown::record_429(self.id, retry);
             let body_excerpt = resp.text().await.unwrap_or_default();
             return Err(format!(
                 "Indexer rate-limited (429); retry_after={:?}s; body: {}",

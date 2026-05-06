@@ -212,15 +212,51 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
             // Settings UI can render the "Re-link required" banner.
             // Other failure modes (rate-limit, network timeout)
             // leave the flag alone — they're transient.
-            if is_auth_rejection(&e)
-                && let Err(write_err) =
-                    external_accounts::update_last_sync_auth_failed(&state.db, account.id, true)
-                        .await
-            {
-                tracing::warn!(
-                    "failed to set last_sync_auth_failed for account_id={}: {write_err}",
-                    account.id
-                );
+            if is_auth_rejection(&e) {
+                // Capture the prior flag state BEFORE the update so the
+                // notification fires only on the false→true transition.
+                // Without this gate every subsequent failed tick (every
+                // 15 min initially, backing off to ~8h) would re-fire the
+                // re-link ping during a long token-dead window — a single
+                // unattended weekend could produce 5-10 duplicate Discord
+                // pings for the same dead token.
+                let was_already_failed = account.last_sync_auth_failed;
+                let write_ok = match external_accounts::update_last_sync_auth_failed(
+                    &state.db, account.id, true,
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(write_err) => {
+                        tracing::warn!(
+                            "failed to set last_sync_auth_failed for account_id={}: {write_err}",
+                            account.id
+                        );
+                        false
+                    }
+                };
+                // Issue #118 — fire the re-link-required notification at
+                // the moment the sticky flag flips on for the first time.
+                // Default-on event policy (this is something the user
+                // genuinely needs to know); Settings UI's "Re-link
+                // required" banner already fires every tick, but a
+                // Discord ping is what gets a user back into the app to
+                // actually click it. One ping per fail→fail-resolved
+                // cycle is the right cadence.
+                //
+                // **Gated on `write_ok`** so a transient DB failure
+                // doesn't leak the duplicate-ping problem this guard
+                // exists to prevent: if the write failed, the next
+                // tick re-reads `last_sync_auth_failed = false` from
+                // the DB → `was_already_failed = false` again → re-
+                // emits. Skipping the emit on write failure means the
+                // user might miss the first ping but won't get spammed.
+                if !was_already_failed && write_ok {
+                    crate::services::notifications::emit_external_sync_relink_required(
+                        state,
+                        &account.provider,
+                    );
+                }
             }
             return Err(e);
         }

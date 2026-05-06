@@ -939,3 +939,300 @@ async fn run_once_falls_back_to_default_for_null_stamps() {
     // client IS in the pool (transient or fall-through, not deleted).
     assert_eq!(default_client.list_call_count(), 1);
 }
+
+// ─── Path-traversal rejection (issue #117) ───────────────────────
+//
+// `DownloadClient::get_files` reflects torrent metadata, which is
+// attacker-controlled. A malicious file-list entry like `/etc/passwd`
+// or `../../escape.mkv` would resolve outside the configured source
+// base via `Path::join`, and the import op (hardlink / copy / move)
+// would touch host files the user never grabbed. The validator on
+// `import_torrent`'s file loop must reject those entries before the
+// `Path::join` and the `do_file_op` call. This test drives the full
+// `run_once` → `import_torrent` chain against a mock client that
+// reports a torrent with a mixed legit-plus-malicious file list and
+// asserts:
+//   1. the legit file imports normally into media_root;
+//   2. each malicious entry produces a "Rejected suspicious file-list
+//      entry" log row in the `logs` table (so System → Logs surfaces
+//      the rejection);
+//   3. the destination season directory contains exactly one file
+//      (the legit one) — no escape attempt managed to land a hardlink
+//      that points outside source_base.
+//
+// Distinct from the unit tests on `validate_relative_path_fragment`
+// in `tests/filenames.rs` — those pin the rejection rules per-input;
+// this test pins that the rules are actually wired into the import
+// loop, that the rejection logs through `LogCategory::PostProcess`,
+// and that legitimate files in the same torrent still import.
+
+/// Mock client tuned for the rejection-path test: returns a single
+/// canned complete torrent + a canned `get_files` payload so the test
+/// can probe how `import_torrent` handles a mixed legit + malicious
+/// file list.
+struct ImportingClient {
+    torrent: DownloadItem,
+    files: Vec<DownloadFile>,
+}
+
+#[async_trait]
+impl DownloadClient for ImportingClient {
+    async fn test(&self) -> Result<String, String> {
+        Ok("mock".into())
+    }
+    async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+        Ok(AddOutcome::Added)
+    }
+    async fn add_torrent_with_file_filter(
+        &self,
+        _url: &str,
+        _hash: &str,
+        _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+    ) -> Result<SelectiveOutcome, String> {
+        Ok(SelectiveOutcome::FullDownload)
+    }
+    async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+        Ok(vec![self.torrent.clone()])
+    }
+    async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+        Ok(self.files.clone())
+    }
+    async fn pause(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn resume(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_file_wanted(
+        &self,
+        _hash: &str,
+        _files: &[usize],
+        _wanted: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn sonarr_impl_name(&self) -> &'static str {
+        "QBittorrent"
+    }
+}
+
+#[tokio::test]
+async fn run_once_rejects_malicious_filelist_entries_but_imports_legit_siblings() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+
+    // Two tempdirs on the same filesystem so hardlink mode (the
+    // default) succeeds without an EXDEV-fallback path. media_root
+    // is the destination; source_dir is what the mock torrent reports
+    // as its `save_path` and `content_path`.
+    let media_root = tempfile::TempDir::new().expect("media_root tempdir");
+    let source_dir = tempfile::TempDir::new().expect("source tempdir");
+    let media_root_path = media_root.path().to_string_lossy().to_string();
+    let source_path = source_dir.path().to_string_lossy().to_string();
+
+    // Place a real legit file inside source_dir. The import loop will
+    // hardlink this into media_root/<folder_name>/Season 01/.
+    let legit_filename = "Show Title - 01.mkv";
+    std::fs::write(source_dir.path().join(legit_filename), b"legit content")
+        .expect("write legit file");
+
+    // Seed config with the post-processing toggle on + the real
+    // tempdir as media_root so `run_once` reaches `import_torrent`.
+    let db = in_memory_pool().await;
+    sqlx::query(
+        "INSERT INTO config (id, post_processing_enabled, media_root, post_processing_mode) \
+         VALUES (1, 1, ?, 'hardlink')",
+    )
+    .bind(&media_root_path)
+    .execute(&db)
+    .await
+    .expect("seed config row");
+
+    let series_id = seed_series(&db, 1, "Show Title").await;
+    let g =
+        grabbed_torrents::record_grab(&db, "deadbeef", "Show Title - 01", series_id, &[1], false)
+            .await
+            .unwrap()
+            .unwrap();
+    grabbed_torrents::set_download_client(&db, g, Some(1))
+        .await
+        .unwrap();
+    insert_dc(
+        &db,
+        DownloadClientForm {
+            name: "default",
+            kind: "qbittorrent",
+            url: "http://q",
+            username: "",
+            password: "",
+            label: "",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+
+    // Complete torrent (state_kind = Seeding) so the import branch in
+    // run_once actually runs. save_path / content_path point at the
+    // real source tempdir so the import loop's `source_base`
+    // resolution lands at a directory we control.
+    let torrent = DownloadItem {
+        hash: "deadbeef".into(),
+        name: "Show Title - 01".into(),
+        size: 13,
+        progress: 1.0,
+        dlspeed: 0,
+        state: "seeding".into(),
+        category: "anime".into(),
+        eta: 0,
+        save_path: source_path.clone(),
+        content_path: source_path.clone(),
+        state_kind: DownloadItemState::Seeding,
+    };
+
+    // The malicious entries — each `.mkv` so they survive the
+    // is_video_file filter and reach the validator. progress=1.0 so
+    // they pass the "complete files only" guard. Together they cover
+    // each rejection arm:
+    //   * absolute path (RootDir) — issue's headline one-shot bypass
+    //   * relative parent traversal (ParentDir at the start)
+    //   * mid-path parent traversal (ParentDir after a Normal)
+    //   * Windows-style absolute (rejected via the explicit '\' guard
+    //     since on Unix `Path::components` would otherwise treat this
+    //     as a single Normal component)
+    let malicious_entries = [
+        "/tmp/ryokan-issue-117-absolute-leak.mkv",
+        "../escape-via-parent.mkv",
+        "subdir/../../mid-path-escape.mkv",
+        "C:\\Windows\\System32\\config\\sam.mkv",
+    ];
+    let mut files: Vec<DownloadFile> = malicious_entries
+        .iter()
+        .map(|name| DownloadFile {
+            name: (*name).to_string(),
+            size: 1,
+            progress: 1.0,
+            wanted: true,
+        })
+        .collect();
+    files.push(DownloadFile {
+        name: legit_filename.to_string(),
+        size: 13,
+        progress: 1.0,
+        wanted: true,
+    });
+
+    let state = build_test_app_state(db.clone(), None);
+    let client = Arc::new(ImportingClient {
+        torrent,
+        files: files.clone(),
+    });
+    install_pool(
+        &state,
+        vec![(1, client.clone() as Arc<dyn DownloadClient>, true)],
+    )
+    .await;
+
+    post_processing::run_once(&state).await;
+
+    // ── 1. Legit file landed under media_root/Show Title/Season 01/.
+    //    Folder name comes from `seed_series` (which writes the title
+    //    as the folder_name); season-dir name is "Season 01" per
+    //    `load_series_import_ctx`.
+    let season_dir = media_root.path().join("Show Title").join("Season 01");
+    assert!(
+        season_dir.is_dir(),
+        "expected season dir at {} after import",
+        season_dir.display()
+    );
+    let season_entries: Vec<_> = std::fs::read_dir(&season_dir)
+        .expect("read season dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .collect();
+    let mkv_entries: Vec<String> = season_entries
+        .iter()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.to_lowercase().ends_with(".mkv"))
+        .collect();
+    assert_eq!(
+        mkv_entries.len(),
+        1,
+        "expected exactly one .mkv in {} (just the legit file), found {:?}",
+        season_dir.display(),
+        mkv_entries
+    );
+
+    // ── 2. Each rejected entry produced a PostProcess warn-or-higher
+    //    log row whose message identifies the bad name. We only have
+    //    insert/timestamp on the `logs` table (no programmatic detail
+    //    matchers), so we query everything with category=PostProcess
+    //    and grep the messages for both the rejection prefix and the
+    //    offending name.
+    // `LogCategory::as_str` writes the snake_case slug (`post_process`)
+    // — query the column verbatim, not the enum-variant identifier.
+    let log_rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT level, message FROM logs WHERE category = 'post_process' ORDER BY id",
+    )
+    .fetch_all(&db)
+    .await
+    .expect("query logs");
+    for entry in &malicious_entries {
+        let hit = log_rows.iter().any(|(_lvl, msg)| {
+            msg.contains("Rejected suspicious file-list entry") && msg.contains(entry)
+        });
+        assert!(
+            hit,
+            "expected a 'Rejected suspicious file-list entry' log for {entry:?}; \
+             got messages: {:?}",
+            log_rows.iter().map(|(_, m)| m).collect::<Vec<_>>()
+        );
+    }
+
+    // ── 3. Each malicious entry's basename must NOT have leaked into
+    //    media_root or anywhere inside the source's parent. Catches a
+    //    regression where the validator accepted but the join
+    //    silently produced an in-bounds path (e.g. legit-rooted
+    //    subdir traversal that lands back inside media_root via
+    //    Path::join collapse). A `walkdir`-style check here would be
+    //    heavier; checking the season dir + the source's parent is
+    //    enough to surface the attempted leaks the malicious entries
+    //    target.
+    let source_parent = source_dir.path().parent().expect("tempdir has a parent");
+    for marker in [
+        "ryokan-issue-117-absolute-leak.mkv",
+        "escape-via-parent.mkv",
+        "mid-path-escape.mkv",
+        "sam.mkv",
+    ] {
+        assert!(
+            !source_parent.join(marker).exists(),
+            "malicious filename {marker:?} leaked next to source tempdir at {}",
+            source_parent.display()
+        );
+        assert!(
+            !season_dir.join(marker).exists(),
+            "malicious filename {marker:?} leaked into season dir {}",
+            season_dir.display()
+        );
+    }
+
+    // ── 4. Sanity: the grab itself transitioned to imported. A
+    //    failure here would mean the rejection path ate the legit
+    //    sibling too (or some unrelated guard fired) — the rejection
+    //    logic must `continue` past only the malicious entries.
+    let final_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(g)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(
+        final_state, "imported",
+        "grab should land in 'imported' once the legit sibling completes; \
+         a 'pending' or 'failed' here means rejection blocked the legit file too"
+    );
+}
