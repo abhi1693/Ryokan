@@ -324,3 +324,294 @@ async fn watch_list_sync_flips_auth_failed_on_400_invalid_token_response() {
     }
     anilist::reset_state_for_tests();
 }
+
+/// Issue #118 follow-up — the `was_already_failed && write_ok` gate
+/// in `services/external_sync/mod.rs` is what makes the re-link
+/// notification fire **once per fail→fail-resolved cycle** instead
+/// of every auth-rejection tick. Without the gate, an unattended
+/// weekend with a dead AL token could spam Discord with 5-10
+/// duplicate "Re-link required" pings as the supervised loop
+/// keeps retrying.
+///
+/// Pre-seeds an account with `last_sync_auth_failed = true` (the
+/// post-first-failure state), installs a recording provider in the
+/// notification cache, runs `tick_once` against the same wiremock
+/// 400 the prior test exercises, and asserts the recording
+/// provider received **zero** notifications.
+///
+/// Belt-and-braces: the second sub-block exercises a fresh-fail
+/// cycle (flag starts false) and asserts exactly one emit. Without
+/// this counter-test, a wiring regression that silently suppressed
+/// every emit would make the half-1 zero-count pass for the wrong
+/// reason.
+#[tokio::test]
+async fn watch_list_sync_emits_relink_notification_only_on_false_to_true_transition() {
+    use async_trait::async_trait;
+    use ryokan::services::notifications::{NotificationEvent, NotificationProvider};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Minimal `NotificationProvider` that records every dispatch.
+    /// Lives inline because the `cfg(test)` mock in
+    /// `services::notifications::tests` isn't reachable from
+    /// integration tests, and a one-off recorder is smaller than
+    /// promoting that mock to `cfg(any(test, feature = "test-support"))`.
+    struct RecordingProvider {
+        sent: Arc<AtomicUsize>,
+    }
+    #[async_trait]
+    impl NotificationProvider for RecordingProvider {
+        fn id(&self) -> i64 {
+            1
+        }
+        fn name(&self) -> &str {
+            "recorder"
+        }
+        fn kind(&self) -> &'static str {
+            "test"
+        }
+        async fn send(&self, _event: &NotificationEvent) -> Result<(), String> {
+            self.sent.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    // ---- Half 1: flag pre-flipped → no emit on this tick. ----
+    {
+        anilist::reset_state_for_tests();
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_token","error_description":"The access token is invalid"}"#,
+            ))
+            .mount(&mock)
+            .await;
+        unsafe {
+            std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        }
+
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        external_accounts::link(
+            &db,
+            LinkRequest {
+                provider: PROVIDER_ANILIST.to_string(),
+                provider_user_id: "42".to_string(),
+                username: "e2e_user".to_string(),
+                access_token: "fake-al-access-token".to_string(),
+                refresh_token: String::new(),
+                access_token_expires_at: None,
+                score_format: "POINT_10".to_string(),
+            },
+        )
+        .await
+        .expect("seed external account");
+        // Pre-flip the flag — represents "this is the second-fail
+        // in the same cycle." The transition gate must suppress.
+        let acct_id = external_accounts::get_current(&db)
+            .await
+            .expect("get_current")
+            .expect("linked account")
+            .id;
+        external_accounts::update_last_sync_auth_failed(&db, acct_id, true)
+            .await
+            .expect("pre-flip flag");
+
+        // Seed `notification_settings` so the per-event matrix
+        // doesn't default-deny `ExternalSyncReLinkRequired` and
+        // mask the gate-test by short-circuiting for a different
+        // reason.
+        sqlx::query(
+            "INSERT INTO notification_providers (id, name, kind, enabled, config_json) \
+             VALUES (1, 'recorder', 'test', 1, '{}')",
+        )
+        .execute(&db)
+        .await
+        .expect("seed provider row");
+        ryokan::services::notifications::store::seed_default_matrix(&db, 1)
+            .await
+            .expect("seed matrix");
+
+        let sent = Arc::new(AtomicUsize::new(0));
+        let providers: Vec<Arc<dyn NotificationProvider>> =
+            vec![Arc::new(RecordingProvider { sent: sent.clone() })];
+        *state.notification_providers.write().await = Arc::new(providers);
+
+        let _ = external_sync::tick_once(&state)
+            .await
+            .expect_err("tick must still surface the auth-rejection Err");
+
+        // Dispatcher fires `tokio::spawn`s; give them a moment to
+        // drain. Shorter than `PROVIDER_SEND_TIMEOUT` so an
+        // accidental dispatch surfaces here rather than getting
+        // lost on a slow CI runner.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        assert_eq!(
+            sent.load(Ordering::SeqCst),
+            0,
+            "transition gate must suppress the duplicate notification \
+             when last_sync_auth_failed was already true entering the tick"
+        );
+
+        unsafe {
+            std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        }
+        anilist::reset_state_for_tests();
+    }
+
+    // ---- Half 2: fresh-fail cycle (flag starts false) → exactly one emit. ----
+    {
+        anilist::reset_state_for_tests();
+        let mock = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"error":"invalid_token","error_description":"The access token is invalid"}"#,
+            ))
+            .mount(&mock)
+            .await;
+        unsafe {
+            std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+        }
+
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db.clone(), None);
+        external_accounts::link(
+            &db,
+            LinkRequest {
+                provider: PROVIDER_ANILIST.to_string(),
+                provider_user_id: "42".to_string(),
+                username: "e2e_user".to_string(),
+                access_token: "fake-al-access-token".to_string(),
+                refresh_token: String::new(),
+                access_token_expires_at: None,
+                score_format: "POINT_10".to_string(),
+            },
+        )
+        .await
+        .expect("seed external account");
+        // Flag intentionally NOT pre-flipped — this is the first
+        // auth-rejection in a clean cycle; the notification must
+        // fire.
+
+        sqlx::query(
+            "INSERT INTO notification_providers (id, name, kind, enabled, config_json) \
+             VALUES (1, 'recorder', 'test', 1, '{}')",
+        )
+        .execute(&db)
+        .await
+        .expect("seed provider row");
+        ryokan::services::notifications::store::seed_default_matrix(&db, 1)
+            .await
+            .expect("seed matrix");
+
+        let sent = Arc::new(AtomicUsize::new(0));
+        let providers: Vec<Arc<dyn NotificationProvider>> =
+            vec![Arc::new(RecordingProvider { sent: sent.clone() })];
+        *state.notification_providers.write().await = Arc::new(providers);
+
+        let _ = external_sync::tick_once(&state)
+            .await
+            .expect_err("tick must still surface the auth-rejection Err");
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        assert_eq!(
+            sent.load(Ordering::SeqCst),
+            1,
+            "fresh-fail cycle (flag starts false) must emit exactly once \
+             — without this assertion the half-1 zero-emit pass could be \
+             a false-positive caused by a wiring regression that suppresses \
+             every emit"
+        );
+
+        let acct = external_accounts::get_current(&db)
+            .await
+            .expect("get_current")
+            .expect("linked account");
+        assert!(
+            acct.last_sync_auth_failed,
+            "the gate that emits also writes the flag — both must hold together"
+        );
+
+        unsafe {
+            std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+        }
+        anilist::reset_state_for_tests();
+    }
+}
+
+/// Issue #62 PR E + #118 — when a sync succeeds on a later tick
+/// (user re-linked their account), `last_sync_auth_failed` must
+/// clear back to false. This is the precondition for the transition
+/// gate to ever fire again — without the clear, every subsequent
+/// token-death would look like a continuation of the same fail
+/// cycle and never re-emit.
+#[tokio::test]
+async fn watch_list_sync_clears_auth_failed_flag_on_successful_tick() {
+    anilist::reset_state_for_tests();
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": {
+                "MediaListCollection": {
+                    "lists": [],
+                    "user": {
+                        "mediaListOptions": {"scoreFormat": "POINT_10"}
+                    }
+                }
+            }
+        })))
+        .mount(&mock)
+        .await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db.clone(), None);
+    external_accounts::link(
+        &db,
+        LinkRequest {
+            provider: PROVIDER_ANILIST.to_string(),
+            provider_user_id: "42".to_string(),
+            username: "e2e_user".to_string(),
+            access_token: "fake-al-access-token".to_string(),
+            refresh_token: String::new(),
+            access_token_expires_at: None,
+            score_format: "POINT_10".to_string(),
+        },
+    )
+    .await
+    .expect("seed external account");
+    // Pre-flip — represents "user just re-linked; the flag is
+    // still set from the failed ticks before the re-link."
+    let acct_id = external_accounts::get_current(&db)
+        .await
+        .unwrap()
+        .unwrap()
+        .id;
+    external_accounts::update_last_sync_auth_failed(&db, acct_id, true)
+        .await
+        .expect("pre-flip flag");
+
+    external_sync::tick_once(&state).await.expect("sync ok");
+
+    let acct = external_accounts::get_current(&db)
+        .await
+        .expect("get_current")
+        .expect("linked account");
+    assert!(
+        !acct.last_sync_auth_failed,
+        "successful tick after a prior auth-rejection must clear last_sync_auth_failed; \
+         without the clear, the next dead-token cycle silently re-uses the previous \
+         transition gate state and never re-emits the re-link notification"
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
