@@ -28,7 +28,7 @@ use sha2::Sha256;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{NotificationEvent, NotificationProvider};
+use super::{NotificationEvent, NotificationProvider, TestSendResult};
 
 /// 10s. Notifications are tiny POSTs and a slow receiver isn't worth
 /// waiting for. Distinct from the 30s RSS timeout because the request
@@ -355,12 +355,6 @@ pub async fn send_test(
         status,
         body: truncate(&body_text, RESPONSE_BODY_LOG_CAP),
     })
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct TestSendResult {
-    pub status: u16,
-    pub body: String,
 }
 
 fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {

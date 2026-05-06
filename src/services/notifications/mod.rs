@@ -41,6 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+pub mod discord;
 pub mod event;
 pub mod store;
 pub mod webhook;
@@ -86,6 +87,19 @@ pub trait NotificationProvider: Send + Sync {
     /// not 2xx; they should not return Err for "I logged it locally
     /// instead" — that path is for the dispatcher.
     async fn send(&self, event: &NotificationEvent) -> Result<(), String>;
+}
+
+/// Outcome of a `send_test` round-trip — the receiver's HTTP status
+/// plus a truncated body. Returned to the Settings UI's "Send test"
+/// button so users can see what the receiver said inline rather than
+/// opening browser devtools. Generic across providers, so it works
+/// both for the generic webhook (body is whatever the receiver echoes)
+/// and Discord (success bodies are usually empty `204 No Content`,
+/// failure bodies are JSON error envelopes).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct TestSendResult {
+    pub status: u16,
+    pub body: String,
 }
 
 /// Same swap-on-write shape as `IndexerCache` / `CompiledCfCache`.
@@ -368,6 +382,23 @@ pub async fn rebuild_notification_providers_cache(cache: &NotificationProviders,
                     }
                 }
             }
+            "discord" => match discord::DiscordProvider::from_row(
+                row.id,
+                row.name.clone(),
+                &row.config_json,
+                db.clone(),
+            ) {
+                Ok(p) => Some(Arc::new(p)),
+                Err(e) => {
+                    tracing::warn!(
+                        "notification_providers: skipping discord #{} ({}): {}",
+                        row.id,
+                        row.name,
+                        e,
+                    );
+                    None
+                }
+            },
             other => {
                 tracing::warn!(
                     "notification_providers: skipping #{} ({}) — unknown kind {:?}",

@@ -1,8 +1,8 @@
-//! Notifications handler surface (issue #119).
+//! Notifications handler surface.
 //!
-//! Settings UI's "Send test" button lands here. The handler reads
-//! the live provider out of the cache (the user just saved it; the
-//! save handler fired `rebuild_notification_providers_cache`),
+//! Settings UI's "Send test" button lands here. Resolves the live
+//! provider via cache lookup (the user just saved it; the save
+//! handler fired `rebuild_notification_providers_cache`),
 //! synthesizes a `Health` event, and returns the receiver's HTTP
 //! status + truncated body inline so users can debug from the
 //! Settings UI without opening browser devtools.
@@ -15,7 +15,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 
 use crate::AppState;
-use crate::services::notifications::{NotificationEvent, webhook};
+use crate::services::notifications::{NotificationEvent, TestSendResult, discord, store, webhook};
 
 /// `POST /api/notifications/{id}/test` — send a synthetic
 /// `Health { kind: "test", message: "..." }` event to the targeted
@@ -25,25 +25,27 @@ use crate::services::notifications::{NotificationEvent, webhook};
 /// Response shape:
 /// - 200 + `{"status": <int>, "body": "<truncated>"}` on send-side
 ///   success (means the request hit the receiver — receiver may
-///   still have returned a 4xx/5xx, which is what `status` reports).
+///   still have returned a 4xx/5xx, which is what `status` reports
+///   for the webhook kind; Discord 200/204 maps the same way).
 /// - 4xx / 5xx + `{"error": "..."}` for transport failures, timeouts,
 ///   serialization errors, or "provider not in cache."
 ///
 /// `provider not in cache` is a 404 because the row may exist in the
 /// DB but be disabled, or have just been deleted from another tab.
-/// `transport error` / `timeout` is 502 — Ryokan is the upstream
-/// proxy here; the receiver is the unreachable origin. Serialization
-/// failures are 500 (programmer error in Ryokan, not a user-fixable
-/// state).
+/// `transport error` / `timeout` / receiver-non-2xx is 502 — Ryokan is
+/// the upstream proxy here; the receiver is the unreachable origin.
+/// Serialization failures are 500 (programmer error in Ryokan, not a
+/// user-fixable state).
 pub async fn test_provider(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<Json<webhook::TestSendResult>, (StatusCode, Json<serde_json::Value>)> {
-    // Resolve the provider out of the live cache snapshot. The cache
-    // is rebuilt on every notifications-CRUD save, so the freshly-
-    // saved row is visible here without a re-read.
+) -> Result<Json<TestSendResult>, (StatusCode, Json<serde_json::Value>)> {
+    // Resolve through the live cache first — the cached snapshot is
+    // what the dispatcher would actually use, so a "provider not in
+    // cache" 404 is the most accurate user signal (row may be
+    // disabled, or just deleted from another tab).
     let providers = state.notification_providers.read().await.clone();
-    let provider = providers
+    let cached = providers
         .iter()
         .find(|p| p.id() == id)
         .cloned()
@@ -56,62 +58,75 @@ pub async fn test_provider(
             )
         })?;
 
-    // Foundation PR ships the trait + dispatch; this PR ships the
-    // webhook impl. Discord (issue #120) lands as another `kind` arm
-    // here — the test endpoint stays generic over the trait but
-    // currently knows only how to call into the webhook impl's
-    // surface for the inline status+body response. A `kind`-shaped
-    // match keeps that surface honest as more impls land.
+    // The trait's `Arc<dyn NotificationProvider>` doesn't expose its
+    // underlying config (object-safety), and the inline test path
+    // wants the receiver's status + body — which the trait's `send`
+    // throws away in service of the dispatcher's fire-and-forget
+    // shape. Solution: re-load the row and reconstruct a one-shot
+    // typed provider for the test path. Cheap (one DB query + one
+    // URL parse) and keeps the trait surface unchanged.
+    let row = match store::get_provider(&state.db, id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("notification provider #{id} not found"),
+                })),
+            ));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("DB read failed: {e}")})),
+            ));
+        }
+    };
+
     let event = NotificationEvent::Health {
         kind: "test".into(),
         message: "Test notification from Ryokan".into(),
     };
-    match provider.kind() {
+
+    match cached.kind() {
         "webhook" => {
-            // Re-resolve through the trait id and look up the
-            // concrete webhook impl from the cache snapshot. The
-            // unsafe-style downcast pattern (Any) isn't worth the
-            // ergonomic cost; instead we re-load the row from the
-            // DB and reconstruct a one-shot `WebhookProvider` for
-            // the test path. Cheap (one DB query, one URL parse)
-            // and avoids tying the test endpoint into the trait's
-            // object-safety constraints.
-            let row = match crate::services::notifications::store::get_provider(&state.db, id).await
-            {
-                Ok(Some(r)) => r,
-                Ok(None) => {
-                    return Err((
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({
-                            "error": format!("notification provider #{id} not found"),
-                        })),
-                    ));
-                }
-                Err(e) => {
-                    return Err((
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("DB read failed: {e}")})),
-                    ));
-                }
-            };
-            let p = match webhook::WebhookProvider::from_row(row.id, row.name, &row.config_json) {
-                Ok(p) => p,
-                Err(e) => {
-                    return Err((
+            let p = webhook::WebhookProvider::from_row(row.id, row.name, &row.config_json)
+                .map_err(|e| {
+                    (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
                             "error": format!("invalid webhook config: {e}"),
                         })),
-                    ));
-                }
-            };
-            match webhook::send_test(&p, &event).await {
-                Ok(result) => Ok(Json(result)),
-                Err(e) => Err((
+                    )
+                })?;
+            webhook::send_test(&p, &event).await.map(Json).map_err(|e| {
+                (
                     StatusCode::BAD_GATEWAY,
                     Json(serde_json::json!({"error": e})),
-                )),
-            }
+                )
+            })
+        }
+        "discord" => {
+            let p = discord::DiscordProvider::from_row(
+                row.id,
+                row.name,
+                &row.config_json,
+                state.db.clone(),
+            )
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!("invalid discord config: {e}"),
+                    })),
+                )
+            })?;
+            discord::send_test(&p, &event).await.map(Json).map_err(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({"error": e})),
+                )
+            })
         }
         other => Err((
             StatusCode::NOT_IMPLEMENTED,

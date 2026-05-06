@@ -7,6 +7,8 @@
 //! block; this module covers the wire-format end of the webhook
 //! impl that needs an actual HTTP receiver to assert against.
 
+mod discord_outcomes;
+mod discord_payload;
 mod fixture;
 mod headers;
 mod hmac;
