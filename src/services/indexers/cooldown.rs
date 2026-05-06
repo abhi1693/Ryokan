@@ -70,9 +70,25 @@ pub fn record_429(indexer_id: i64, retry_after_secs: Option<u64>) {
     }
 }
 
-/// Test-only: drop every cooldown stamp. Lets a wiremock fixture
-/// run after another that triggered a 429 without inheriting the
-/// 60s suppression window.
+/// Test-only: drop the cooldown stamp for a single id. **Prefer
+/// this over [`clear_all_for_tests`]** — the global table is
+/// process-static, and `clear_all` racing under nextest's default
+/// parallelism can blow away another test's freshly-stamped row
+/// between the stamp and its read. Per-id cleanup limits each
+/// test to mutating only the ids it owns.
+#[cfg(any(test, feature = "test-support"))]
+pub fn remove_for_tests(indexer_id: i64) {
+    if let Ok(mut guard) = COOLDOWN_UNTIL.lock() {
+        guard.remove(&indexer_id);
+    }
+}
+
+/// Test-only: drop every cooldown stamp. **Race-prone under
+/// nextest** because the cooldown table is process-static and
+/// tests share the binary; prefer [`remove_for_tests`] which
+/// isolates each test to its own id. Kept only as a last-resort
+/// reset for callers that genuinely don't know which ids got
+/// stamped.
 #[cfg(any(test, feature = "test-support"))]
 pub fn clear_all_for_tests() {
     if let Ok(mut guard) = COOLDOWN_UNTIL.lock() {
@@ -84,62 +100,81 @@ pub fn clear_all_for_tests() {
 mod tests {
     use super::*;
 
+    // Each test below uses a unique id range and `remove_for_tests`
+    // for cleanup so concurrent tests under nextest's default
+    // parallelism can't race on the process-global cooldown table.
+    // The torznab wiremock_tests fixture uses id=7 — pick a non-7
+    // base in this module so cross-module concurrency stays safe.
+    // Bases: 7100/7101 (clamp), 7200 (default), 7900 (none),
+    // 7300/7301 (per-id), 7400 (replace).
+
     #[test]
     fn record_429_with_retry_after_sets_clamped_cooldown() {
-        clear_all_for_tests();
+        let id = 7100;
+        remove_for_tests(id);
         // 600s upstream Retry-After is clamped to COOLDOWN_MAX (300s).
-        record_429(7, Some(600));
-        let r = remaining(7).expect("cooldown active immediately");
+        record_429(id, Some(600));
+        let r = remaining(id).expect("cooldown active immediately");
         assert!(
             r <= COOLDOWN_MAX && r > COOLDOWN_MAX - Duration::from_secs(1),
             "expected ~{}s, got {:?}",
             COOLDOWN_MAX.as_secs(),
             r
         );
+        remove_for_tests(id);
     }
 
     #[test]
     fn record_429_without_retry_after_uses_default() {
-        clear_all_for_tests();
-        record_429(8, None);
-        let r = remaining(8).expect("cooldown active immediately");
+        let id = 7200;
+        remove_for_tests(id);
+        record_429(id, None);
+        let r = remaining(id).expect("cooldown active immediately");
         assert!(
             r <= COOLDOWN_DEFAULT && r > COOLDOWN_DEFAULT - Duration::from_secs(1),
             "expected ~{}s default, got {:?}",
             COOLDOWN_DEFAULT.as_secs(),
             r
         );
+        remove_for_tests(id);
     }
 
     #[test]
     fn remaining_returns_none_for_unstamped_indexer() {
-        clear_all_for_tests();
-        assert!(remaining(999).is_none());
+        let id = 7900;
+        remove_for_tests(id);
+        assert!(remaining(id).is_none());
     }
 
     #[test]
     fn record_429_is_per_id_not_global() {
-        clear_all_for_tests();
-        record_429(10, Some(60));
-        assert!(remaining(10).is_some(), "id 10 should be cooled down");
+        let a = 7300;
+        let b = 7301;
+        remove_for_tests(a);
+        remove_for_tests(b);
+        record_429(a, Some(60));
+        assert!(remaining(a).is_some(), "id {a} should be cooled down");
         assert!(
-            remaining(11).is_none(),
-            "id 11 must NOT inherit id 10's cooldown — per-tracker rate-limit budget"
+            remaining(b).is_none(),
+            "id {b} must NOT inherit id {a}'s cooldown — per-tracker rate-limit budget"
         );
+        remove_for_tests(a);
     }
 
     #[test]
     fn later_429_replaces_earlier_cooldown_window() {
-        clear_all_for_tests();
-        record_429(12, Some(30));
-        let first = remaining(12).expect("first cooldown active");
+        let id = 7400;
+        remove_for_tests(id);
+        record_429(id, Some(30));
+        let first = remaining(id).expect("first cooldown active");
         // A second 429 with a longer Retry-After should extend the
         // window, not be ignored.
-        record_429(12, Some(120));
-        let second = remaining(12).expect("second cooldown active");
+        record_429(id, Some(120));
+        let second = remaining(id).expect("second cooldown active");
         assert!(
             second > first,
             "second cooldown ({second:?}) must extend past the first ({first:?})"
         );
+        remove_for_tests(id);
     }
 }

@@ -5,11 +5,12 @@
 //! short-circuits subsequent calls for that indexer until the
 //! window lifts.
 //!
-//! Each test calls `cooldown::clear_all_for_tests()` before
+//! Each test calls `cooldown::remove_for_tests(7)` before
 //! exercising the client because the cooldown table is process-
-//! global static state and the fixture hardcodes `id=7` — without
-//! the reset, a 429 in one test leaks into the next as a
-//! short-circuit, masking real wire behavior.
+//! global static state and the fixture hardcodes `id=7`. Per-id
+//! cleanup (vs. the legacy `clear_all_for_tests`) avoids racing
+//! against the cooldown::tests module that runs in the same
+//! binary under nextest's default parallelism.
 
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -17,9 +18,12 @@ use wiremock::{Mock, ResponseTemplate};
 use super::fixture::new_fixture;
 use crate::services::indexers::{Indexer, SearchQuery, cooldown};
 
+/// Fixture id — kept in sync with `super::fixture::new_fixture_with_kind`.
+const FIXTURE_INDEXER_ID: i64 = 7;
+
 #[tokio::test]
 async fn http_429_with_retry_after_surfaces_seconds_in_error() {
-    cooldown::clear_all_for_tests();
+    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
@@ -46,7 +50,7 @@ async fn http_429_with_retry_after_surfaces_seconds_in_error() {
 
 #[tokio::test]
 async fn http_429_without_retry_after_surfaces_unknown_retry() {
-    cooldown::clear_all_for_tests();
+    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
     // Some indexers return 429 without Retry-After. The client
     // must still surface it as a rate-limit error rather than a
     // generic HTTP failure, so the caller's cooldown logic can
@@ -67,7 +71,7 @@ async fn http_429_without_retry_after_surfaces_unknown_retry() {
 
 #[tokio::test]
 async fn http_429_stamps_cooldown_and_subsequent_call_short_circuits_without_upstream_hit() {
-    cooldown::clear_all_for_tests();
+    cooldown::remove_for_tests(FIXTURE_INDEXER_ID);
     let (server, client) = new_fixture().await;
     // `expect(1)` — the wiremock will fail the test if it gets
     // hit a second time. After the first 429 the cooldown is

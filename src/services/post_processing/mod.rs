@@ -818,6 +818,23 @@ async fn import_torrent(
         // node's view, in which case `do_file_op` surfaces the real I/O
         // error downstream and there's nothing for an attacker to
         // dereference anyway.
+        //
+        // **TOCTOU residual**: there's still a race window between this
+        // canonicalize check and the eventual `fs::rename` /
+        // `fs::hard_link` inside `do_file_op`. A co-resident attacker
+        // with write access to the source-base directory tree could
+        // swap a legitimate `release.mkv` for a symlink to `/etc/passwd`
+        // after this check passes but before the file op runs. The
+        // string-level `validate_relative_path_fragment` (the loop's
+        // first defense) is what handles the attacker-controlled-
+        // metadata case from issue #117 fully — that's the primary
+        // defense and runs before any FS access. Closing the residual
+        // would require `O_NOFOLLOW`-style FD discipline through the
+        // file ops, which is out of scope for the path-traversal fix
+        // and doesn't apply to Ryokan's threat model anyway (the
+        // process user already owns the source path; co-resident
+        // attacker with write access there is a deeper compromise).
+
         if let (Ok(canon_src), Ok(canon_base)) =
             (src.canonicalize(), Path::new(&source_base).canonicalize())
             && !canon_src.starts_with(&canon_base)

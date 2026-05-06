@@ -58,7 +58,7 @@ const RESPONSE_BODY_LOG_CAP: usize = 256;
 // the exact values Discord sees. A change here is a wire-shape
 // change.
 const COLOR_GRABBED_OR_IMPORTED: u32 = 5_763_719; // #57F287 success green
-const COLOR_HEALTH: u32 = 5_814_783; // #5865F2 blurple
+const COLOR_HEALTH: u32 = 5_793_266; // #5865F2 blurple — Discord's brand color
 const COLOR_NEEDS_REVIEW: u32 = 16_705_372; // #FEE75C warning yellow
 const COLOR_FAILURE: u32 = 15_548_997; // #ED4245 danger red
 
@@ -242,15 +242,23 @@ async fn post_payload(webhook_url: &str, payload: &Value) -> Result<TestSendResu
 }
 
 /// Read the `Retry-After` header. Value is seconds (sometimes
-/// fractional in the documented Discord shape, but the header is
-/// integer). Falls back to `1` second on parse failure — matches
-/// Discord's own minimum and surfaces the failure as a non-zero
-/// log line.
+/// fractional in the documented Discord shape; the header is
+/// usually integer but the JSON body's `retry_after` is float).
+/// Falls back to `1` second on parse failure or non-finite input —
+/// matches Discord's own minimum and surfaces the failure as a
+/// non-zero log line.
+///
+/// `is_finite` filter is load-bearing: `Duration::from_secs_f64`
+/// panics on `INFINITY` and `NaN`. A misbehaving receiver returning
+/// `Retry-After: Infinity` (cheap to construct, hard to predict)
+/// would otherwise abort the dispatch task — contained by the
+/// outer `tokio::spawn` panic-isolation but noisy for no benefit.
 fn parse_retry_after(resp: &reqwest::Response) -> Duration {
     resp.headers()
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.parse::<f64>().ok())
+        .filter(|secs| secs.is_finite())
         .map(|secs| Duration::from_secs_f64(secs.max(0.0)))
         .unwrap_or(Duration::from_secs(1))
 }
@@ -635,7 +643,7 @@ mod tests {
                 kind: "test".into(),
                 message: "x".into()
             }),
-            5_814_783
+            5_793_266
         );
         assert_eq!(
             color_for(&NotificationEvent::ImportFailed {

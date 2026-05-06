@@ -90,6 +90,35 @@ async fn discord_429_without_retry_after_still_returns_err() {
 }
 
 #[tokio::test]
+async fn discord_429_with_infinity_retry_after_does_not_panic() {
+    // Cheap defense regression: a misbehaving receiver returning
+    // `Retry-After: Infinity` would otherwise hit
+    // `Duration::from_secs_f64(INFINITY)` which panics. The guard is
+    // an `.is_finite()` filter; without it the dispatch task aborts
+    // (contained by the outer `tokio::spawn` panic-isolation, but
+    // noisy for no benefit). Pinned so a future refactor that drops
+    // the filter trips loudly.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api/webhooks/123/abc"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "Infinity")
+                .set_body_string("rate limited with bogus retry-after"),
+        )
+        .mount(&server)
+        .await;
+    let provider = make_provider(&server).await;
+    let err = provider
+        .send(&sample_event())
+        .await
+        .expect_err("429 still surfaces as Err on Infinity retry-after");
+    assert!(err.contains("429"), "got: {err}");
+    // Falls back to the 1-second default per `parse_retry_after`.
+    assert!(err.contains("retry-after=1s"), "got: {err}");
+}
+
+#[tokio::test]
 async fn discord_5xx_returns_err_with_status_in_message() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
