@@ -71,7 +71,7 @@ jobs:
       # nothing and the script handles the missing-baseline case.
       - name: Restore previous baseline
         id: restore-baseline
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: mutants.baseline.json
           key: mutants-baseline-v1-
@@ -136,7 +136,7 @@ jobs:
       # cache entries after 7 days of no access.
       - name: Save baseline for next run
         if: always()
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: mutants.baseline.json
           key: mutants-baseline-v1-${{ github.run_id }}
