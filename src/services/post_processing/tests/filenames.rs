@@ -6,7 +6,9 @@
 
 use rstest::rstest;
 
-use crate::services::post_processing::{is_video_file, sanitize_filename};
+use crate::services::post_processing::{
+    is_video_file, sanitize_filename, validate_relative_path_fragment,
+};
 
 // ─── is_video_file extension table ────────────────────────────────
 
@@ -93,4 +95,44 @@ fn sanitize_filename_strips_filesystem_reserved_chars() {
             "cleaned name still contains {bad:?}: {clean}"
         );
     }
+}
+
+// ─── validate_relative_path_fragment ───────────────────────────────
+//
+// Issue #117 — `DownloadClient::get_files` returns paths sourced from
+// torrent metadata, which is attacker-controlled. A `Path::join`
+// against an absolute or parent-traversing entry escapes the
+// configured source base. The pre-join validator is the primary
+// defense; pin every rejection case the issue's acceptance criteria
+// names so a future regression breaks here loudly.
+
+#[rstest]
+#[case("/etc/passwd")]
+#[case("/normal-relative.mkv")]
+#[case("../../etc/passwd")]
+#[case("subdir/../../escape.mkv")]
+#[case("..")]
+#[case("../sibling.mkv")]
+#[case("legit/../escape.mkv")]
+#[case("C:\\Windows\\System32\\config\\sam")]
+#[case("legit\\nested.mkv")]
+#[case("")]
+fn rejects_unsafe_path_fragments(#[case] name: &str) {
+    assert!(
+        validate_relative_path_fragment(name).is_err(),
+        "expected reject: {name:?}"
+    );
+}
+
+#[rstest]
+#[case("show.mkv")]
+#[case("Season 01/show - 01.mkv")]
+#[case("subdir/nested/show - 02.mkv")]
+#[case("./show.mkv")]
+#[case("Show Name [Group].mkv")]
+fn accepts_safe_relative_fragments(#[case] name: &str) {
+    assert!(
+        validate_relative_path_fragment(name).is_ok(),
+        "expected accept: {name:?}"
+    );
 }

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::AppState;
@@ -73,6 +73,41 @@ pub(crate) fn grab_claims_episode(
         || file_in_routes
         || grab_episode_numbers.is_empty()
         || grab_episode_numbers.contains(&raw_ep_num)
+}
+
+/// Validate an untrusted relative path fragment from a download client's
+/// file-list API (`DownloadClient::get_files`) before joining it onto a
+/// trusted base path.
+///
+/// `Path::join` with an absolute path **replaces** the base entirely
+/// rather than appending — `Path::new("/data").join("/etc/passwd")`
+/// resolves to `/etc/passwd`, not `/data/etc/passwd`. Likewise, parent-dir
+/// components walk up out of the base. A torrent's file metadata can put
+/// arbitrary strings in its file-list entries, so the post-processing
+/// import loop must reject any name that would escape the source base
+/// before composing the source path.
+///
+/// Cross-platform note: `Path::components` parses path syntax for the
+/// current target. On Unix, `C:\Windows\foo` is a single `Normal`
+/// component because `\` is not a separator — the raw-byte `\` check
+/// catches Windows-style paths even on a Unix build, so the validator
+/// behaves the same regardless of build target.
+pub(crate) fn validate_relative_path_fragment(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("empty path fragment");
+    }
+    if name.contains('\\') {
+        return Err("contains backslash (windows-style path separator)");
+    }
+    for component in Path::new(name).components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => return Err("contains parent-dir component"),
+            Component::RootDir => return Err("absolute path (starts with root)"),
+            Component::Prefix(_) => return Err("contains windows path prefix"),
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn is_video_file(name: &str) -> bool {
@@ -751,7 +786,58 @@ async fn import_torrent(
             }
         };
 
+        // Reject malicious file-list entries from the download client
+        // before composing the source path. `file.name` originates in
+        // torrent metadata and is fully attacker-controlled — without
+        // this guard, an entry like `/etc/passwd` (or `../../escape`)
+        // would let `Path::join` resolve outside `source_base` and the
+        // hardlink/copy/move op would touch a host file the user never
+        // intended to import. See issue #117.
+        if let Err(reason) = validate_relative_path_fragment(&file.name) {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Rejected suspicious file-list entry '{}' from grab #{}: {}",
+                    file.name, grab.id, reason
+                ),
+                &format!("hash={}", grab.hash),
+            )
+            .await;
+            continue;
+        }
+
         let src: PathBuf = Path::new(&source_base).join(&file.name);
+
+        // Defense-in-depth: after the join, canonicalize both sides and
+        // confirm the resolved source still lives under the resolved
+        // base. Catches symlink games (a `legit.mkv` entry that resolves
+        // to a symlink pointing at `/etc/passwd`) and any string-level
+        // oversight the validator above might miss. Permissive on
+        // canonicalize errors — the file may not yet exist on this
+        // node's view, in which case `do_file_op` surfaces the real I/O
+        // error downstream and there's nothing for an attacker to
+        // dereference anyway.
+        if let (Ok(canon_src), Ok(canon_base)) =
+            (src.canonicalize(), Path::new(&source_base).canonicalize())
+            && !canon_src.starts_with(&canon_base)
+        {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Rejected file '{}' from grab #{}: resolves outside source base \
+                     ({} -> {})",
+                    file.name,
+                    grab.id,
+                    canon_base.display(),
+                    canon_src.display()
+                ),
+                &format!("hash={}", grab.hash),
+            )
+            .await;
+            continue;
+        }
 
         let filename_only = Path::new(&file.name)
             .file_name()
