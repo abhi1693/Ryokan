@@ -415,6 +415,22 @@ pub async fn webhook_autobrr(
         // when the grab actually went to a non-default client.
         let _ =
             grabbed_torrents::set_download_client(&state.db, gid, Some(dispatch_client_id)).await;
+        // Issue #118 — fire `Grabbed` on the autobrr push path. No
+        // scoring pass runs (autobrr already filtered upstream), so
+        // `score = None`. Indexer resolves from the autobrr-supplied
+        // tracker → `indexers` row mapping in `indexer_id`.
+        let indexer =
+            crate::services::notifications::resolve_indexer_name(&state, indexer_id).await;
+        crate::services::notifications::emit_grabbed(
+            &state,
+            series.id,
+            ep_nums.first().copied().unwrap_or(0),
+            &payload.torrent_name,
+            indexer,
+            None,
+            Some(client.sonarr_impl_name().to_string()),
+        )
+        .await;
     }
 
     let outcome_label = match add_outcome {

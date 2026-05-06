@@ -214,6 +214,21 @@ pub async fn grab_batch_result(
                 Some(dispatch_client_id),
             )
             .await;
+            // Issue #118 — fire `Grabbed` for the interactive batch
+            // path. Episode number is the lowest in the parsed range
+            // (matches the existing single-i32 contract on the event).
+            let indexer =
+                crate::services::notifications::resolve_indexer_name(&state, indexer_id).await;
+            crate::services::notifications::emit_grabbed(
+                &state,
+                sid,
+                ep_nums.first().copied().unwrap_or(0),
+                &title,
+                indexer,
+                None,
+                Some(qbit.sonarr_impl_name().to_string()),
+            )
+            .await;
         }
         for ep_num in &ep_nums {
             let _ = episode_tags::record_grab(
@@ -455,6 +470,24 @@ pub async fn grab_interactive_result(
                 &state.db,
                 gid,
                 Some(dispatch_client_id),
+            )
+            .await;
+            // Issue #118 — fire `Grabbed` for the interactive
+            // single-episode path. Indexer resolved from the
+            // search-result row's `indexer_id`; score is None
+            // (interactive search runs scoring on the candidate
+            // list but the user picks the row, so the score
+            // wasn't load-bearing for the grab decision).
+            let indexer =
+                crate::services::notifications::resolve_indexer_name(&state, indexer_id).await;
+            crate::services::notifications::emit_grabbed(
+                &state,
+                sid,
+                episode_number,
+                &title,
+                indexer,
+                None,
+                Some(qbit.sonarr_impl_name().to_string()),
             )
             .await;
         }

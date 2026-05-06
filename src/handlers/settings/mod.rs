@@ -21,6 +21,7 @@ pub mod custom_formats;
 pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
+pub mod notifications;
 use custom_formats::ImportReviewView;
 
 /// Process-wide serializer for `config` row read-modify-write across
@@ -202,6 +203,22 @@ struct SettingsTemplate {
     /// alongside the torznab/newznab indexer rows. Empty until the
     /// user adds one via the bottom-of-tab form.
     direct_rss_feeds: Vec<crate::models::direct_rss_feeds::DirectRssFeed>,
+    /// Issue gh-121 — notification provider rows for Settings →
+    /// Notifications. Empty until the user adds the first one. Each
+    /// row is pre-projected by the notifications handler so the
+    /// template doesn't need to re-deserialize `config_json`.
+    notification_providers: Vec<notifications::ProviderView>,
+    /// Per-event matrix view for the inline edit form. When the page
+    /// renders without `?edit_id=`, this is the seed-default-on view
+    /// for a fresh create form. With `?edit_id=N`, this is the
+    /// loaded matrix for that provider so the user sees their
+    /// existing toggles pre-checked.
+    notification_event_toggles: Vec<notifications::EventToggleView>,
+    /// Resolved edit-target row for the inline edit form. None when
+    /// there's no `?edit_id=` query param or the id doesn't match
+    /// any current provider — the template renders the create form
+    /// in that case (matches the indexers / CF tab pattern).
+    notification_edit: Option<notifications::ProviderView>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -699,6 +716,7 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         // surface scaffolded; CRUD form lands in PR B alongside
         // the TorznabIndexer impl that needs caps probing on save.
         Some("indexers") => "indexers".to_string(),
+        Some("notifications") => "notifications".to_string(),
         // Phase 7 follow-up — the multi-client picker was promoted
         // out of the Connections tab into its own page so the cards
         // grid + add slot has the full width and isn't wedged below
@@ -901,6 +919,16 @@ async fn build_settings_template(
         .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
     let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
     let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
+    // Notifications tab — load every provider row + the matrix for
+    // the optional `?edit_id=` target. The matrix is also loaded
+    // in the no-edit case so the create-form's per-event checkboxes
+    // pre-check the conservative defaults (Grabbed / Imported /
+    // ImportFailed / ExternalSyncReLinkRequired) on a fresh install.
+    let notification_providers = notifications::load_provider_views(&state.db).await;
+    let notification_edit =
+        edit_id.and_then(|id| notification_providers.iter().find(|p| p.id == id).cloned());
+    let notification_event_toggles =
+        notifications::matrix_view(&state.db, notification_edit.as_ref().map(|p| p.id)).await;
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
@@ -923,6 +951,9 @@ async fn build_settings_template(
         first_usenet_client,
         direct_rss_feeds,
         cached_status,
+        notification_providers,
+        notification_event_toggles,
+        notification_edit,
     }
 }
 
@@ -1376,6 +1407,8 @@ pub async fn settings_submit(
             .await
             .unwrap_or_default();
         let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
+        let notification_providers = notifications::load_provider_views(&state.db).await;
+        let notification_event_toggles = notifications::matrix_view(&state.db, None).await;
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
@@ -1398,6 +1431,9 @@ pub async fn settings_submit(
             first_usenet_client,
             direct_rss_feeds,
             cached_status,
+            notification_providers,
+            notification_event_toggles,
+            notification_edit: None,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1523,6 +1559,9 @@ pub async fn settings_submit(
         first_usenet_client,
         direct_rss_feeds,
         cached_status,
+        notification_providers: notifications::load_provider_views(&state.db).await,
+        notification_event_toggles: notifications::matrix_view(&state.db, None).await,
+        notification_edit: None,
     };
     Html(template.render().unwrap_or_default())
 }

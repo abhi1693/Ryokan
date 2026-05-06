@@ -660,6 +660,28 @@ async fn run_auto_search_targets_with_upgrades(
                                     Some(dispatch_client_id),
                                 )
                                 .await;
+                                // Issue #118 — fire `Grabbed`. The
+                                // auto_search path has full context:
+                                // matched indexer (Nyaa-direct = None),
+                                // total CF score from the scoring pass,
+                                // dispatch client kind. This is the
+                                // most-instrumented call site on the
+                                // event taxonomy.
+                                let indexer = crate::services::notifications::resolve_indexer_name(
+                                    state,
+                                    result.indexer_id,
+                                )
+                                .await;
+                                crate::services::notifications::emit_grabbed(
+                                    state,
+                                    sid,
+                                    ep_nums.first().copied().unwrap_or(0),
+                                    &result.title,
+                                    indexer,
+                                    Some(result.score),
+                                    Some(qbit.sonarr_impl_name().to_string()),
+                                )
+                                .await;
                             }
                             for ep_num in &ep_nums {
                                 let _ = episode_tags::record_grab(

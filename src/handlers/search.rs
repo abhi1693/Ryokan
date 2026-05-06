@@ -402,6 +402,21 @@ pub async fn grab_release(
                         Some(dispatch_client_id),
                     )
                     .await;
+                    // Issue #118 — fire `Grabbed` for the manual
+                    // search-page path. Nyaa-direct (no indexer
+                    // attribution); the search page doesn't run a
+                    // scoring pass so `score = None`. `client_kind`
+                    // pulled from the resolved client handle.
+                    crate::services::notifications::emit_grabbed(
+                        &state,
+                        series.id,
+                        episode_numbers.first().copied().unwrap_or(0),
+                        &title,
+                        None,
+                        None,
+                        Some(client.sonarr_impl_name().to_string()),
+                    )
+                    .await;
                 }
 
                 // Populate episode_quality_tags so the series page

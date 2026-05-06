@@ -879,6 +879,23 @@ async fn main() {
             "/api/notifications/{id}/test",
             post(handlers::notifications::test_provider),
         )
+        // Issue gh-121 — notification provider CRUD via form-POST.
+        // Settings → Notifications tab; same shape as
+        // /settings/indexers/* and /settings/groups/*. Cache rebuild
+        // happens inside the upsert / delete handlers so the very
+        // next dispatch sees the new shape.
+        .route(
+            "/settings/notifications/upsert",
+            post(handlers::settings::notifications::settings_notifications_upsert),
+        )
+        .route(
+            "/settings/notifications/delete",
+            post(handlers::settings::notifications::settings_notifications_delete),
+        )
+        .route(
+            "/settings/notifications/{id}/edit-form",
+            get(handlers::settings::notifications::settings_notifications_edit_form),
+        )
         .route(
             "/api/download-clients/section",
             get(handlers::settings::download_clients::settings_download_clients_section),

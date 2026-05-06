@@ -23,6 +23,7 @@
     <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
     <a href="/settings?tab=downloads" class="system-tab {% if tab == "downloads" %}active{% endif %}">Download Clients</a>
     <a href="/settings?tab=indexers" class="system-tab {% if tab == "indexers" %}active{% endif %}">Indexers</a>
+    <a href="/settings?tab=notifications" class="system-tab {% if tab == "notifications" %}active{% endif %}">Notifications</a>
     <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Preferred Quality &amp; Releases</a>
     <a href="/settings?tab=custom_formats" class="system-tab {% if tab == "custom_formats" %}active{% endif %}">Custom Formats</a>
     <a href="/settings?tab=groups" class="system-tab {% if tab == "groups" %}active{% endif %}">Release Groups</a>
@@ -92,6 +93,12 @@
 {% if tab == "indexers" %}
 <div class="settings-tab-panel active">
 {%~ include "partials/settings/indexers.html" ~%}
+</div>
+{% endif %}
+
+{% if tab == "notifications" %}
+<div class="settings-tab-panel active">
+{%~ include "partials/settings/notifications.html" ~%}
 </div>
 {% endif %}
 

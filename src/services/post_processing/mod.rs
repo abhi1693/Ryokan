@@ -1234,6 +1234,21 @@ async fn import_torrent(
                     ),
                 )
                 .await;
+                // Issue #118 — fire `Imported` per-file. The classifier
+                // re-pass below is what populates `episode_quality_tags.quality_tag`,
+                // but for the notification we want the just-resolved
+                // value. Lookup happens inside `emit_imported` against
+                // the live row; if classification hasn't landed yet
+                // (UNKNOWN row from grab time) the event ships an empty
+                // tag rather than skipping.
+                crate::services::notifications::emit_imported(
+                    state,
+                    target_series_id,
+                    ep_num,
+                    &src.display().to_string(),
+                    &dest_video.display().to_string(),
+                )
+                .await;
 
                 // Post-download re-classification (Layers 5 + 6). Runs ffprobe
                 // on the landed file and walks the series directory for BD
@@ -1273,6 +1288,26 @@ async fn import_torrent(
                 // `scan_library_for_unclassified` uses for externally
                 // imported files), UPDATE in-place via
                 // `update_classification` otherwise.
+                // Issue #118 — fire `ClassifierNeedsReview` when the
+                // post-download classifier flips this row into needs-
+                // review. Default-off in the per-event matrix because
+                // a reclassify sweep can produce hundreds of rows in
+                // a short window; users who want it opt in. The emit
+                // is keyed on `post.needs_review` (the in-memory
+                // ClassificationResult), not the DB row, since the
+                // helper below would have to re-read.
+                if post.needs_review {
+                    let verdict = post.label();
+                    crate::services::notifications::emit_classifier_needs_review(
+                        state,
+                        target_series_id,
+                        ep_num,
+                        post.confidence as i32,
+                        &verdict,
+                    )
+                    .await;
+                }
+
                 let persist_result = if row_exists {
                     // `update_classification` stamps
                     // classification_attempted_at internally.
@@ -1370,6 +1405,19 @@ async fn import_torrent(
                     &state.db,
                     LogCategory::PostProcess,
                     &format!("File op failed for '{}'", filename_only),
+                    &e.to_string(),
+                )
+                .await;
+                // Issue #118 — fire `ImportFailed` per-file. Captures
+                // the file-op error string (cross-fs copy failure,
+                // permission denied, disk full, ENOSPC). Episode
+                // number is known here because the `claims_this_episode`
+                // guard above resolved it.
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
                     &e.to_string(),
                 )
                 .await;

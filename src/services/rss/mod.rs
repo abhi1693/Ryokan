@@ -1160,6 +1160,31 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
                         Some(dispatch_client_id),
                     )
                     .await;
+                    // Issue #118 — fire `Grabbed`. RSS path doesn't
+                    // run a scoring pass (feed → match-by-title is
+                    // direct), so `score = None`. Indexer attribution
+                    // is the source's name: indexer-RSS rows carry an
+                    // indexers-table id we resolve via the cache;
+                    // direct user-feed rows surface their feed name
+                    // verbatim; Nyaa-direct stays None.
+                    let indexer = match &cand.item.source {
+                        RssSource::Nyaa => None,
+                        RssSource::UserFeed { name, .. } => Some(name.clone()),
+                        RssSource::Indexer { id, .. } => {
+                            crate::services::notifications::resolve_indexer_name(state, Some(*id))
+                                .await
+                        }
+                    };
+                    crate::services::notifications::emit_grabbed(
+                        state,
+                        cand.found.series.id,
+                        ep_list.first().copied().unwrap_or(0),
+                        &cand.item.title,
+                        indexer,
+                        None,
+                        Some(client.sonarr_impl_name().to_string()),
+                    )
+                    .await;
                 }
                 // Reuse the pre-disk classification computed earlier
                 // during the upgrade gate (stashed on the pending

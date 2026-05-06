@@ -282,6 +282,22 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Resolve `indexer_id` to its display name via the live indexer
+/// cache snapshot. Returns `None` for `indexer_id = None` (Nyaa-direct
+/// path) and for ids that aren't currently in the cache (recently
+/// deleted indexer). Centralized so the per-call-site `emit_grabbed`
+/// wiring doesn't have to repeat the snapshot-walk pattern.
+pub async fn resolve_indexer_name(
+    state: &crate::AppState,
+    indexer_id: Option<i64>,
+) -> Option<String> {
+    let id = indexer_id?;
+    let snap = state.indexers.read().await.clone();
+    snap.iter()
+        .find(|i| i.id() == id)
+        .map(|i| i.name().to_string())
+}
+
 /// Convenience: build a `Grabbed` event from the call-site context
 /// and dispatch it through the cache. Centralizes the field shape so
 /// every call site builds the same struct — adding a field on the
@@ -354,6 +370,173 @@ pub async fn emit_grabbed(
             indexer,
             score,
             client_kind,
+        },
+    );
+}
+
+/// Convenience: dispatch an `Imported` event from
+/// `services::post_processing` after a per-file copy/hardlink/move
+/// succeeds. Resolves `series_title` and `quality_tag` from the DB
+/// the same way `emit_grabbed` resolves `series_title`. The event is
+/// fire-and-forget on top of the dispatch task so the post-processing
+/// loop doesn't block on receiver latency.
+#[allow(clippy::too_many_arguments)]
+pub async fn emit_imported(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: i32,
+    source_path: &str,
+    dest_path: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let title: Option<String> = sqlx::query_scalar(
+        "SELECT CASE
+                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
+                  WHEN COALESCE(title_english, '') <> '' THEN title_english
+                  WHEN COALESCE(title_native, '') <> '' THEN title_native
+                  ELSE title
+                END
+         FROM series WHERE id = ?",
+    )
+    .bind(series_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s: &String| !s.is_empty());
+    let Some(series_title) = title else {
+        tracing::debug!(
+            "notifications::emit_imported: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    // Quality tag is best-effort — the row may not exist for an
+    // unmonitored episode the user grabbed manually, in which case
+    // we surface an empty tag rather than skipping the event.
+    let quality_tag: String = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(quality_tag, '') FROM episode_quality_tags
+             WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::Imported {
+            series_id,
+            series_title,
+            episode_number,
+            source_path: source_path.to_string(),
+            dest_path: dest_path.to_string(),
+            quality_tag,
+        },
+    );
+}
+
+/// Convenience: dispatch an `ImportFailed` event from
+/// `services::post_processing`. Fired on per-file failures (couldn't
+/// parse episode number, file not video, fs op error). `episode_number`
+/// is optional because some failure paths happen before parse.
+pub async fn emit_import_failed(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: Option<i32>,
+    source_path: &str,
+    reason: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let title: Option<String> = sqlx::query_scalar(
+        "SELECT CASE
+                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
+                  WHEN COALESCE(title_english, '') <> '' THEN title_english
+                  WHEN COALESCE(title_native, '') <> '' THEN title_native
+                  ELSE title
+                END
+         FROM series WHERE id = ?",
+    )
+    .bind(series_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s: &String| !s.is_empty());
+    let Some(series_title) = title else {
+        tracing::debug!(
+            "notifications::emit_import_failed: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::ImportFailed {
+            series_id,
+            series_title,
+            episode_number,
+            source_path: source_path.to_string(),
+            reason: reason.to_string(),
+        },
+    );
+}
+
+/// Convenience: dispatch a `ClassifierNeedsReview` event from
+/// `models::episode_tags::update_classification` when the row being
+/// written has `needs_review = true`. Single write site; one event
+/// per row that flips into the needs-review state. Default-off in
+/// the per-event matrix because classifier reclassify sweeps can
+/// produce hundreds of rows in a short window.
+pub async fn emit_classifier_needs_review(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: i32,
+    confidence: i32,
+    verdict_summary: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let title: Option<String> = sqlx::query_scalar(
+        "SELECT CASE
+                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
+                  WHEN COALESCE(title_english, '') <> '' THEN title_english
+                  WHEN COALESCE(title_native, '') <> '' THEN title_native
+                  ELSE title
+                END
+         FROM series WHERE id = ?",
+    )
+    .bind(series_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s: &String| !s.is_empty());
+    let Some(series_title) = title else {
+        tracing::debug!(
+            "notifications::emit_classifier_needs_review: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::ClassifierNeedsReview {
+            series_id,
+            series_title,
+            episode_number,
+            confidence,
+            verdict_summary: verdict_summary.to_string(),
         },
     );
 }
