@@ -53,7 +53,8 @@ use tokio::sync::RwLock;
 use services::{
     custom_formats::CompiledCfCache, download_client::DownloadClient, indexers::Indexer,
     interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
-    oauth_state::OAuthStateStore, progress::ProgressRegistry, task_registry::TaskRegistry,
+    notifications::NotificationProviders, oauth_state::OAuthStateStore, progress::ProgressRegistry,
+    task_registry::TaskRegistry,
 };
 
 /// PR #107 review fix #4: cached `Vec<Arc<dyn Indexer>>` swapped on
@@ -188,6 +189,16 @@ pub struct AppState {
     /// cache for the affected id so a fresh edit re-probes
     /// immediately).
     pub dc_status_cache: DcStatusCache,
+    /// Issue #118 — outbound notification providers cache. Same
+    /// swap-on-write shape as `custom_formats` / `indexers` /
+    /// `download_clients`: outer `RwLock` owns the swap; the inner
+    /// `Arc<Vec<_>>` is cheap-cloned out on every dispatch so the
+    /// read lock releases before the per-provider fan-out begins.
+    /// Foundation issue ships an always-empty cache (no provider
+    /// impls yet) — `services::notifications::dispatch` early-
+    /// returns on empty so every hook point is a no-op until the
+    /// per-provider issues (#119 webhook, #120 Discord) land.
+    pub notification_providers: NotificationProviders,
 }
 
 /// `(probed_at, version-or-error)` keyed by `download_clients.id`.
@@ -470,6 +481,7 @@ mod resolve_grab_client_tests {
             start_time: chrono::Utc::now(),
             tasks: crate::services::task_registry::TaskRegistry::new(),
             dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            notification_providers: crate::services::notifications::empty_cache(),
         }
     }
 

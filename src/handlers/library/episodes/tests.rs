@@ -848,6 +848,7 @@ mod cancel_pending_sab_e2e {
                 .expect("epoch"),
             tasks: crate::services::task_registry::TaskRegistry::new(),
             dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            notification_providers: crate::services::notifications::empty_cache(),
         }
     }
 

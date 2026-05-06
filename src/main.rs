@@ -519,6 +519,7 @@ async fn main() {
         start_time: chrono::Utc::now(),
         tasks: services::task_registry::TaskRegistry::new(),
         dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        notification_providers: services::notifications::empty_cache(),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.

@@ -212,14 +212,25 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
             // Settings UI can render the "Re-link required" banner.
             // Other failure modes (rate-limit, network timeout)
             // leave the flag alone — they're transient.
-            if is_auth_rejection(&e)
-                && let Err(write_err) =
+            if is_auth_rejection(&e) {
+                if let Err(write_err) =
                     external_accounts::update_last_sync_auth_failed(&state.db, account.id, true)
                         .await
-            {
-                tracing::warn!(
-                    "failed to set last_sync_auth_failed for account_id={}: {write_err}",
-                    account.id
+                {
+                    tracing::warn!(
+                        "failed to set last_sync_auth_failed for account_id={}: {write_err}",
+                        account.id
+                    );
+                }
+                // Issue #118 — fire the re-link-required notification at
+                // the same point the sticky flag flips on. Default-on
+                // event policy (this is something the user genuinely
+                // needs to know) — Settings UI's "Re-link required"
+                // banner already fires, but a Discord ping is what
+                // gets a user back into the app to actually click it.
+                crate::services::notifications::emit_external_sync_relink_required(
+                    state,
+                    &account.provider,
                 );
             }
             return Err(e);

@@ -34,6 +34,7 @@ use crate::services::anilist;
 use crate::services::auto_expand::{self, AutoExpandGrabContext};
 use crate::services::auto_search;
 use crate::services::logger;
+use crate::services::notifications;
 use crate::services::source::ClassificationResult;
 
 /// Write the `grabbed_torrents` row and kick off sibling auto-expand
@@ -160,6 +161,27 @@ pub async fn commit_grab_and_expand(
             return None;
         }
     };
+
+    // Issue #118 — fire `NotificationEvent::Grabbed` for this commit.
+    // No-op early-return when no providers are configured (the
+    // foundation PR ships an always-empty cache); subsequent provider
+    // PRs flip this from a tree-fall into a real outbound dispatch
+    // without further changes here. Indexer name + score aren't
+    // resolvable from the picker/walkaway path's `PendingGrab` row
+    // (the modal doesn't carry the auto_search scoring context);
+    // both default to None. Episode number is the lowest in the
+    // parsed range — single-episode grabs use it directly, batches
+    // pick the first.
+    notifications::emit_grabbed(
+        state,
+        series_id,
+        ep_nums.first().copied().unwrap_or(0),
+        release_title,
+        None,
+        None,
+        Some(row.client_kind.clone()),
+    )
+    .await;
 
     // Fire-and-forget the sibling auto-expand. Don't block the HTTP
     // response — the transitive relation walk can take several
