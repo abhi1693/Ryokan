@@ -54,7 +54,7 @@ async fn payload_carries_username_and_embed_envelope() {
     let embeds = body["embeds"].as_array().expect("embeds is array");
     assert_eq!(embeds.len(), 1, "exactly one embed per webhook");
     let e = &embeds[0];
-    assert_eq!(e["title"], "Grabbed: Mushoku Tensei S01E07");
+    assert_eq!(e["title"], "Grabbed: Mushoku Tensei E07");
     assert_eq!(e["color"], 5_763_719_u32);
     assert!(e["fields"].is_array());
     assert!(

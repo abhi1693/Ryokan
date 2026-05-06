@@ -1,11 +1,12 @@
 //! Notifications handler surface.
 //!
 //! Settings UI's "Send test" button lands here. Resolves the live
-//! provider via cache lookup (the user just saved it; the save
-//! handler fired `rebuild_notification_providers_cache`),
-//! synthesizes a `Health` event, and returns the receiver's HTTP
-//! status + truncated body inline so users can debug from the
-//! Settings UI without opening browser devtools.
+//! provider via cache lookup (gh-121 will wire the save handler to
+//! call `rebuild_notification_providers_cache` so a freshly-saved
+//! row is visible immediately; until then the cache is only
+//! populated on startup), synthesizes a `Health` event, and returns
+//! the receiver's HTTP status + truncated body inline so users can
+//! debug from the Settings UI without opening browser devtools.
 //!
 //! Future endpoints (per-provider CRUD, the matrix-toggle endpoints
 //! powering issue #121's Settings UI) land as siblings here.
@@ -43,7 +44,9 @@ pub async fn test_provider(
     // Resolve through the live cache first — the cached snapshot is
     // what the dispatcher would actually use, so a "provider not in
     // cache" 404 is the most accurate user signal (row may be
-    // disabled, or just deleted from another tab).
+    // disabled, just deleted from another tab, or saved before
+    // gh-121 wires settings-driven rebuilds — currently only the
+    // boot-time rebuild populates the cache).
     let providers = state.notification_providers.read().await.clone();
     let cached = providers
         .iter()

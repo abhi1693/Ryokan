@@ -96,7 +96,7 @@ pub trait NotificationProvider: Send + Sync {
 /// both for the generic webhook (body is whatever the receiver echoes)
 /// and Discord (success bodies are usually empty `204 No Content`,
 /// failure bodies are JSON error envelopes).
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct TestSendResult {
     pub status: u16,
     pub body: String,
@@ -133,9 +133,15 @@ pub fn dispatch(cache: &NotificationProviders, db: SqlitePool, event: Notificati
         if providers.is_empty() {
             return;
         }
-        // Build per-provider futures concurrently. Each runs through
-        // its own matrix-check + send + timeout + logging path so a
-        // panic / error on one doesn't poison the others.
+        // Build per-provider futures concurrently. Each runs in its
+        // own `tokio::spawn` for **panic-isolation specifically**:
+        // `join_all` would propagate a panic from any provider up to
+        // the outer dispatch task and abort the remaining concurrent
+        // sends. The JoinHandle boundary catches the panic so a
+        // misbehaving provider impl can't take its peers down with
+        // it. Per-provider Err returns and timeouts are already
+        // handled cooperatively inside `fan_out_one`; the spawn is
+        // strictly for the panic case.
         let mut handles = Vec::with_capacity(providers.len());
         for provider in providers.iter().cloned() {
             let db = db.clone();
@@ -260,11 +266,18 @@ async fn fan_out_one(
     }
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
+/// Char-iterator-based truncation, UTF-8-safe at multi-byte
+/// boundaries. Returns `s` unchanged when `s.chars().count() <= max`,
+/// otherwise the first `max - 1` chars plus an ellipsis. Shared
+/// across the dispatcher's log-line truncation, the webhook
+/// receiver-body cap, and Discord's per-field embed limits — every
+/// site has the same shape and the same UTF-8-safety requirement
+/// (anime release titles legitimately contain CJK characters).
+pub fn truncate(s: &str, max: usize) -> String {
+    if max == 0 || s.chars().count() <= max {
         return s.to_string();
     }
-    let mut out: String = s.chars().take(max).collect();
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
 }
@@ -275,11 +288,16 @@ fn truncate(s: &str, max: usize) -> String {
 /// event later means updating one place + one signature instead of
 /// chasing every caller.
 ///
-/// `series_title` is fetched lazily from `series.title_romaji` falling
-/// back to `title_native` so callers don't have to `JOIN` it in just
-/// for the event. Failure to resolve the title logs at debug and
-/// short-circuits the dispatch — the event would render with an
-/// empty title which is a worse UX signal than no event at all.
+/// `series_title` is fetched lazily from the `series` row, walking
+/// the romaji → english → native → bare-title chain so callers don't
+/// have to `JOIN` it in just for the event. The chain matches the
+/// classifier's display preference; `config.title_language` isn't
+/// honored deliberately — the event JSON is a stable wire contract,
+/// and re-deriving the user's localization preference per-receiver
+/// belongs in the receiver. Failure to resolve a non-empty title
+/// (missing series row OR every title column empty) logs at debug
+/// and short-circuits the dispatch — emitting with an empty title
+/// is a worse UX signal than no event at all.
 #[allow(clippy::too_many_arguments)]
 pub async fn emit_grabbed(
     state: &crate::AppState,
@@ -294,6 +312,16 @@ pub async fn emit_grabbed(
     if providers.is_empty() {
         return;
     }
+    // The CASE expression always returns SOME string for an existing
+    // row (falling through to the bare `title` column), but every
+    // column can be the empty string for a row that was added through
+    // a partial-fetch path before any title source resolved. The
+    // outer `.filter(|s| !s.is_empty())` collapses that case to None
+    // so the dispatch short-circuits rather than emitting with an
+    // empty title — same shape `discord::resolve_cover_url` uses for
+    // `cover_url`. Without the filter, query_scalar returns
+    // `Some("")` and the `let Some(...)` arm proceeds with an empty
+    // title.
     let title: Option<String> = sqlx::query_scalar(
         "SELECT CASE
                   WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
@@ -307,7 +335,8 @@ pub async fn emit_grabbed(
     .fetch_optional(&state.db)
     .await
     .ok()
-    .flatten();
+    .flatten()
+    .filter(|s: &String| !s.is_empty());
     let Some(series_title) = title else {
         tracing::debug!(
             "notifications::emit_grabbed: series #{series_id} not found, skipping dispatch"
@@ -352,11 +381,20 @@ pub fn emit_external_sync_relink_required(state: &crate::AppState, provider: &st
 /// before installing an empty snapshot. The shape is in place so
 /// follow-up PRs only need to add a per-kind constructor arm here.
 pub async fn rebuild_notification_providers_cache(cache: &NotificationProviders, db: &SqlitePool) {
+    // On DB-load failure, keep the existing snapshot live. A
+    // transient blip (lock contention, brief WAL checkpoint stall,
+    // a concurrent migration) shouldn't silence every notification
+    // provider until the next rebuild — we'd rather keep delivering
+    // events with the last-known config than no events at all. The
+    // previously-installed snapshot stays valid until the next
+    // successful rebuild after a settings save.
     let rows = match store::list_enabled(db).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("notification_providers: failed to load from DB: {e}");
-            Vec::new()
+            tracing::warn!(
+                "notification_providers: failed to load from DB; keeping previous snapshot: {e}"
+            );
+            return;
         }
     };
     // Per-kind constructor dispatch. New `kind` strings land here
@@ -401,7 +439,7 @@ pub async fn rebuild_notification_providers_cache(cache: &NotificationProviders,
             },
             other => {
                 tracing::warn!(
-                    "notification_providers: skipping #{} ({}) — unknown kind {:?}",
+                    "notification_providers: skipping #{} ({}); unknown kind {:?}",
                     row.id,
                     row.name,
                     other,
@@ -699,9 +737,27 @@ mod tests {
         // The `Notifications` log lines pass receiver error bodies
         // through `truncate`. A naive byte-slice would panic on a
         // multi-byte UTF-8 boundary; the chars-based form must hold.
+        // Output must NEVER exceed `max` chars — receivers like
+        // Discord enforce hard caps (1024 for embed field values),
+        // so a `max + 1` shape would 400 the request right at the
+        // boundary case.
         let long = "あいうえお".repeat(100);
         let out = truncate(&long, 5);
         assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 6);
+        assert_eq!(out.chars().count(), 5);
+    }
+
+    #[test]
+    fn truncate_passes_short_strings_through_unchanged() {
+        assert_eq!(truncate("hi", 100), "hi");
+        assert_eq!(truncate("", 100), "");
+    }
+
+    #[test]
+    fn truncate_zero_max_is_passthrough() {
+        // max=0 → return unchanged (don't crash). Defensive — no
+        // call site uses 0 today, but the saturating_sub and the
+        // edge condition cost nothing.
+        assert_eq!(truncate("hi", 0), "hi");
     }
 }

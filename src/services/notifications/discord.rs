@@ -13,7 +13,7 @@
 //!   "username": "Ryokan",
 //!   "allowed_mentions": {"parse": []},
 //!   "embeds": [{
-//!     "title": "Grabbed: Mushoku Tensei S01E07",
+//!     "title": "Grabbed: Mushoku Tensei E07",
 //!     "color": 5763719,
 //!     "thumbnail": {"url": "https://…cover.jpg"},
 //!     "fields": [...],
@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 use sqlx::SqlitePool;
 use std::time::Duration;
 
-use super::{NotificationEvent, NotificationProvider, TestSendResult};
+use super::{NotificationEvent, NotificationProvider, TestSendResult, truncate};
 use crate::services::notifications::webhook::WEBHOOK_HTTP_CLIENT;
 
 /// Discord embed limits per the API spec. Pinned in code so a
@@ -222,7 +222,7 @@ async fn post_payload(webhook_url: &str, payload: &Value) -> Result<TestSendResu
         return Err(format!(
             "Discord 429 (retry-after={}s): {}",
             retry_after.as_secs(),
-            truncate_to(&body, RESPONSE_BODY_LOG_CAP)
+            truncate(&body, RESPONSE_BODY_LOG_CAP)
         ));
     }
     let status_u16 = status.as_u16();
@@ -230,13 +230,13 @@ async fn post_payload(webhook_url: &str, payload: &Value) -> Result<TestSendResu
     if status.is_success() {
         Ok(TestSendResult {
             status: status_u16,
-            body: truncate_to(&body, RESPONSE_BODY_LOG_CAP),
+            body: truncate(&body, RESPONSE_BODY_LOG_CAP),
         })
     } else {
         Err(format!(
             "Discord {}: {}",
             status_u16,
-            truncate_to(&body, RESPONSE_BODY_LOG_CAP)
+            truncate(&body, RESPONSE_BODY_LOG_CAP)
         ))
     }
 }
@@ -265,7 +265,7 @@ pub fn build_payload(event: &NotificationEvent, cover_url: Option<&str>) -> Valu
     let color = color_for(event);
     let fields = fields_for(event);
     let mut embed = json!({
-        "title": truncate_to(&title, EMBED_TITLE_MAX),
+        "title": truncate(&title, EMBED_TITLE_MAX),
         "color": color,
         "fields": fields,
         "footer": {"text": format!("Ryokan v{}", env!("CARGO_PKG_VERSION"))},
@@ -285,30 +285,37 @@ pub fn build_payload(event: &NotificationEvent, cover_url: Option<&str>) -> Valu
 }
 
 fn title_for(event: &NotificationEvent) -> String {
+    // Anime is overwhelmingly absolute-numbered (one show = ep 1..N
+    // across cours, no per-season reset), so the Sonarr-style
+    // `S01E07` shape reads weird against the source material's own
+    // marketing — `Mushoku Tensei S2 Part 2 ep 47` showing up as
+    // `S01E47` is technically true but useless. Drop the `S01E`
+    // prefix entirely; `E07` matches how anime is referred to in
+    // every fansub release group, every tracker, every Nyaa search.
     match event {
         NotificationEvent::Grabbed {
             series_title,
             episode_number,
             ..
-        } => format!("Grabbed: {series_title} S01E{:02}", episode_number),
+        } => format!("Grabbed: {series_title} E{:02}", episode_number),
         NotificationEvent::Imported {
             series_title,
             episode_number,
             ..
-        } => format!("Imported: {series_title} S01E{:02}", episode_number),
+        } => format!("Imported: {series_title} E{:02}", episode_number),
         NotificationEvent::ImportFailed {
             series_title,
             episode_number,
             ..
         } => match episode_number {
-            Some(n) => format!("Import failed: {series_title} S01E{:02}", n),
+            Some(n) => format!("Import failed: {series_title} E{:02}", n),
             None => format!("Import failed: {series_title}"),
         },
         NotificationEvent::ClassifierNeedsReview {
             series_title,
             episode_number,
             ..
-        } => format!("Needs review: {series_title} S01E{:02}", episode_number),
+        } => format!("Needs review: {series_title} E{:02}", episode_number),
         NotificationEvent::IndexerDown { indexer_name, .. } => {
             format!("Indexer down: {indexer_name}")
         }
@@ -397,7 +404,7 @@ fn fields_for(event: &NotificationEvent) -> Vec<Value> {
 fn field(name: &str, value: &str, inline: bool) -> Value {
     json!({
         "name": name,
-        "value": truncate_to(value, EMBED_FIELD_VALUE_MAX),
+        "value": truncate(value, EMBED_FIELD_VALUE_MAX),
         "inline": inline,
     })
 }
@@ -412,20 +419,6 @@ fn code_wrap(s: &str) -> String {
     }
     let escaped = s.replace('`', "\\`");
     format!("`{escaped}`")
-}
-
-/// Truncate at char-boundary to `max` characters. UTF-8-safe.
-/// Returns `s` unchanged if `s.chars().count() ≤ max`, else the
-/// first `max - 1` chars + `…`. Pinned because the byte-slice
-/// shape would panic on multi-byte boundaries (anime titles in
-/// `series_title` legitimately contain CJK chars).
-pub fn truncate_to(s: &str, max: usize) -> String {
-    if max == 0 || s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -479,7 +472,7 @@ mod tests {
         assert_eq!(p["username"], "Ryokan");
         assert_eq!(p["allowed_mentions"]["parse"].as_array().unwrap().len(), 0);
         let embed = &p["embeds"][0];
-        assert_eq!(embed["title"], "Grabbed: Mushoku Tensei S01E07");
+        assert_eq!(embed["title"], "Grabbed: Mushoku Tensei E07");
         assert_eq!(embed["color"], COLOR_GRABBED_OR_IMPORTED);
         let fields = embed["fields"].as_array().unwrap();
         assert!(!fields.is_empty(), "fields must be populated");
@@ -664,20 +657,6 @@ mod tests {
             }),
             16_705_372
         );
-    }
-
-    #[test]
-    fn truncate_to_handles_unicode_grapheme_count() {
-        let s = "あいうえお".repeat(60);
-        let out = truncate_to(&s, 5);
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 5);
-    }
-
-    #[test]
-    fn truncate_to_short_string_passes_through_unchanged() {
-        assert_eq!(truncate_to("hello", 100), "hello");
-        assert_eq!(truncate_to("", 100), "");
     }
 
     #[test]

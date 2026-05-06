@@ -28,7 +28,7 @@ use sha2::Sha256;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{NotificationEvent, NotificationProvider, TestSendResult};
+use super::{NotificationEvent, NotificationProvider, TestSendResult, truncate};
 
 /// 10s. Notifications are tiny POSTs and a slow receiver isn't worth
 /// waiting for. Distinct from the 30s RSS timeout because the request
@@ -129,6 +129,34 @@ where
     deserializer.deserialize_any(HeadersVisitor)
 }
 
+/// Save-time custom-header validator. Run alongside `validate_url`
+/// in the settings save path and in `from_row` so a misconfigured
+/// header (trailing space in name, invalid bytes in value) fails
+/// loudly once at config load — vs. firing a `tracing::warn` per
+/// dispatch attempt afterward, which is the previous shape.
+///
+/// Reserved header names (`Content-Type`, `X-Ryokan-Signature`)
+/// are rejected at this layer too so the user sees a save-time
+/// error rather than a silent runtime drop.
+pub fn validate_headers(headers: &[(String, String)]) -> Result<(), String> {
+    for (k, v) in headers {
+        let lower = k.to_ascii_lowercase();
+        if lower == "content-type" || lower == "x-ryokan-signature" {
+            return Err(format!(
+                "header {k:?} is reserved by Ryokan and can't be overridden \
+                 (Content-Type and X-Ryokan-Signature are load-bearing)"
+            ));
+        }
+        if HeaderName::try_from(k.as_str()).is_err() {
+            return Err(format!("invalid header name {k:?}"));
+        }
+        if HeaderValue::try_from(v).is_err() {
+            return Err(format!("invalid header value for {k:?}"));
+        }
+    }
+    Ok(())
+}
+
 /// Save-time URL validator. Settings save handler invokes this
 /// before persisting the row. **Doesn't** test connectivity —
 /// receivers behind firewalls / private networks legitimately
@@ -184,6 +212,7 @@ impl WebhookProvider {
         let config: WebhookConfig = serde_json::from_str(config_json)
             .map_err(|e| format!("invalid webhook config_json: {e}"))?;
         validate_url(&config.url)?;
+        validate_headers(&config.headers)?;
         Ok(Self::new(id, name, config))
     }
 }
@@ -295,18 +324,29 @@ fn build_request(
 
     // Custom headers added last via `insert` so they can override
     // anything except the load-bearing `Content-Type` and
-    // `X-Ryokan-Signature`. We don't enforce that exclusion at the
-    // type level — a user who wants to override `Content-Type` is
-    // choosing to break the wire contract on purpose. Settings UI
-    // surfaces a "this header is reserved" warning; the runtime
-    // applies what's configured.
+    // `X-Ryokan-Signature` — those two are excluded explicitly
+    // below. `Content-Type` overrides would break receivers that
+    // expect JSON; `X-Ryokan-Signature` overrides would silently
+    // invalidate HMAC verification (the user-supplied value would
+    // overwrite our computed signature, and the receiver's HMAC
+    // check fails with no obvious cause). User-configured override
+    // attempts log a warn so a misconfigured Settings save surfaces
+    // in console rather than mysteriously breaking signed receivers.
+    //
+    // Header names are pre-validated at config-load time via
+    // `WebhookConfig::validate_headers`, so the `try_from` arms
+    // below are defense-in-depth; a hand-edited DB row that
+    // bypassed validation still won't crash the send.
     for (k, v) in &config.headers {
+        let lower = k.to_ascii_lowercase();
+        if lower == "content-type" || lower == "x-ryokan-signature" {
+            tracing::warn!(
+                "webhook: ignoring user override of reserved header {k:?} \
+                 (Content-Type and X-Ryokan-Signature are load-bearing for the wire contract)"
+            );
+            continue;
+        }
         let Ok(name) = HeaderName::try_from(k.as_str()) else {
-            // Skip headers whose name doesn't parse. Log via
-            // tracing only — the dispatch path's outer logger is
-            // not reachable from here, and a user who configured
-            // `:invalid:` as a header name shouldn't crash the
-            // send.
             tracing::warn!("webhook: skipping invalid header name {k:?}");
             continue;
         };
@@ -373,15 +413,6 @@ fn mint_delivery_id() -> String {
     // generator.
     let bytes: [u8; 16] = rand::random();
     hex::encode(bytes)
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let mut out: String = s.chars().take(max).collect();
-    out.push('…');
-    out
 }
 
 #[cfg(test)]
@@ -468,17 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_handles_unicode_grapheme_count() {
-        // Same primitive as the dispatcher's logger truncate; pinned
-        // here too because the receiver body can be arbitrary bytes
-        // that still parse as UTF-8.
-        let long = "あいうえお".repeat(60);
-        let out = truncate(&long, 5);
-        assert!(out.ends_with('…'));
-        assert_eq!(out.chars().count(), 6);
-    }
-
-    #[test]
     fn from_row_rejects_invalid_config_json() {
         let r = WebhookProvider::from_row(1, "n".into(), "{not valid json");
         assert!(r.is_err());
@@ -490,6 +510,53 @@ mod tests {
         // settings handler shouldn't survive the cache rebuild with
         // a foot-gun URL.
         let r = WebhookProvider::from_row(1, "n".into(), r#"{"url":"file:///etc/passwd"}"#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn validate_headers_accepts_normal_user_headers() {
+        validate_headers(&[
+            ("Authorization".into(), "Bearer abc".into()),
+            ("X-Custom-Tag".into(), "ryokan-prod".into()),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_headers_rejects_invalid_name_bytes() {
+        // HTTP-spec-illegal bytes in header names — pinned so a
+        // user save with `:invalid:` as a header name fails at
+        // save time rather than at every dispatch.
+        assert!(validate_headers(&[(":invalid:".into(), "ok".into())]).is_err());
+        assert!(validate_headers(&[("with space".into(), "ok".into())]).is_err());
+    }
+
+    #[test]
+    fn validate_headers_rejects_invalid_value_bytes() {
+        // Header values can't contain CR/LF (HTTP request smuggling
+        // primitive). HeaderValue::try_from rejects.
+        assert!(validate_headers(&[("X-A".into(), "line1\r\nline2".into())]).is_err());
+    }
+
+    #[test]
+    fn validate_headers_rejects_reserved_names() {
+        // Reserved-name override attempts must fail at save time
+        // rather than getting silently dropped at runtime — the
+        // user gets immediate feedback about why their custom
+        // Content-Type isn't taking effect.
+        assert!(validate_headers(&[("Content-Type".into(), "text/plain".into())]).is_err());
+        assert!(validate_headers(&[("content-type".into(), "text/plain".into())]).is_err());
+        assert!(validate_headers(&[("X-Ryokan-Signature".into(), "sha256=00".into())]).is_err());
+        assert!(validate_headers(&[("x-ryokan-signature".into(), "sha256=00".into())]).is_err());
+    }
+
+    #[test]
+    fn from_row_rejects_invalid_header_in_config() {
+        let r = WebhookProvider::from_row(
+            1,
+            "n".into(),
+            r#"{"url":"https://example.com/x","headers":{"X-Ryokan-Signature":"forged"}}"#,
+        );
         assert!(r.is_err());
     }
 

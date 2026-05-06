@@ -213,6 +213,14 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
             // Other failure modes (rate-limit, network timeout)
             // leave the flag alone — they're transient.
             if is_auth_rejection(&e) {
+                // Capture the prior flag state BEFORE the update so the
+                // notification fires only on the false→true transition.
+                // Without this gate every subsequent failed tick (every
+                // 15 min initially, backing off to ~8h) would re-fire the
+                // re-link ping during a long token-dead window — a single
+                // unattended weekend could produce 5-10 duplicate Discord
+                // pings for the same dead token.
+                let was_already_failed = account.last_sync_auth_failed;
                 if let Err(write_err) =
                     external_accounts::update_last_sync_auth_failed(&state.db, account.id, true)
                         .await
@@ -223,15 +231,19 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
                     );
                 }
                 // Issue #118 — fire the re-link-required notification at
-                // the same point the sticky flag flips on. Default-on
-                // event policy (this is something the user genuinely
-                // needs to know) — Settings UI's "Re-link required"
-                // banner already fires, but a Discord ping is what
-                // gets a user back into the app to actually click it.
-                crate::services::notifications::emit_external_sync_relink_required(
-                    state,
-                    &account.provider,
-                );
+                // the moment the sticky flag flips on for the first time.
+                // Default-on event policy (this is something the user
+                // genuinely needs to know); Settings UI's "Re-link
+                // required" banner already fires every tick, but a
+                // Discord ping is what gets a user back into the app to
+                // actually click it. One ping per fail→fail-resolved
+                // cycle is the right cadence.
+                if !was_already_failed {
+                    crate::services::notifications::emit_external_sync_relink_required(
+                        state,
+                        &account.provider,
+                    );
+                }
             }
             return Err(e);
         }
