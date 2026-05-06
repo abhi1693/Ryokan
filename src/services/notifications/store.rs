@@ -29,6 +29,22 @@ pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<ProviderRow>, sqlx::Err
     .await
 }
 
+/// Fetch one provider row by id. Returns the disabled rows too (the
+/// test-send handler resolves through the live cache already; this is
+/// only used to reconstruct a one-shot impl for the inline test
+/// response when the cached `Arc<dyn NotificationProvider>` doesn't
+/// expose its underlying config). The caller is responsible for any
+/// access-policy gating.
+pub async fn get_provider(db: &SqlitePool, id: i64) -> Result<Option<ProviderRow>, sqlx::Error> {
+    sqlx::query_as::<_, ProviderRow>(
+        "SELECT id, name, kind, enabled, config_json
+         FROM notification_providers WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await
+}
+
 /// Read the per-event opt-in matrix for a single provider, returning
 /// a HashMap keyed by `event_kind` string. Used by the dispatcher
 /// to decide whether to fan out a given event to a given provider.

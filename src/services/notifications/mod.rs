@@ -43,6 +43,10 @@ use tokio::sync::RwLock;
 
 pub mod event;
 pub mod store;
+pub mod webhook;
+
+#[cfg(test)]
+mod wiremock_tests;
 
 pub use event::{ALL_EVENT_KINDS, DEFAULT_ON_EVENT_KINDS, NotificationEvent};
 
@@ -341,19 +345,42 @@ pub async fn rebuild_notification_providers_cache(cache: &NotificationProviders,
             Vec::new()
         }
     };
-    // Per-kind constructor arms land in #119 (webhook) / #120 (Discord).
-    // Foundation ships the shape only; until then every configured
-    // row is "unknown kind." Log so a pre-provider settings save
-    // (manual SQL, malformed import) surfaces in System → Logs
-    // rather than silently dropping.
-    let providers: Vec<Arc<dyn NotificationProvider>> = Vec::new();
-    for row in &rows {
-        tracing::warn!(
-            "notification_providers: skipping #{} ({}) — kind {:?} has no impl yet",
-            row.id,
-            row.name,
-            row.kind,
-        );
+    // Per-kind constructor dispatch. New `kind` strings land here
+    // alongside their per-impl module — `webhook` is #119, `discord`
+    // is #120. A row with an unrecognized kind is logged and dropped
+    // so a hand-edited DB / pre-provider Settings save surfaces in
+    // System → Logs rather than silently swallowing.
+    let mut providers: Vec<Arc<dyn NotificationProvider>> = Vec::new();
+    for row in rows {
+        let built: Option<Arc<dyn NotificationProvider>> = match row.kind.as_str() {
+            "webhook" => {
+                match webhook::WebhookProvider::from_row(row.id, row.name.clone(), &row.config_json)
+                {
+                    Ok(p) => Some(Arc::new(p)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "notification_providers: skipping webhook #{} ({}): {}",
+                            row.id,
+                            row.name,
+                            e,
+                        );
+                        None
+                    }
+                }
+            }
+            other => {
+                tracing::warn!(
+                    "notification_providers: skipping #{} ({}) — unknown kind {:?}",
+                    row.id,
+                    row.name,
+                    other,
+                );
+                None
+            }
+        };
+        if let Some(p) = built {
+            providers.push(p);
+        }
     }
     *cache.write().await = Arc::new(providers);
 }

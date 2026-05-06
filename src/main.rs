@@ -530,6 +530,15 @@ async fn main() {
     // Downloads) or one row with `is_default = 1` mirroring the
     // legacy `active_client` choice.
     services::download_client::rebuild_clients_cache(&state.download_clients, &db).await;
+    // Issue #119 — initialize the notification providers snapshot
+    // from the `notification_providers` table. Empty until the user
+    // adds a row in Settings → Notifications; the dispatcher's
+    // `is_empty()` early-return makes every hook a no-op until then.
+    services::notifications::rebuild_notification_providers_cache(
+        &state.notification_providers,
+        &db,
+    )
+    .await;
     // Pre-warm the DC status cache in the background so the first
     // visit to Settings → Connections renders the probed pills
     // server-side instead of flashing through the "Probing…"
@@ -859,6 +868,16 @@ async fn main() {
         .route(
             "/api/download-clients/test",
             post(handlers::settings::download_clients::settings_download_clients_test),
+        )
+        // Issue #119 — webhook provider test endpoint. Synthesizes a
+        // Health event and POSTs to the targeted provider, returning
+        // the receiver's HTTP status + body inline so users can debug
+        // from the Settings UI without opening browser devtools.
+        // Future per-provider CRUD endpoints land alongside this in
+        // `handlers::notifications`.
+        .route(
+            "/api/notifications/{id}/test",
+            post(handlers::notifications::test_provider),
         )
         .route(
             "/api/download-clients/section",
