@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{session, user};
+use crate::models::{config, session, user};
 use crate::services::logger;
 
 // ---------- Login rate limiting ----------
@@ -558,6 +558,29 @@ pub async fn setup_submit(
                 "",
             )
             .await;
+            // Seed a default `config` row so the per-tab subform
+            // handlers (settings_general_submit /
+            // settings_quality_submit / settings_integrations_submit)
+            // don't bail with their "No config row found — run /setup
+            // first." guard the very first time the user opens
+            // Settings. Pre-this-seed, /setup created the user but
+            // never wrote a config row; the user opened Settings →
+            // Connections, edited Jellyfin, hit Save, and got a
+            // mysterious self-contradicting error since they HAD
+            // just run /setup. `INSERT OR IGNORE` so a re-run of
+            // setup somehow (shouldn't happen — has_users gate above
+            // catches it) doesn't clobber an already-saved config.
+            // Failure is non-fatal: the legacy bulk save handler at
+            // POST /settings still works without a row, and a noisy
+            // log is better than blocking account creation on a
+            // config write.
+            if let Err(e) = config::save_config(&state.db, &config::Config::default()).await {
+                tracing::warn!(
+                    "setup_submit: failed to seed default config row: {e} \
+                     (subform saves will fail until a row exists; \
+                     re-save from Settings → General to recover)"
+                );
+            }
             let token = session::create_session(&state.db, user_id)
                 .await
                 .unwrap_or_default();
