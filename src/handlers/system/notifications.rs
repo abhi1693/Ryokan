@@ -232,10 +232,10 @@ fn event_description(kind: &str) -> &'static str {
             "Quality classifier flagged a low-confidence verdict. Can be noisy during reclassify sweeps."
         }
         "IndexerDown" => {
-            "An indexer started returning errors. Currently unwired; reserved for follow-up."
+            "An indexer's RSS poll returned an error (rate-limit cooldowns are suppressed). Per-indexer 1h dedup so a broken indexer doesn't spam every tick."
         }
         "DownloadClientUnreachable" => {
-            "The download client stopped responding. Currently unwired; reserved for follow-up."
+            "The Settings status probe couldn't reach the download client. Per-client 1h dedup so a refreshed Connections page doesn't fire repeatedly."
         }
         "ExternalSyncReLinkRequired" => {
             "Your AniList or MyAnimeList token expired and a re-link is needed."
