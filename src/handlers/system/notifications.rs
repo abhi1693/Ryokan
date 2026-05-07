@@ -77,11 +77,14 @@ pub struct ProviderView {
     /// shape (`"Header-Name: value"` per line) so the edit form
     /// round-trips cleanly. Empty when no headers are configured.
     pub webhook_headers_text: String,
-    /// Discord-only — has-url flag. The URL itself is the secret
-    /// (token in the path), so we never echo it back; just render
-    /// "[set]" next to a `type=password` input so the user can paste
-    /// a fresh URL or hit Clear.
-    pub discord_has_webhook_url: bool,
+    /// Discord-only — the configured webhook URL. The URL itself is
+    /// the secret (token in the path); the edit form pre-fills a
+    /// `type=password` input with this value and exposes Show / Copy
+    /// buttons (same pattern as the Jellyfin / Sonarr / Radarr API
+    /// key fields). Empty when no URL is configured. The card view
+    /// renders "[set]" / "(not configured)" without echoing the value;
+    /// the secret only surfaces inside the edit modal.
+    pub discord_webhook_url: Option<String>,
 }
 
 /// Form payload for `POST /system/notifications/upsert`. `id`
@@ -139,7 +142,7 @@ pub async fn load_provider_views(db: &sqlx::SqlitePool) -> Vec<ProviderView> {
             let mut webhook_url = None;
             let mut webhook_has_secret = false;
             let mut webhook_headers_text = String::new();
-            let mut discord_has_webhook_url = false;
+            let mut discord_webhook_url: Option<String> = None;
             match r.kind.as_str() {
                 "webhook" => {
                     if let Ok(cfg) = serde_json::from_str::<webhook::WebhookConfig>(&r.config_json)
@@ -156,8 +159,9 @@ pub async fn load_provider_views(db: &sqlx::SqlitePool) -> Vec<ProviderView> {
                 }
                 "discord" => {
                     if let Ok(cfg) = serde_json::from_str::<discord::DiscordConfig>(&r.config_json)
+                        && !cfg.webhook_url.is_empty()
                     {
-                        discord_has_webhook_url = !cfg.webhook_url.is_empty();
+                        discord_webhook_url = Some(cfg.webhook_url);
                     }
                 }
                 _ => {}
@@ -170,7 +174,7 @@ pub async fn load_provider_views(db: &sqlx::SqlitePool) -> Vec<ProviderView> {
                 webhook_url,
                 webhook_has_secret,
                 webhook_headers_text,
-                discord_has_webhook_url,
+                discord_webhook_url,
             }
         })
         .collect()

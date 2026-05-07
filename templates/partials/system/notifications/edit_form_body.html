@@ -67,14 +67,20 @@
         <div data-notif-field-group="discord"{% if row.kind != "discord" %} style="display:none"{% endif %}>
             <div class="form-group">
                 <label for="notif-edit-discord-webhook-url-{{ row.id }}">Discord webhook URL</label>
-                <input id="notif-edit-discord-webhook-url-{{ row.id }}" type="password" name="discord_webhook_url"
-                       autocomplete="new-password"
-                       placeholder="{% if row.discord_has_webhook_url %}[set; leave blank to keep]{% else %}https://discord.com/api/webhooks/...{% endif %}">
-                {% if row.discord_has_webhook_url %}
-                <button type="button" class="btn btn-danger"
-                        data-notif-clear-secret="notif-edit-discord-webhook-url-{{ row.id }}">Clear URL</button>
-                {% endif %}
-                <span class="form-hint">Leave blank to keep the existing value. Use Clear to wipe it explicitly.</span>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <input id="notif-edit-discord-webhook-url-{{ row.id }}" type="password" name="discord_webhook_url"
+                           autocomplete="new-password"
+                           value="{% if let Some(url) = row.discord_webhook_url.as_ref() %}{{ url }}{% endif %}"
+                           placeholder="https://discord.com/api/webhooks/..."
+                           style="flex:1">
+                    <button type="button" class="btn btn-secondary"
+                            onclick="ryokanTogglePassword('notif-edit-discord-webhook-url-{{ row.id }}', this)"
+                            style="white-space:nowrap">Show</button>
+                    <button type="button" class="btn btn-secondary"
+                            onclick="ryokanCopyInput('notif-edit-discord-webhook-url-{{ row.id }}', this)"
+                            style="white-space:nowrap">Copy</button>
+                </div>
+                <span class="form-hint">From Discord: Server Settings → Integrations → Webhooks → Copy Webhook URL.</span>
             </div>
         </div>
 
