@@ -42,7 +42,7 @@ pub struct SearchForm {
     #[serde(default)]
     filter: String,
     #[serde(default)]
-    user: String,
+    uploader: String,
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -53,7 +53,7 @@ pub struct PageQuery {
     #[serde(default)]
     filter: String,
     #[serde(default)]
-    user: String,
+    uploader: String,
     #[serde(default = "default_page")]
     p: i32,
 }
@@ -97,7 +97,7 @@ async fn build_opts(
     query: String,
     category: String,
     filter: String,
-    user: String,
+    uploader: String,
 ) -> nyaa::SearchOptions {
     let config = crate::models::config::get_config(&state.db)
         .await
@@ -134,7 +134,12 @@ async fn build_opts(
         } else {
             filter
         },
-        user,
+        // `nyaa::SearchOptions.user` is the wire-API field name —
+        // it's the Nyaa URL parameter `?u=<name>`. The form field
+        // ships as `uploader` to dodge browser autofill heuristics
+        // that pool every `name="user"` text input across sites
+        // (banking, login, etc.).
+        user: uploader,
         preferred_groups,
         preferred_resolution: preferred_res,
         prefer_subs,
@@ -167,7 +172,7 @@ pub async fn search_submit(
         form.query.clone(),
         form.category,
         form.filter,
-        form.user,
+        form.uploader,
     )
     .await;
 
@@ -249,7 +254,7 @@ pub async fn search_page_api(
         params.query,
         params.category,
         params.filter,
-        params.user,
+        params.uploader,
     )
     .await;
 

@@ -6,16 +6,38 @@
 // could finish loading before `search-form` was committed (per the
 // relations-carousel diagnosis), the form lookup returned null,
 // and the localStorage save-on-submit listener never bound → the
-// user's category/filter/user choice didn't persist across boost-
+// user's category/filter choice didn't persist across boost-
 // nav-driven searches until F5.
+//
+// Persists only the dropdown-shaped knobs (category, filter): those
+// are global preferences the user sets once and reuses. The
+// uploader field deliberately stays OUT of the persistence list —
+// it's a per-search context, not a global preference, and stickying
+// `SubsPlease` (or whatever) across every future search confused
+// users on docker-fresh installs into thinking Ryokan was forcing
+// the value. Per-series uploader overrides on the series page are
+// the right surface for "always use this uploader for this show."
 var bindSearchOptionsPersistence = function () {
-    const fields = ['search-category', 'search-filter', 'search-user'];
+    const fields = ['search-category', 'search-filter'];
     const KEY = 'nyaa_search_opts';
     const form = document.getElementById('search-form');
     if (!form) return;
     if (form.dataset.ryokanOptsBound === '1') return;
     form.dataset.ryokanOptsBound = '1';
     const saved = JSON.parse(localStorage.getItem(KEY) || '{}');
+    // One-shot cleanup for users with the legacy `search-user` key
+    // already in localStorage from an older Ryokan version that
+    // persisted the uploader field. Without this, the stale value
+    // would sit in localStorage forever (the rewrite below only
+    // writes the current `fields` list, but legacy keys stick
+    // around since `setItem` writes the whole object). Strip on
+    // first visit post-upgrade so the value doesn't keep
+    // reappearing if any future code path ever reads the raw
+    // localStorage entry.
+    if ('search-user' in saved) {
+        delete saved['search-user'];
+        localStorage.setItem(KEY, JSON.stringify(saved));
+    }
     for (const id of fields) {
         if (saved[id] !== undefined && saved[id] !== '') {
             const el = document.getElementById(id);
@@ -90,7 +112,11 @@ function getSearchParams() {
         query: document.getElementById('search-query').value,
         category: document.getElementById('search-category').value,
         filter: document.getElementById('search-filter').value,
-        user: document.getElementById('search-user').value,
+        // Form field name is `uploader` (NOT `user`) to dodge
+        // browser autofill heuristics that pool `name="user"`
+        // across sites. The Rust `SearchForm` deserializes
+        // `uploader`; Nyaa's URL param `?u=` is built server-side.
+        uploader: document.getElementById('search-user').value,
     });
 }
 

@@ -20,7 +20,14 @@
         <option value="1">No remakes</option>
         <option value="2">Trusted only</option>
     </select>
-    <input type="text" name="user" id="search-user" placeholder="Uploader (optional)" class="search-user">
+    {# `name="uploader"` deliberately, NOT `name="user"`: browsers heuristically
+       autofill any text input named `user` / `username` / `email` from saved
+       form history (banking, login, etc. all share that name space), so the
+       Uploader field would auto-fill with stale junk on every page load.
+       `name="uploader"` doesn't trip the heuristic. `autocomplete="off"` is a
+       belt-and-braces defense; some browsers respect it, some don't, but the
+       distinct field name is what does the heavy lifting. #}
+    <input type="text" name="uploader" id="search-user" placeholder="Uploader (optional)" class="search-user" autocomplete="off">
     <button type="submit" class="btn btn-primary">Search</button>
 </form>
 {% if searched %}
