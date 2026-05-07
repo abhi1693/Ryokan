@@ -895,6 +895,17 @@ async fn main() {
             "/system/notifications/{id}/edit-form",
             get(handlers::system::notifications::notifications_edit_form),
         )
+        // gh-121 card+modal frontend — section refresh + add-form body
+        // routes serve the HTMX swap targets used by the upsert/delete
+        // post-save fragment-render and the add-modal click handler.
+        .route(
+            "/system/notifications/section",
+            get(handlers::system::notifications::notifications_section),
+        )
+        .route(
+            "/system/notifications/add-form",
+            get(handlers::system::notifications::notifications_add_form),
+        )
         .route(
             "/api/download-clients/section",
             get(handlers::settings::download_clients::settings_download_clients_section),

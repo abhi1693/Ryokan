@@ -126,10 +126,6 @@ struct SystemTemplate {
     /// for a fresh create form. With `?edit_id=N`, this is the loaded
     /// matrix for that provider.
     notification_event_toggles: Vec<notifications::EventToggleView>,
-    /// Resolved edit-target row for the inline edit form. None when
-    /// no `?edit_id=` query param or the id doesn't match any current
-    /// provider — the template renders the create form in that case.
-    notification_edit: Option<notifications::ProviderView>,
 }
 
 #[derive(Deserialize)]
@@ -145,11 +141,6 @@ pub struct SystemQuery {
     /// the first page so the user always lands on the newest
     /// entries.
     before_id: Option<i64>,
-    /// Notifications-tab edit target (issue gh-121). When set on
-    /// `?tab=notifications`, the inline form on that tab pre-fills
-    /// with the matching provider row instead of showing a blank
-    /// create form.
-    edit_id: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -289,19 +280,17 @@ pub async fn system_page(
     };
     // Issue gh-121 — Notifications tab. Only loads when the user is
     // viewing this tab so the join below stays cheap on every other
-    // tab. Edit-target resolution + matrix view both run inside the
-    // future so they share the tab gate; they're sequential against
-    // each other (matrix depends on the resolved edit id).
-    let notification_edit_id = params.edit_id;
+    // tab. Edit-target resolution moved to the modal-fetch endpoint
+    // (`GET /system/notifications/{id}/edit-form`) when the card+modal
+    // frontend landed, so this future just loads the provider list +
+    // the default-on matrix seed for the create-form path.
     let notification_payload_fut = async {
         if tab == "notifications" {
             let providers = notifications::load_provider_views(&state.db).await;
-            let edit =
-                notification_edit_id.and_then(|id| providers.iter().find(|p| p.id == id).cloned());
-            let toggles = notifications::matrix_view(&state.db, edit.as_ref().map(|p| p.id)).await;
-            (providers, toggles, edit)
+            let toggles = notifications::matrix_view(&state.db, None).await;
+            (providers, toggles)
         } else {
-            (Vec::new(), Vec::new(), None)
+            (Vec::new(), Vec::new())
         }
     };
 
@@ -313,7 +302,7 @@ pub async fn system_page(
         scheduled_tasks,
         log_count_res,
         review_entries,
-        (notification_providers, notification_event_toggles, notification_edit),
+        (notification_providers, notification_event_toggles),
     ) = tokio::join!(
         logs_fut,
         config::get_config(&state.db),
@@ -405,7 +394,6 @@ pub async fn system_page(
         title_language,
         notification_providers,
         notification_event_toggles,
-        notification_edit,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -520,7 +508,6 @@ pub async fn debug_settings_submit(
         title_language: cfg.title_language.clone(),
         notification_providers: Vec::new(),
         notification_event_toggles: Vec::new(),
-        notification_edit: None,
     };
     Html(template.render().unwrap_or_default())
 }

@@ -22,6 +22,7 @@
 //!   explicit "Clear secret" button submits this).
 //! - Any other value → replace the stored value.
 
+use askama::Template;
 use axum::{
     Form,
     extract::{Path, Query, State},
@@ -375,6 +376,19 @@ pub async fn notifications_upsert(
     )
     .await;
 
+    // HTMX path: render the section partial in place. The
+    // `outerHTML` swap on `#notif-section` closes the modal (lives
+    // inside the swapped fragment) and refreshes the card grid in
+    // one shot — no manual `closeNotificationModal()` call needed.
+    // Plain form-POST path: redirect back to the tab with a toast.
+    if is_htmx {
+        let providers = load_provider_views(&state.db).await;
+        return NotificationSectionPartial {
+            notification_providers: providers,
+            notification_event_toggles: matrix_view(&state.db, None).await,
+        }
+        .into_html_ok();
+    }
     htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+saved").into_response()
 }
 
@@ -403,6 +417,15 @@ pub async fn notifications_delete(
         &format!("id={}", form.id),
     )
     .await;
+    // HTMX path mirrors upsert: re-render the section in place.
+    if is_htmx {
+        let providers = load_provider_views(&state.db).await;
+        return NotificationSectionPartial {
+            notification_providers: providers,
+            notification_event_toggles: matrix_view(&state.db, None).await,
+        }
+        .into_html_ok();
+    }
     htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+deleted").into_response()
 }
 
@@ -495,22 +518,117 @@ async fn persist_matrix(
 }
 
 /// `GET /system/notifications/{id}/edit-form` — minimal stub for
-/// future HTMX swap-in. v1 of this PR routes edit through the page-
-/// level `?edit_id=` query so a JS-disabled user can still get to
-/// the edit form. Endpoint reserved so a subsequent enhancement to
-/// modal-style editing has a stable path.
+/// Section partial for the card+modal frontend (gh-121). Returned
+/// directly from upsert / delete on HTMX requests so a save closes
+/// the modal + re-renders the card grid in one swap. Also fetched
+/// directly via `GET /system/notifications/section` if a future
+/// caller wants to refresh just this surface without a full page
+/// reload.
+#[derive(Template)]
+#[template(path = "partials/system/notifications/list.html")]
+struct NotificationSectionPartial {
+    notification_providers: Vec<ProviderView>,
+    notification_event_toggles: Vec<EventToggleView>,
+}
+
+impl NotificationSectionPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Modal body for the Add flow. Returned by
+/// `GET /system/notifications/add-form`. Fresh form, no row id, no
+/// pre-filled values; per-event toggles default to the
+/// DEFAULT_ON_EVENT_KINDS conservative seed so a brand-new provider
+/// receives Grabbed / Imported / ImportFailed / ExternalSyncReLinkRequired
+/// out of the box.
+#[derive(Template)]
+#[template(path = "partials/system/notifications/add_form_body.html")]
+struct NotificationAddFormPartial {
+    notification_event_toggles: Vec<EventToggleView>,
+}
+
+impl NotificationAddFormPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// Modal body for the Edit flow. Returned by
+/// `GET /system/notifications/{id}/edit-form`. Pre-filled with the
+/// row's name / kind / enabled state and the persisted matrix.
+/// Sensitive fields (HMAC secret, Discord webhook URL) render
+/// masked with placeholder hints — the on-save logic preserves
+/// stored values when the field is left blank, and the explicit
+/// "Clear" button submits the `__CLEAR__` sentinel for explicit
+/// wipe.
+#[derive(Template)]
+#[template(path = "partials/system/notifications/edit_form_body.html")]
+struct NotificationEditFormPartial {
+    row: ProviderView,
+    notification_event_toggles: Vec<EventToggleView>,
+}
+
+impl NotificationEditFormPartial {
+    fn into_html_ok(self) -> Response {
+        Html(self.render().unwrap_or_default()).into_response()
+    }
+}
+
+/// `GET /system/notifications/section` — re-render just the
+/// notifications section. Used by HTMX after upsert / delete; the
+/// `outerHTML` swap on `#notif-section` closes the modal (which
+/// lives inside the swapped fragment) and refreshes the cards in
+/// one shot. Also reachable by direct GET if any future caller
+/// wants to refresh only this surface.
+pub async fn notifications_section(State(state): State<AppState>) -> Response {
+    let providers = load_provider_views(&state.db).await;
+    NotificationSectionPartial {
+        notification_providers: providers,
+        notification_event_toggles: matrix_view(&state.db, None).await,
+    }
+    .into_html_ok()
+}
+
+/// `GET /system/notifications/add-form` — modal body for the Add
+/// flow. Fetched via `htmx.ajax()` from the JS open-modal helper
+/// so the modal stays at display:none with the previous Add form
+/// in place across saves; only the open click triggers the fetch.
+pub async fn notifications_add_form(State(state): State<AppState>) -> Response {
+    NotificationAddFormPartial {
+        notification_event_toggles: matrix_view(&state.db, None).await,
+    }
+    .into_html_ok()
+}
+
+/// `GET /system/notifications/{id}/edit-form` — modal body for the
+/// Edit flow. Loads the row + its matrix, projects to the partial
+/// view shape, renders. 404s when the row id doesn't match any
+/// provider (e.g. the user opened a stale tab and someone else
+/// deleted the row in the meantime).
 pub async fn notifications_edit_form(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Html(format!(
-            "<p>Edit form for provider #{id} renders inline on the Settings page; \
-             use <a href=\"/system?tab=notifications&edit_id={id}\">link</a>.</p>"
-        )),
-    )
-        .into_response()
+    let providers = load_provider_views(&state.db).await;
+    let Some(row) = providers.iter().find(|p| p.id == id).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Html(format!(
+                "<div class=\"modal-body\"><p class=\"form-hint\">\
+                 Provider #{id} no longer exists. Close this modal and refresh the page.\
+                 </p></div>"
+            )),
+        )
+            .into_response();
+    };
+    let toggles = matrix_view(&state.db, Some(id)).await;
+    NotificationEditFormPartial {
+        row,
+        notification_event_toggles: toggles,
+    }
+    .into_html_ok()
 }
 
 fn redirect_with_err(is_htmx: bool, err: &str) -> Response {

@@ -1,0 +1,101 @@
+{# Modal body for the Edit flow. Returned by
+   `GET /system/notifications/{id}/edit-form` and swapped into
+   `#notif-modal-body` (innerHTML) when the user clicks a card.
+   Same shape as add_form_body.html but pre-filled and carries a
+   hidden `id` so the upsert path runs as UPDATE not INSERT.
+
+   The kind-aware field-group visibility is server-rendered for
+   `row.kind` so the form opens with the correct shape on first
+   paint. The JS kind-flip in static/js/settings.js handles live
+   toggles after the modal is open. Sensitive fields render masked;
+   empty submit preserves the stored value, and the Clear button
+   submits the `__CLEAR__` sentinel so the user can wipe a stored
+   value explicitly. Mirror in add_form_body.html. #}
+<form method="post" action="/system/notifications/upsert"
+      class="notif-modal-form"
+      hx-post="/system/notifications/upsert"
+      hx-target="#notif-section"
+      hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="notif-edit-name-{{ row.id }}">Name</label>
+                <input id="notif-edit-name-{{ row.id }}" type="text" name="name" required maxlength="100" value="{{ row.name }}">
+            </div>
+            <div class="form-group">
+                <label for="notif-edit-kind-{{ row.id }}">Kind</label>
+                <select id="notif-edit-kind-{{ row.id }}" name="kind" data-notif-kind-select>
+                    <option value="webhook" {% if row.kind == "webhook" %}selected{% endif %}>Generic webhook</option>
+                    <option value="discord" {% if row.kind == "discord" %}selected{% endif %}>Discord</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}>
+                    Enabled
+                </label>
+            </div>
+        </div>
+
+        <div data-notif-field-group="webhook"{% if row.kind != "webhook" %} style="display:none"{% endif %}>
+            <div class="form-group">
+                <label for="notif-edit-webhook-url-{{ row.id }}">URL</label>
+                <input id="notif-edit-webhook-url-{{ row.id }}" type="url" name="webhook_url"
+                       value="{% if let Some(url) = row.webhook_url.as_ref() %}{{ url }}{% endif %}"
+                       placeholder="https://example.com/hook">
+            </div>
+            <div class="form-group">
+                <label for="notif-edit-webhook-secret-{{ row.id }}">HMAC secret <span class="form-hint">(optional)</span></label>
+                <input id="notif-edit-webhook-secret-{{ row.id }}" type="password" name="webhook_secret"
+                       autocomplete="new-password"
+                       placeholder="{% if row.webhook_has_secret %}[set; leave blank to keep]{% endif %}">
+                {% if row.webhook_has_secret %}
+                <button type="button" class="btn btn-small btn-warning"
+                        data-notif-clear-secret="notif-edit-webhook-secret-{{ row.id }}">Clear secret</button>
+                {% endif %}
+                <span class="form-hint">Leave blank to keep the existing value. Use Clear to wipe it explicitly.</span>
+            </div>
+            <div class="form-group">
+                <label for="notif-edit-webhook-headers-{{ row.id }}">Custom headers <span class="form-hint">(optional)</span></label>
+                <textarea id="notif-edit-webhook-headers-{{ row.id }}" name="webhook_headers" rows="3"
+                          placeholder="X-Title: Ryokan grab&#10;X-Priority: high">{{ row.webhook_headers_text }}</textarea>
+                <span class="form-hint">One per line, <code>Header-Name: value</code>. Blank lines and <code>#</code> comments allowed.</span>
+            </div>
+        </div>
+
+        <div data-notif-field-group="discord"{% if row.kind != "discord" %} style="display:none"{% endif %}>
+            <div class="form-group">
+                <label for="notif-edit-discord-webhook-url-{{ row.id }}">Discord webhook URL</label>
+                <input id="notif-edit-discord-webhook-url-{{ row.id }}" type="password" name="discord_webhook_url"
+                       autocomplete="new-password"
+                       placeholder="{% if row.discord_has_webhook_url %}[set; leave blank to keep]{% else %}https://discord.com/api/webhooks/...{% endif %}">
+                {% if row.discord_has_webhook_url %}
+                <button type="button" class="btn btn-small btn-warning"
+                        data-notif-clear-secret="notif-edit-discord-webhook-url-{{ row.id }}">Clear URL</button>
+                {% endif %}
+                <span class="form-hint">Leave blank to keep the existing value. Use Clear to wipe it explicitly.</span>
+            </div>
+        </div>
+
+        <fieldset class="settings-subform" style="margin-top: 12px">
+            <legend>Events</legend>
+            <p class="form-hint">Per-event toggles take effect on the next dispatch with no restart.</p>
+            {% for ev in notification_event_toggles %}
+            <label class="checkbox-row">
+                <input type="checkbox" name="event_{{ ev.kind }}" {% if ev.enabled %}checked{% endif %}>
+                <strong>{{ ev.label }}</strong>
+                <span class="form-hint">{{ ev.description }}</span>
+            </label>
+            {% endfor %}
+        </fieldset>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary"
+                data-test-provider="{{ row.id }}">Send test</button>
+        <span class="notif-modal-test-result" id="notif-modal-test-result-{{ row.id }}"></span>
+        <span style="margin-left:auto"></span>
+        <button type="button" class="btn btn-secondary" onclick="closeNotificationModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save</button>
+    </div>
+</form>

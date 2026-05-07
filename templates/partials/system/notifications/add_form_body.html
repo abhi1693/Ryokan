@@ -1,0 +1,85 @@
+{# Modal body for the Add flow. Returned by `GET /system/notifications/add-form`
+   and also rendered server-side on initial section render so the
+   modal opens fast on first click without waiting for a fetch. The
+   HTMX target on the click handlers is `#notif-modal-body innerHTML`,
+   so this is the entire content of that div (no header, no backdrop).
+
+   Default kind is webhook (matches the dropdown's `selected` option);
+   the discord field group is hidden initially. The kind-flip JS in
+   static/js/settings.js (or wherever the notif modal helpers land)
+   toggles visibility live when the user changes the kind dropdown. #}
+<form method="post" action="/system/notifications/upsert"
+      class="notif-modal-form"
+      hx-post="/system/notifications/upsert"
+      hx-target="#notif-section"
+      hx-swap="outerHTML">
+    <div class="modal-body">
+        <div class="form-row">
+            <div class="form-group">
+                <label for="notif-add-name">Name</label>
+                <input id="notif-add-name" type="text" name="name" required maxlength="100" placeholder="e.g. Discord (anime)">
+            </div>
+            <div class="form-group">
+                <label for="notif-add-kind">Kind</label>
+                <select id="notif-add-kind" name="kind" data-notif-kind-select>
+                    <option value="webhook" selected>Generic webhook</option>
+                    <option value="discord">Discord</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-label">
+                    <input type="checkbox" name="enabled" checked>
+                    Enabled
+                </label>
+                <span class="form-hint">Disable to keep the row but exclude it from dispatch.</span>
+            </div>
+        </div>
+
+        {# Webhook field group — visible by default. The kind-flip JS
+           toggles `display: none` on this and the discord group as a
+           pair. #}
+        <div data-notif-field-group="webhook">
+            <div class="form-group">
+                <label for="notif-add-webhook-url">URL</label>
+                <input id="notif-add-webhook-url" type="url" name="webhook_url" placeholder="https://example.com/hook">
+                <span class="form-hint">Any HTTPS receiver that accepts POST + JSON. Examples: ntfy, Apprise, n8n, custom scripts.</span>
+            </div>
+            <div class="form-group">
+                <label for="notif-add-webhook-secret">HMAC secret <span class="form-hint">(optional)</span></label>
+                <input id="notif-add-webhook-secret" type="password" name="webhook_secret" autocomplete="new-password">
+                <span class="form-hint">If set, every send carries an <code>X-Ryokan-Signature: sha256=&lt;hex&gt;</code> header (HMAC over the raw body bytes). Receivers can use off-the-shelf GitHub-style verification code.</span>
+            </div>
+            <div class="form-group">
+                <label for="notif-add-webhook-headers">Custom headers <span class="form-hint">(optional)</span></label>
+                <textarea id="notif-add-webhook-headers" name="webhook_headers" rows="3" placeholder="X-Title: Ryokan grab&#10;X-Priority: high"></textarea>
+                <span class="form-hint">One per line, <code>Header-Name: value</code>. Blank lines and <code>#</code> comments allowed. Reserved names (<code>Content-Type</code>, <code>X-Ryokan-Signature</code>) are rejected at save.</span>
+            </div>
+        </div>
+
+        {# Discord field group — hidden initially; kind-flip JS shows
+           it when the user picks Discord from the dropdown. #}
+        <div data-notif-field-group="discord" style="display:none">
+            <div class="form-group">
+                <label for="notif-add-discord-webhook-url">Discord webhook URL</label>
+                <input id="notif-add-discord-webhook-url" type="password" name="discord_webhook_url" autocomplete="new-password" placeholder="https://discord.com/api/webhooks/...">
+                <span class="form-hint">From Discord: Server Settings → Integrations → Webhooks → Copy Webhook URL. The URL is itself the secret (token in the path); rendered masked here.</span>
+            </div>
+        </div>
+
+        <fieldset class="settings-subform" style="margin-top: 12px">
+            <legend>Events</legend>
+            <p class="form-hint">Which events should this provider receive? Per-event toggles take effect on the next dispatch with no restart.</p>
+            {% for ev in notification_event_toggles %}
+            <label class="checkbox-row">
+                <input type="checkbox" name="event_{{ ev.kind }}" {% if ev.enabled %}checked{% endif %}>
+                <strong>{{ ev.label }}</strong>
+                <span class="form-hint">{{ ev.description }}</span>
+            </label>
+            {% endfor %}
+        </fieldset>
+    </div>
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeNotificationModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary">Add</button>
+    </div>
+</form>
