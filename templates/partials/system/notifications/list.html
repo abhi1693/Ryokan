@@ -70,21 +70,13 @@
                     {% endif %}
                 </dl>
             </div>
-            {# Corner × delete + Test button. The Test button POSTs to
-               the existing /api/notifications/{id}/test JSON endpoint
-               and renders the receiver's status + body inline via the
-               `data-test-provider` JS handler in this file's host
-               page. Stop-propagation on the form so a click on either
-               action button doesn't bubble up to the body's edit-modal
-               click handler. #}
+            {# Corner × delete only. Test fires from the modal's
+               Send-test button (edit_form_body.html) — keeping a
+               second per-card test action wasn't pulling its weight
+               and rendered uncolored because the icon-only variant
+               had no styling. Stop-propagation so the click doesn't
+               bubble up to the body's edit-modal click handler. #}
             <div class="notif-card-actions" onclick="event.stopPropagation()">
-                <button type="button"
-                        class="btn btn-icon-secondary notif-test-btn"
-                        data-test-provider="{{ p.id }}"
-                        title="Send test event"
-                        aria-label="Test {{ p.name }}">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4 20-7z"/></svg>
-                </button>
                 <form method="post" action="/system/notifications/delete"
                       hx-post="/system/notifications/delete"
                       hx-target="#notif-section"
@@ -99,10 +91,6 @@
                     <button type="submit" class="btn btn-icon-danger" title="Delete {{ p.name }}" aria-label="Delete {{ p.name }}">×</button>
                 </form>
             </div>
-            {# Inline test result span — populated by the JS handler in
-               the host page after the test endpoint returns. Empty
-               between clicks. #}
-            <div class="notif-test-result" id="test-result-{{ p.id }}" onclick="event.stopPropagation()"></div>
         </article>
         {% endfor %}
 

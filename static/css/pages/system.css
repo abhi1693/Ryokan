@@ -575,10 +575,11 @@
     justify-content: space-between;
     align-items: flex-start;
     gap: 10px;
-    /* Reserve space on the right for the corner action buttons
-       (Test + delete) — both are absolute-positioned. ~64px
-       protects two 20×20px buttons + spacing. */
-    padding-right: 64px;
+    /* Reserve space on the right for the corner × delete button
+       (absolute-positioned). ~36px covers a 20px button + spacing.
+       Pre-PR there was also a per-card Test button doubled up here;
+       Test moved exclusively to the modal so the reservation halves. */
+    padding-right: 36px;
 }
 .notif-card-title {
     display: flex;
@@ -658,9 +659,9 @@
 .notif-kind-pill-discord { background: rgba(88, 101, 242, 0.18); color: #8b95f8; }
 .notif-kind-pill-webhook { background: rgba(203, 166, 247, 0.16); color: var(--accent); }
 
-/* Corner Test + delete actions, stacked horizontally. The DC card
-   only has the × delete; notifications adds a Send-test button so
-   users can confirm the connection without opening the modal. */
+/* Corner × delete action. Test is modal-only; both DC and
+   notifications expose connection-test inside the edit modal so
+   the card surface stays uncluttered. */
 .notif-card-actions {
     position: absolute;
     top: 10px;
@@ -670,17 +671,6 @@
     align-items: center;
 }
 
-/* Inline test result line below the card body — populated by the
-   notif-test JS handler with "OK (200)" / "Error: ..." after a
-   click on the corner Test button. Empty between clicks. */
-.notif-test-result {
-    padding: 0 16px 10px;
-    font-size: 12px;
-    color: var(--text-dim);
-    min-height: 0;
-}
-.notif-test-result.ok  { color: var(--green, #a6e3a1); }
-.notif-test-result.err { color: var(--red, #f38ba8); }
 .notif-modal-test-result {
     font-size: 12px;
     color: var(--text-dim);
@@ -766,7 +756,7 @@
     padding: 12px 16px 14px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    background: var(--bg-elevated);
+    background: transparent;
 }
 .notif-modal-form fieldset.settings-subform legend {
     padding: 0 6px;

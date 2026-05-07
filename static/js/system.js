@@ -524,22 +524,17 @@ function bindNotifModalForm(form) {
         btn.addEventListener('click', notifTestClickHandler);
     });
 }
-// Per-card test button click handler. Bound on every section-partial
-// swap so a freshly-saved provider's Test button is wired without a
-// page reload. Uses `function() { ... this ... }` (not arrow) so the
+// Modal Send-test button click handler. The card no longer carries
+// a per-row test action; only the modal footer's Send-test button
+// fires this. Uses `function() { ... this ... }` (not arrow) so the
 // click target stays accessible via `this`.
 async function notifTestClickHandler() {
     var btn = this;
     var id = btn.getAttribute('data-test-provider');
-    // Modal Send-test button targets #notif-modal-test-result-{id};
-    // per-card Test button targets #test-result-{id}. Try modal
-    // first, fall back to card.
-    var out = document.getElementById('notif-modal-test-result-' + id)
-        || document.getElementById('test-result-' + id);
-    var inModal = (out && out.id.indexOf('notif-modal') === 0);
+    var out = document.getElementById('notif-modal-test-result-' + id);
     if (out) {
         out.textContent = 'Sending...';
-        out.className = inModal ? 'notif-modal-test-result' : 'notif-test-result';
+        out.className = 'notif-modal-test-result';
     }
     try {
         var r = await fetch('/api/notifications/' + id + '/test', { method: 'POST' });
@@ -570,16 +565,6 @@ if (!window.__ryokanSystemNotifModule) {
             if (form) bindNotifModalForm(form);
             var firstInput = ev.target.querySelector('input[type="text"], input[type="url"]');
             if (firstInput) firstInput.focus();
-        }
-        // Per-card test buttons live OUTSIDE the modal — re-bind on
-        // every section-partial swap so a freshly-saved provider's
-        // Test button is wired without a page reload.
-        if (ev.target && ev.target.id === 'notif-section') {
-            ev.target.querySelectorAll('[data-test-provider]').forEach(function (btn) {
-                if (btn.dataset.ryokanNotifTestBound === '1') return;
-                btn.dataset.ryokanNotifTestBound = '1';
-                btn.addEventListener('click', notifTestClickHandler);
-            });
         }
     });
     // Re-bind backdrop-click after every section-partial swap. The
@@ -616,15 +601,11 @@ function bindNotificationModalDismiss() {
 }
 // Initial pass for first-paint and boost-nav re-entries — the
 // listener above attaches once via the guard, but the pre-rendered
-// form body, per-card buttons, AND the backdrop-click dismiss need
-// wiring on every page load.
+// form body and the backdrop-click dismiss need wiring on every page
+// load. (The modal Send-test button is bound by `bindNotifModalForm`
+// itself when the form is wired.)
 function applyNotifInitialBindings() {
     document.querySelectorAll('#notif-modal-body form').forEach(bindNotifModalForm);
-    document.querySelectorAll('#notif-section [data-test-provider]').forEach(function (btn) {
-        if (btn.dataset.ryokanNotifTestBound === '1') return;
-        btn.dataset.ryokanNotifTestBound = '1';
-        btn.addEventListener('click', notifTestClickHandler);
-    });
     bindNotificationModalDismiss();
 }
 window.addEventListener('DOMContentLoaded', applyNotifInitialBindings);

@@ -30,12 +30,12 @@
                     <option value="discord" {% if row.kind == "discord" %}selected{% endif %}>Discord</option>
                 </select>
             </div>
-            <div class="form-group">
-                <label class="checkbox-label">
-                    <input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}>
-                    Enabled
-                </label>
-            </div>
+        </div>
+        <div class="form-group">
+            <label class="checkbox-label">
+                <input type="checkbox" name="enabled" {% if row.enabled %}checked{% endif %}>
+                Enabled
+            </label>
         </div>
 
         <div data-notif-field-group="webhook"{% if row.kind != "webhook" %} style="display:none"{% endif %}>
@@ -51,7 +51,7 @@
                        autocomplete="new-password"
                        placeholder="{% if row.webhook_has_secret %}[set; leave blank to keep]{% endif %}">
                 {% if row.webhook_has_secret %}
-                <button type="button" class="btn btn-small btn-warning"
+                <button type="button" class="btn btn-danger"
                         data-notif-clear-secret="notif-edit-webhook-secret-{{ row.id }}">Clear secret</button>
                 {% endif %}
                 <span class="form-hint">Leave blank to keep the existing value. Use Clear to wipe it explicitly.</span>
@@ -71,7 +71,7 @@
                        autocomplete="new-password"
                        placeholder="{% if row.discord_has_webhook_url %}[set; leave blank to keep]{% else %}https://discord.com/api/webhooks/...{% endif %}">
                 {% if row.discord_has_webhook_url %}
-                <button type="button" class="btn btn-small btn-warning"
+                <button type="button" class="btn btn-danger"
                         data-notif-clear-secret="notif-edit-discord-webhook-url-{{ row.id }}">Clear URL</button>
                 {% endif %}
                 <span class="form-hint">Leave blank to keep the existing value. Use Clear to wipe it explicitly.</span>
