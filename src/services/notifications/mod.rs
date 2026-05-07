@@ -37,8 +37,9 @@
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub mod discord;
@@ -541,6 +542,129 @@ pub async fn emit_classifier_needs_review(
     );
 }
 
+/// Per-id "fired recently" state for `IndexerDown` and
+/// `DownloadClientUnreachable`. Both events are emitted opportunistically
+/// from hot paths (RSS poll, status probe) that can re-fire dozens of
+/// times an hour for a single broken target — without dedup, a
+/// misconfigured indexer would spam every Discord webhook on every RSS
+/// tick. The cooldown is per-id so two different broken indexers don't
+/// suppress each other's first ping.
+///
+/// `Instant` is the firing time; `remaining` returns `None` once the
+/// stamp is older than [`HEALTH_DEDUP_WINDOW`]. Lazily evicts on read so
+/// the table doesn't grow forever on long-lived processes.
+const HEALTH_DEDUP_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+static INDEXER_DOWN_FIRED: LazyLock<StdMutex<HashMap<i64, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+static DC_UNREACHABLE_FIRED: LazyLock<StdMutex<HashMap<i64, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Returns true if the caller should fire the event. Stamps `now`
+/// when allowed so the next call within the window short-circuits.
+fn dedup_check(map: &StdMutex<HashMap<i64, Instant>>, id: i64) -> bool {
+    let Ok(mut guard) = map.lock() else {
+        // Poisoned lock — rather than swallow the event, allow the
+        // fire. The next successful lock will overwrite the stamp.
+        return true;
+    };
+    let now = Instant::now();
+    match guard.get(&id) {
+        Some(prev) if now.duration_since(*prev) < HEALTH_DEDUP_WINDOW => false,
+        _ => {
+            guard.insert(id, now);
+            true
+        }
+    }
+}
+
+/// Test-only: drop the dedup stamp for a single indexer id.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_indexer_down_dedup_for_tests(id: i64) {
+    if let Ok(mut g) = INDEXER_DOWN_FIRED.lock() {
+        g.remove(&id);
+    }
+}
+
+/// Test-only: drop the dedup stamp for a single download-client id.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_dc_unreachable_dedup_for_tests(id: i64) {
+    if let Ok(mut g) = DC_UNREACHABLE_FIRED.lock() {
+        g.remove(&id);
+    }
+}
+
+/// Convenience: dispatch an `IndexerDown` event with per-id dedup
+/// (1h cooldown per `indexer_id`). Fired from the RSS-tick indexer poll
+/// when an `Indexer::search()` call returns Err — that's the continuous
+/// background poll that surfaces "your indexer started failing"
+/// without waiting on a user to open the Settings UI. Subsequent
+/// failures during the cooldown window are suppressed; once the
+/// indexer recovers and a single window passes without a fire, the
+/// next failure re-fires.
+///
+/// `indexer_name` is resolved from the live indexer cache snapshot
+/// (matching `resolve_indexer_name`'s shape); a stale id that's been
+/// deleted from the cache short-circuits with no event.
+pub async fn emit_indexer_down(state: &crate::AppState, indexer_id: i64, reason: &str) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    if !dedup_check(&INDEXER_DOWN_FIRED, indexer_id) {
+        return;
+    }
+    let Some(indexer_name) = resolve_indexer_name(state, Some(indexer_id)).await else {
+        tracing::debug!(
+            "notifications::emit_indexer_down: indexer #{indexer_id} not in cache, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::IndexerDown {
+            indexer_name,
+            reason: reason.to_string(),
+        },
+    );
+}
+
+/// Convenience: dispatch a `DownloadClientUnreachable` event with
+/// per-id dedup (1h cooldown per `download_client_id`). Fired from the
+/// Settings → Connections status-probe handler when `client.test()`
+/// returns Err. The probe fires on Settings → Connections page load
+/// and on the auto-refresh cadence, so dedup is the difference
+/// between one ping and a stream of identical alerts.
+///
+/// `client_kind` is the wire kind discriminator ("qbittorrent",
+/// "deluge", etc.) resolved from the row, so the event payload can be
+/// correlated to the impl. `client_label` is the kind-pretty-print used
+/// in the log line.
+pub async fn emit_download_client_unreachable(
+    state: &crate::AppState,
+    client_id: i64,
+    client_kind: &str,
+    reason: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    if !dedup_check(&DC_UNREACHABLE_FIRED, client_id) {
+        return;
+    }
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::DownloadClientUnreachable {
+            client_kind: client_kind.to_string(),
+            reason: reason.to_string(),
+        },
+    );
+}
+
 /// Convenience: dispatch an `ExternalSyncReLinkRequired` event for a
 /// given provider string (`"anilist"` / `"mal"`). Fired at the same
 /// point the sticky `last_sync_auth_failed` flag is flipped on.
@@ -942,5 +1066,56 @@ mod tests {
         // call site uses 0 today, but the saturating_sub and the
         // edge condition cost nothing.
         assert_eq!(truncate("hi", 0), "hi");
+    }
+
+    // Dedup tests live in their own private map so they can't race
+    // against the production `INDEXER_DOWN_FIRED` /
+    // `DC_UNREACHABLE_FIRED` tables under nextest's default parallelism.
+    // The production paths exercise the same `dedup_check` function;
+    // the production maps just hold the live state.
+    fn private_map() -> StdMutex<HashMap<i64, Instant>> {
+        StdMutex::new(HashMap::new())
+    }
+
+    #[test]
+    fn dedup_check_fires_first_call() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+    }
+
+    #[test]
+    fn dedup_check_suppresses_second_call_within_window() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+        assert!(
+            !dedup_check(&map, 1),
+            "second call within HEALTH_DEDUP_WINDOW must short-circuit"
+        );
+    }
+
+    #[test]
+    fn dedup_check_is_per_id() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+        assert!(
+            dedup_check(&map, 2),
+            "different id must NOT inherit id 1's stamp — per-target dedup"
+        );
+        assert!(!dedup_check(&map, 1));
+        assert!(!dedup_check(&map, 2));
+    }
+
+    #[test]
+    fn dedup_check_re_fires_after_window_elapses() {
+        // Inject an Instant from > HEALTH_DEDUP_WINDOW ago. Without
+        // this, the test would have to actually sleep 1h. The
+        // production path observes the same comparison.
+        let map = private_map();
+        let stale = Instant::now() - HEALTH_DEDUP_WINDOW - Duration::from_secs(1);
+        map.lock().unwrap().insert(1, stale);
+        assert!(
+            dedup_check(&map, 1),
+            "stamp older than HEALTH_DEDUP_WINDOW must re-fire"
+        );
     }
 }

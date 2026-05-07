@@ -535,6 +535,19 @@ async fn fetch_all_sources(
                     &err,
                 )
                 .await;
+                // Opportunistic IndexerDown notification with per-id
+                // 1h dedup. Suppress the cooldown shape since that's
+                // the upstream's own rate-limit signaling and not an
+                // "indexer is down" condition the user needs paged
+                // about — once the cooldown lifts, the next tick
+                // either succeeds (no event) or returns a real error
+                // (real event). The string-prefix match here mirrors
+                // the project-wide tag-prefix error convention; the
+                // exact prefix is set in
+                // `services/indexers/torznab/client.rs`'s 429 path.
+                if !err.starts_with("Indexer rate-limited") {
+                    crate::services::notifications::emit_indexer_down(state, row.id, &err).await;
+                }
             }
         }
     }
