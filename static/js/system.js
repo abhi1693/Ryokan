@@ -582,10 +582,42 @@ if (!window.__ryokanSystemNotifModule) {
             });
         }
     });
+    // Re-bind backdrop-click after every section-partial swap. The
+    // modal element is replaced when #notif-section re-renders, so
+    // a one-shot listener attached at boot would lose its target.
+    document.body.addEventListener('htmx:afterSwap', function(ev) {
+        if (ev.target && ev.target.id === 'notif-section') {
+            bindNotificationModalDismiss();
+        }
+    });
+    // Escape key — global listener; `display !== 'none'` gate keeps
+    // it cheap when the modal isn't open.
+    document.addEventListener('keydown', function(ev) {
+        var modal = document.getElementById('notif-modal');
+        if (!modal) return;
+        if (ev.key === 'Escape' && modal.style.display !== 'none') {
+            closeNotificationModal();
+        }
+    });
+}
+// Click on the backdrop (any space outside the inner `.modal` panel)
+// closes the modal. `ev.target === modal` is the contract — clicks
+// inside `.modal` (the panel) bubble up with `ev.target` set to
+// whatever child got clicked, so they don't match. Same shape as the
+// DC backdrop dismiss.
+function bindNotificationModalDismiss() {
+    var modal = document.getElementById('notif-modal');
+    if (!modal) return;
+    if (modal.dataset.ryokanNotifDismissBound === '1') return;
+    modal.dataset.ryokanNotifDismissBound = '1';
+    modal.addEventListener('click', function (ev) {
+        if (ev.target === modal) closeNotificationModal();
+    });
 }
 // Initial pass for first-paint and boost-nav re-entries — the
 // listener above attaches once via the guard, but the pre-rendered
-// form body and per-card buttons need wiring on every page load.
+// form body, per-card buttons, AND the backdrop-click dismiss need
+// wiring on every page load.
 function applyNotifInitialBindings() {
     document.querySelectorAll('#notif-modal-body form').forEach(bindNotifModalForm);
     document.querySelectorAll('#notif-section [data-test-provider]').forEach(function (btn) {
@@ -593,6 +625,7 @@ function applyNotifInitialBindings() {
         btn.dataset.ryokanNotifTestBound = '1';
         btn.addEventListener('click', notifTestClickHandler);
     });
+    bindNotificationModalDismiss();
 }
 window.addEventListener('DOMContentLoaded', applyNotifInitialBindings);
 applyNotifInitialBindings();

@@ -527,3 +527,285 @@
     color: var(--text);
 }
 
+/* ── Notifications card+modal (issue gh-121) ──────────────────────
+   System → Notifications tab. Visual primitives mirror the
+   `.dc-card-*` rules in static/css/pages/settings.css; class
+   names stay namespace-distinct so a future per-section tweak
+   doesn't bleed across.
+
+   Order is layout (flex/grid) → state colors → kind badges. The
+   `.notif-status-pill` is binary enabled/disabled (no live probe
+   path like DC's `dc-status-pill`); `.notif-kind-pill` is its own
+   thing (DC has `.dc-default-pill` for a similar slot). */
+.notif-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+.notif-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    transition: border-color 0.15s, background 0.15s;
+    min-height: 140px;
+}
+.notif-card:hover { border-color: var(--accent); background: var(--bg); }
+.notif-card-body {
+    appearance: none;
+    background: transparent;
+    border: none;
+    color: inherit;
+    text-decoration: none;
+    text-align: left;
+    cursor: pointer;
+    font: inherit;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px 16px;
+    flex: 1 1 auto;
+    border-radius: inherit;
+}
+.notif-card-body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.notif-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    /* Reserve space on the right for the corner action buttons
+       (Test + delete) — both are absolute-positioned. ~64px
+       protects two 20×20px buttons + spacing. */
+    padding-right: 64px;
+}
+.notif-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+.notif-card-name {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-bright);
+    word-break: break-word;
+    line-height: 1.3;
+}
+.notif-card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    font-size: 13px;
+    margin-top: auto;
+}
+.notif-card-meta-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    min-width: 0;
+}
+.notif-card-meta-row dt {
+    font-weight: 500;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    min-width: 64px;
+}
+.notif-card-meta-row dd {
+    margin: 0;
+    color: var(--text);
+    word-break: break-all;
+    min-width: 0;
+}
+.notif-card-meta-row dd code {
+    background: transparent;
+    padding: 0;
+    color: var(--text);
+    font-size: inherit;
+}
+
+/* Status pill — binary enabled/disabled, no live probe path. */
+.notif-status-pill {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.2px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    line-height: 1.4;
+}
+.notif-status-pill-ok       { background: rgba(166, 227, 161, 0.18); color: var(--green, #a6e3a1); }
+.notif-status-pill-disabled { background: rgba(108, 112, 134, 0.18); color: var(--text-dim); }
+
+/* Kind badge — webhook / discord. Faint background tint so the
+   badge reads as "tag" not "alert" — reserved alert colors stay
+   for the status pill. */
+.notif-kind-pill {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: rgba(108, 112, 134, 0.18);
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+.notif-kind-pill-discord { background: rgba(88, 101, 242, 0.18); color: #8b95f8; }
+.notif-kind-pill-webhook { background: rgba(203, 166, 247, 0.16); color: var(--accent); }
+
+/* Corner Test + delete actions, stacked horizontally. The DC card
+   only has the × delete; notifications adds a Send-test button so
+   users can confirm the connection without opening the modal. */
+.notif-card-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    display: flex;
+    gap: 4px;
+    align-items: center;
+}
+
+/* Inline test result line below the card body — populated by the
+   notif-test JS handler with "OK (200)" / "Error: ..." after a
+   click on the corner Test button. Empty between clicks. */
+.notif-test-result {
+    padding: 0 16px 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    min-height: 0;
+}
+.notif-test-result.ok  { color: var(--green, #a6e3a1); }
+.notif-test-result.err { color: var(--red, #f38ba8); }
+.notif-modal-test-result {
+    font-size: 12px;
+    color: var(--text-dim);
+}
+.notif-modal-test-result.ok  { color: var(--green, #a6e3a1); }
+.notif-modal-test-result.err { color: var(--red, #f38ba8); }
+
+.notif-empty {
+    grid-column: 1 / -1;
+    padding: 18px 20px;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    text-align: center;
+}
+
+.notif-card-add {
+    appearance: none;
+    background: var(--bg-elevated);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    color: var(--text-dim);
+    cursor: pointer;
+    text-align: center;
+    padding: 14px 16px;
+    min-height: 140px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    font: inherit;
+}
+.notif-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
+}
+.notif-card-add-icon {
+    font-size: 28px;
+    font-weight: 300;
+    line-height: 1;
+    margin-bottom: 6px;
+}
+.notif-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* Modal body container needs flex routing so the inner
+   `.modal-body` (which carries `overflow-y: auto`) actually has
+   a constrained height to scroll inside. Without this the form
+   collapses to its content height and tall forms (kind picker +
+   secret + headers + 8-event matrix) get clipped at the bottom
+   of the modal's `overflow: hidden` bound. Same shape settings.css
+   uses for `#dc-modal-body` and `#indexer-modal-body`. */
+#notif-modal-body {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.notif-modal-form { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.notif-modal-form .modal-body { padding: 20px 24px; }
+.notif-modal-form .form-group { margin-bottom: 14px; }
+.notif-modal-form .form-row   { display: flex; gap: 16px; }
+.notif-modal-form .form-row .form-group { flex: 1; min-width: 0; }
+
+/* Per-event matrix fieldset inside the notif modal. The
+   `.settings-subform` class has no rules of its own (it's also
+   slapped on the indexers tab's Nyaa-pin + direct-RSS forms but
+   relies on the parent layout there). Inside the modal we need
+   a deliberate frame around the 8 checkbox rows + a vertical
+   layout — `.checkbox-row` is `inline-flex` per forms.css, so
+   without a column-flex parent every event tries to render on
+   one line. */
+.notif-modal-form fieldset.settings-subform {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 12px 0 0;
+    padding: 12px 16px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+.notif-modal-form fieldset.settings-subform legend {
+    padding: 0 6px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-dim);
+}
+.notif-modal-form fieldset.settings-subform > .form-hint {
+    margin: -2px 0 6px;
+}
+/* Each event-toggle row: checkbox + label + per-row hint stacked
+   right of the checkbox. Override `.checkbox-row`'s inline-flex
+   so rows stack vertically inside the matrix. */
+.notif-modal-form fieldset.settings-subform > .checkbox-row {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    column-gap: 10px;
+    row-gap: 0;
+    align-items: baseline;
+    cursor: pointer;
+}
+.notif-modal-form fieldset.settings-subform > .checkbox-row > input[type="checkbox"] {
+    grid-row: 1 / span 2;
+    align-self: start;
+    margin-top: 3px;   /* visually align with the strong label baseline */
+}
+.notif-modal-form fieldset.settings-subform > .checkbox-row > strong {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    line-height: 1.3;
+}
+.notif-modal-form fieldset.settings-subform > .checkbox-row > .form-hint {
+    grid-column: 2;
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.4;
+    margin: 0;
+}
+
