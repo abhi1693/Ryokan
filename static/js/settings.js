@@ -220,126 +220,6 @@ function openDcAddModal() {
         'Add download client'
     );
 }
-
-// ── Settings → Notifications shared add/edit modal (issue gh-121) ──
-// Same shape as the DC modal helpers above. Reuses the modal-fetch
-// pattern: clear body, open modal, htmx.ajax() the right form body
-// in. Save returns the whole #notif-section partial via hx-target
-// so the modal closes + cards re-render in one swap.
-function openNotificationModal(title) {
-    var modal = document.getElementById('notif-modal');
-    if (!modal) return;
-    if (typeof title === 'string' && title.length > 0) {
-        var titleEl = document.getElementById('notif-modal-title');
-        if (titleEl) titleEl.textContent = title;
-    }
-    modal.style.display = 'flex';
-    var firstInput = modal.querySelector('input[type="text"], input[type="url"]');
-    if (firstInput) firstInput.focus();
-}
-function closeNotificationModal() {
-    var modal = document.getElementById('notif-modal');
-    if (modal) modal.style.display = 'none';
-}
-function fetchAndOpenNotifModal(url, title) {
-    var body = document.getElementById('notif-modal-body');
-    if (body) body.innerHTML = '';
-    openNotificationModal(title);
-    if (window.htmx) {
-        window.htmx.ajax('GET', url, {
-            target: '#notif-modal-body',
-            swap: 'innerHTML',
-        });
-    }
-}
-function openNotificationEditModal(id, name) {
-    fetchAndOpenNotifModal(
-        '/system/notifications/' + encodeURIComponent(id) + '/edit-form',
-        'Editing ' + (name || 'notification provider')
-    );
-}
-function openNotificationAddModal() {
-    fetchAndOpenNotifModal(
-        '/system/notifications/add-form',
-        'Add notification provider'
-    );
-}
-// Kind-flip + clear-secret + test-send wiring inside the notif
-// modal body. Re-runs on every htmx:afterSettle into
-// `#notif-modal-body` so the freshly-rendered form picks up
-// behavior without a per-template inline script. Same lifecycle
-// shape as the DC kind-flip below.
-function bindNotifModalForm(form) {
-    if (!form || form.dataset.ryokanNotifFormBound === '1') return;
-    form.dataset.ryokanNotifFormBound = '1';
-
-    // Kind picker → field-group toggle.
-    var kindSelect = form.querySelector('[data-notif-kind-select]');
-    if (kindSelect) {
-        var sync = function () {
-            var k = kindSelect.value;
-            var groups = form.querySelectorAll('[data-notif-field-group]');
-            groups.forEach(function (g) {
-                g.style.display = (g.dataset.notifFieldGroup === k) ? '' : 'none';
-            });
-        };
-        kindSelect.addEventListener('change', sync);
-        // Initial paint already correct (server-rendered for the
-        // row's kind), so don't fire sync() now — that would cause a
-        // brief flash if the server-rendered shape diverged from the
-        // JS-computed one for any reason.
-    }
-
-    // Clear-secret button: stuff the __CLEAR__ sentinel into the
-    // target input so the upsert handler recognizes "wipe this".
-    form.querySelectorAll('[data-notif-clear-secret]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-            var id = btn.getAttribute('data-notif-clear-secret');
-            var input = document.getElementById(id);
-            if (!input) return;
-            input.value = '__CLEAR__';
-            input.placeholder = '[will be cleared on save]';
-            input.type = 'text';   // unmask so the user sees the sentinel
-        });
-    });
-
-    // Send-test button (edit form footer) — POST to the existing JSON
-    // endpoint, render the receiver's status + body inline next to
-    // the button. Works against the same row id the form is editing.
-    form.querySelectorAll('[data-test-provider]').forEach(function (btn) {
-        btn.addEventListener('click', async function () {
-            var id = btn.getAttribute('data-test-provider');
-            var out = document.getElementById('notif-modal-test-result-' + id)
-                || document.getElementById('test-result-' + id);
-            if (out) {
-                out.textContent = 'Sending...';
-                out.className = (out.id.indexOf('notif-modal') === 0)
-                    ? 'notif-modal-test-result'
-                    : 'notif-test-result';
-            }
-            try {
-                var r = await fetch('/api/notifications/' + id + '/test', {
-                    method: 'POST',
-                });
-                var data = await r.json();
-                if (out) {
-                    if (r.ok) {
-                        out.textContent = 'OK (' + (data.status || 200) + ')';
-                        out.className += ' ok';
-                    } else {
-                        out.textContent = 'Error: ' + (data.error || data.body || r.statusText);
-                        out.className += ' err';
-                    }
-                }
-            } catch (e) {
-                if (out) {
-                    out.textContent = 'Network error: ' + e.message;
-                    out.className += ' err';
-                }
-            }
-        });
-    });
-}
 // One-shot guard wraps every `addEventListener` at module scope in this
 // file. hx-boost re-runs the script on each nav-back, so an unguarded
 // `addEventListener` accumulates a copy per visit (Nth visit fires N
@@ -624,26 +504,6 @@ if (!window.__ryokanSettingsDcModalListeners) {
             // user's first keystroke would otherwise go nowhere.
             focusDcModalFirstInput();
         }
-        // Issue gh-121 — bind the notification modal's kind-flip /
-        // clear-secret / send-test handlers when its body lands.
-        // Mirror the DC pattern; same lifecycle shape so the
-        // `__ryokanNotifFormBound` guard covers boost-nav re-runs.
-        if (ev.target && ev.target.id === 'notif-modal-body') {
-            var notifForm = ev.target.querySelector('form');
-            if (notifForm) bindNotifModalForm(notifForm);
-            var firstInput = ev.target.querySelector('input[type="text"], input[type="url"]');
-            if (firstInput) firstInput.focus();
-        }
-        // Per-card "Send test" buttons live OUTSIDE the modal —
-        // re-bind on every section-partial swap so a freshly-saved
-        // provider's Test button is wired without a page reload.
-        if (ev.target && ev.target.id === 'notif-section') {
-            ev.target.querySelectorAll('[data-test-provider]').forEach(function (btn) {
-                if (btn.dataset.ryokanNotifTestBound === '1') return;
-                btn.dataset.ryokanNotifTestBound = '1';
-                btn.addEventListener('click', notifTestClickHandler);
-            });
-        }
     });
     // Initial load (the section partial pre-renders the Add form body
     // so the modal opens fast on first click — see
@@ -657,52 +517,8 @@ if (!window.__ryokanSettingsDcModalListeners) {
     // again. Run the apply directly to cover the boost-nav case.
     window.addEventListener('DOMContentLoaded', function() {
         document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
-        document.querySelectorAll('#notif-modal-body form').forEach(bindNotifModalForm);
-        document.querySelectorAll('#notif-section [data-test-provider]').forEach(function (btn) {
-            if (btn.dataset.ryokanNotifTestBound === '1') return;
-            btn.dataset.ryokanNotifTestBound = '1';
-            btn.addEventListener('click', notifTestClickHandler);
-        });
     });
     document.querySelectorAll('#dc-modal-body form').forEach(bindDcKindCopyToForm);
-    document.querySelectorAll('#notif-modal-body form').forEach(bindNotifModalForm);
-    document.querySelectorAll('#notif-section [data-test-provider]').forEach(function (btn) {
-        if (btn.dataset.ryokanNotifTestBound === '1') return;
-        btn.dataset.ryokanNotifTestBound = '1';
-        btn.addEventListener('click', notifTestClickHandler);
-    });
-}
-
-// Per-card test button click handler. Extracted so the same fn
-// can be referenced from the htmx:afterSettle binding (after a
-// section-partial swap) and the initial DOMContentLoaded /
-// boost-nav apply pass without duplicating closure construction.
-async function notifTestClickHandler() {
-    var btn = this;
-    var id = btn.getAttribute('data-test-provider');
-    var out = document.getElementById('test-result-' + id);
-    if (out) {
-        out.textContent = 'Sending...';
-        out.className = 'notif-test-result';
-    }
-    try {
-        var r = await fetch('/api/notifications/' + id + '/test', { method: 'POST' });
-        var data = await r.json();
-        if (out) {
-            if (r.ok) {
-                out.textContent = 'OK (' + (data.status || 200) + ')';
-                out.className = 'notif-test-result ok';
-            } else {
-                out.textContent = 'Error: ' + (data.error || data.body || r.statusText);
-                out.className = 'notif-test-result err';
-            }
-        }
-    } catch (e) {
-        if (out) {
-            out.textContent = 'Network error: ' + e.message;
-            out.className = 'notif-test-result err';
-        }
-    }
 }
 
 // ── Settings → Indexers shared add/edit modal ─────────────────────

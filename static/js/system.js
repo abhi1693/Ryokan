@@ -445,3 +445,154 @@ async function clearRssHistory(btn) {
         failureTitle: 'Clear failed',
     });
 }
+
+// ── System → Notifications card+modal (issue gh-121) ────────────────
+//
+// Same shape as the DC modal helpers in static/js/settings.js. Lives
+// in system.js (not settings.js) because the Notifications tab is
+// mounted on the System page, and base.html only loads the per-page
+// JS for the active page. Boot-order discipline for hx-boost re-execs:
+// `var` (not `let` / `const`) at module scope, one-shot guard via
+// `__ryokanSystemNotifModule` for the listeners.
+function openNotificationModal(title) {
+    var modal = document.getElementById('notif-modal');
+    if (!modal) return;
+    if (typeof title === 'string' && title.length > 0) {
+        var titleEl = document.getElementById('notif-modal-title');
+        if (titleEl) titleEl.textContent = title;
+    }
+    modal.style.display = 'flex';
+    var firstInput = modal.querySelector('input[type="text"], input[type="url"]');
+    if (firstInput) firstInput.focus();
+}
+function closeNotificationModal() {
+    var modal = document.getElementById('notif-modal');
+    if (modal) modal.style.display = 'none';
+}
+function fetchAndOpenNotifModal(url, title) {
+    var body = document.getElementById('notif-modal-body');
+    if (body) body.innerHTML = '';
+    openNotificationModal(title);
+    if (window.htmx) {
+        window.htmx.ajax('GET', url, {
+            target: '#notif-modal-body',
+            swap: 'innerHTML',
+        });
+    }
+}
+function openNotificationEditModal(id, name) {
+    fetchAndOpenNotifModal(
+        '/system/notifications/' + encodeURIComponent(id) + '/edit-form',
+        'Editing ' + (name || 'notification provider')
+    );
+}
+function openNotificationAddModal() {
+    fetchAndOpenNotifModal(
+        '/system/notifications/add-form',
+        'Add notification provider'
+    );
+}
+// Kind-flip + clear-secret + in-modal Send-test wiring. Called on
+// every htmx:afterSettle into `#notif-modal-body` so the freshly-
+// rendered form picks up behavior without per-template inline JS.
+function bindNotifModalForm(form) {
+    if (!form || form.dataset.ryokanNotifFormBound === '1') return;
+    form.dataset.ryokanNotifFormBound = '1';
+
+    var kindSelect = form.querySelector('[data-notif-kind-select]');
+    if (kindSelect) {
+        kindSelect.addEventListener('change', function () {
+            var k = kindSelect.value;
+            form.querySelectorAll('[data-notif-field-group]').forEach(function (g) {
+                g.style.display = (g.dataset.notifFieldGroup === k) ? '' : 'none';
+            });
+        });
+    }
+
+    form.querySelectorAll('[data-notif-clear-secret]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var id = btn.getAttribute('data-notif-clear-secret');
+            var input = document.getElementById(id);
+            if (!input) return;
+            input.value = '__CLEAR__';
+            input.placeholder = '[will be cleared on save]';
+            input.type = 'text';   // unmask so the user sees the sentinel
+        });
+    });
+
+    form.querySelectorAll('[data-test-provider]').forEach(function (btn) {
+        btn.addEventListener('click', notifTestClickHandler);
+    });
+}
+// Per-card test button click handler. Bound on every section-partial
+// swap so a freshly-saved provider's Test button is wired without a
+// page reload. Uses `function() { ... this ... }` (not arrow) so the
+// click target stays accessible via `this`.
+async function notifTestClickHandler() {
+    var btn = this;
+    var id = btn.getAttribute('data-test-provider');
+    // Modal Send-test button targets #notif-modal-test-result-{id};
+    // per-card Test button targets #test-result-{id}. Try modal
+    // first, fall back to card.
+    var out = document.getElementById('notif-modal-test-result-' + id)
+        || document.getElementById('test-result-' + id);
+    var inModal = (out && out.id.indexOf('notif-modal') === 0);
+    if (out) {
+        out.textContent = 'Sending...';
+        out.className = inModal ? 'notif-modal-test-result' : 'notif-test-result';
+    }
+    try {
+        var r = await fetch('/api/notifications/' + id + '/test', { method: 'POST' });
+        var data = await r.json();
+        if (out) {
+            if (r.ok) {
+                out.textContent = 'OK (' + (data.status || 200) + ')';
+                out.className += ' ok';
+            } else {
+                out.textContent = 'Error: ' + (data.error || data.body || r.statusText);
+                out.className += ' err';
+            }
+        }
+    } catch (e) {
+        if (out) {
+            out.textContent = 'Network error: ' + e.message;
+            out.className += ' err';
+        }
+    }
+}
+// Boot-time + lifecycle wiring. One-shot guard so hx-boost re-execs
+// of system.js don't accumulate listener copies on every nav-back.
+if (!window.__ryokanSystemNotifModule) {
+    window.__ryokanSystemNotifModule = true;
+    document.body.addEventListener('htmx:afterSettle', function(ev) {
+        if (ev.target && ev.target.id === 'notif-modal-body') {
+            var form = ev.target.querySelector('form');
+            if (form) bindNotifModalForm(form);
+            var firstInput = ev.target.querySelector('input[type="text"], input[type="url"]');
+            if (firstInput) firstInput.focus();
+        }
+        // Per-card test buttons live OUTSIDE the modal — re-bind on
+        // every section-partial swap so a freshly-saved provider's
+        // Test button is wired without a page reload.
+        if (ev.target && ev.target.id === 'notif-section') {
+            ev.target.querySelectorAll('[data-test-provider]').forEach(function (btn) {
+                if (btn.dataset.ryokanNotifTestBound === '1') return;
+                btn.dataset.ryokanNotifTestBound = '1';
+                btn.addEventListener('click', notifTestClickHandler);
+            });
+        }
+    });
+}
+// Initial pass for first-paint and boost-nav re-entries — the
+// listener above attaches once via the guard, but the pre-rendered
+// form body and per-card buttons need wiring on every page load.
+function applyNotifInitialBindings() {
+    document.querySelectorAll('#notif-modal-body form').forEach(bindNotifModalForm);
+    document.querySelectorAll('#notif-section [data-test-provider]').forEach(function (btn) {
+        if (btn.dataset.ryokanNotifTestBound === '1') return;
+        btn.dataset.ryokanNotifTestBound = '1';
+        btn.addEventListener('click', notifTestClickHandler);
+    });
+}
+window.addEventListener('DOMContentLoaded', applyNotifInitialBindings);
+applyNotifInitialBindings();
