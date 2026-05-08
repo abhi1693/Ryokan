@@ -67,9 +67,42 @@
 
 .nav-logout { color: var(--text-dim) !important; }
 
+/* Mobile-only icon logout. Hidden on desktop (where the text "Logout"
+   in nav-links handles the action); revealed on mobile via the
+   media query below. The icon button takes the same .nav-links
+   slot the text version did but renders as a small square instead. */
+.nav-logout-mobile {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    color: var(--text-dim);
+    border-radius: var(--radius);
+    transition: color 0.15s, background 0.15s;
+}
+.nav-logout-mobile:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+}
+.nav-logout-mobile svg {
+    flex-shrink: 0;
+}
+
 @media (max-width: 640px) {
+    /* Keep .nav-links flexed on mobile but hide every child except
+       the mobile logout icon, which becomes the only thing visible
+       in the topbar's right slot. The bottom mobile-tabbar handles
+       primary nav. */
     .nav-links {
+        display: flex;
+        gap: 0;
+    }
+    .nav-links > *:not(.nav-logout-mobile) {
         display: none;
+    }
+    .nav-logout-mobile {
+        display: inline-flex;
     }
     .mobile-tabbar {
         display: flex;

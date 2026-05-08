@@ -599,6 +599,74 @@
     pointer-events: none;
 }
 
+/* Mobile bulk-select is punted — the Select toggle lives in
+   `.nav-links` (hidden below --bp-phone) so users can't enter
+   selection mode on mobile anyway. Belt-and-suspenders: hide the
+   toolbar unconditionally below the breakpoint to handle the
+   resize-from-desktop edge case (user shrinks viewport while in
+   selecting mode → toolbar would otherwise stay visible and clash
+   with the bottom mobile-tabbar). Mobile bulk ops as a feature is
+   tracked separately. */
+@media (max-width: 640px) {
+    .bulk-action-toolbar {
+        display: none !important;
+    }
+}
+
+/* Library header on mobile: stack vertically. The default
+   page-header-row is a flex row with the title on the left and
+   filter controls + Add Series on the right; below --bp-phone the
+   right side wraps awkwardly (title squeezed onto two lines, +Add
+   Series orphaned in the middle of the row). Stacking gives each
+   slot its own row so the layout reads top-to-bottom: title,
+   search + filters, Add Series. */
+@media (max-width: 640px) {
+    .library-header-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+    .library-header-row h2 {
+        margin: 0;
+    }
+    /* Right-side wrapper: the filter form + Add Series share a
+       container <div> in the template. Let it flex-wrap so its
+       children stack cleanly. */
+    .library-header-row > div:last-child {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: stretch;
+    }
+    .library-filter-form {
+        flex-wrap: wrap;
+        width: 100%;
+        gap: 8px;
+    }
+    /* Search input goes full-width. The wide variant (no list
+       dropdown) was already 100% via the `width: 406px` rule
+       hitting the viewport cap; standardize. */
+    .library-filter-form .library-search-input,
+    .library-filter-form .library-search-input.library-search-input-wide {
+        width: 100%;
+        min-width: 0;
+    }
+    /* List + sort dropdowns + Clear share row 2; let them flex so
+       multiple controls fit on one mobile row when the list dropdown
+       is present. */
+    .library-filter-form .folder-select {
+        flex: 1 1 calc(50% - 4px);
+        width: auto;
+    }
+    /* Add Series button breaks to full-width with no left margin
+       (the original 32px sat next to the filters; on mobile it
+       just creates a misalignment). */
+    .library-header-row .btn-primary {
+        margin-left: 0 !important;
+        width: 100%;
+    }
+}
+
 /* Sticky bottom toolbar. Soft-rounded rectangle (was pill in earlier
    pass; squarer reads as "tool" rather than "toast") centered at the
    bottom, slides up when in selecting mode. The mauve glow ring
