@@ -66,7 +66,7 @@ Day-to-day knobs.
 
 ## On the System page (not Settings)
 
-- **Allow non-English releases**: when off, Nyaa search restricts to category `1_2` (English-translated). When on, Ryokan also pulls from category `1_0` (Anime All; includes untranslated and multi-sub releases). Music releases always search `1_1` + `2_0` regardless of this toggle. Lives on the System page rather than Settings because it's a runtime toggle that affects in-flight searches, not stored config.
+A few runtime toggles live on the **System** page rather than under Settings, including **Allow non-English releases** and the **Force MAL / Kitsu fallback** switches. See [System → Debug](system.md#debug) for the full list and what each does.
 
 ## Reset / wipe state
 
