@@ -424,7 +424,7 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
     - **Label**: `ryokan-anime`
     - **Default for this protocol**: on
 
-    If you skipped htpasswd in step 1 (you'll have to manually delete the `./passwd:/passwd` mount from the compose), leave Username and Password blank.
+    If you skipped htpasswd in step 1 (you'll have to manually delete the `/srv/docker/rutorrent/passwd:/passwd` mount from the compose), leave Username and Password blank.
 
 === "SABnzbd"
 

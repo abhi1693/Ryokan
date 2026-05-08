@@ -53,6 +53,13 @@
     },
     rtorrent: {
       label: 'rTorrent (ruTorrent)',
+      // Compose-side service name. Distinct from the kind key
+      // (`rtorrent`) because the rest of the docs (quick-start.md,
+      // download-clients.md) refer to the container as `rutorrent`,
+      // matching the upstream image's natural labeling. Use this
+      // wherever the container name leaks through: the compose
+      // service block, the URL Ryokan dials, and the appdata path.
+      service_name: 'rutorrent',
       // crazymax/rtorrent-rutorrent is the maintained image;
       // linuxserver's rutorrent was deprecated and their README
       // points users at this one.
@@ -69,8 +76,8 @@
       category: 'anime',
       download_path: '/downloads',
       // /RPC2 path is required; rTorrent's XML-RPC endpoint.
-      default_url: 'http://rtorrent:8000/RPC2',
-      config_dir: 'rtorrent',
+      default_url: 'http://rutorrent:8000/RPC2',
+      config_dir: 'rutorrent',
       // crazy-max image's config volume is /data (linuxserver was /config).
       config_mount_target: '/data',
       env: {},
@@ -143,7 +150,12 @@
   function urlForClient(kind, cfg) {
     const c = CLIENTS[kind];
     if (isBehindVpn(kind, cfg)) {
-      return c.default_url.replace(`://${kind}:`, '://gluetun:');
+      // Use service_name (compose-side) rather than kind (form-side)
+      // since the URL contains the container name, not the form value.
+      // Same difference for everyone except rtorrent (kind=rtorrent,
+      // service=rutorrent).
+      const serviceName = c.service_name || kind;
+      return c.default_url.replace(`://${serviceName}:`, '://gluetun:');
     }
     return c.default_url;
   }
@@ -184,9 +196,13 @@
     );
     const envBlock = baseEnv.concat(extraEnv).join('\n');
 
-    const lines = [`  ${kind}:`];
+    // Compose service name and container name. Defaults to the kind
+    // key; overridable via `service_name` (currently rtorrent →
+    // rutorrent so the URL Ryokan dials matches the rest of the docs).
+    const svc = c.service_name || kind;
+    const lines = [`  ${svc}:`];
     lines.push(`    image: ${c.image}`);
-    lines.push(`    container_name: ${kind}`);
+    lines.push(`    container_name: ${svc}`);
     if (behindVpn) {
       lines.push('    network_mode: "service:gluetun"');
       lines.push('    depends_on:');
@@ -215,7 +231,12 @@
     // enable auth without having to edit the compose. When the folder
     // is empty, the image runs without auth.
     if (kind === 'rtorrent') {
-      lines.push(`      - ${cfg.paths.appdata}/rtorrent/passwd:/passwd`);
+      // Note: this nests under the same parent the rTorrent /data
+      // mount uses (${appdata}/rutorrent for /data,
+      // ${appdata}/rutorrent/passwd for /passwd). Container targets
+      // are independent so the host-side overlap is harmless; the
+      // docs/quick-start does the same layering.
+      lines.push(`      - ${cfg.paths.appdata}/rutorrent/passwd:/passwd`);
     }
     lines.push(`      - ${cfg.paths.downloads}:${c.download_path}`);
     lines.push('    environment:');
@@ -616,12 +637,12 @@ services:
       lines.push('and /passwd/rpc.htpasswd exist. Without the files, both are open.');
       lines.push('Generate both with the same credentials in one shot:');
       lines.push('');
-      lines.push(`    sudo mkdir -p ${cfg.paths.appdata}/rtorrent/passwd`);
+      lines.push(`    sudo mkdir -p ${cfg.paths.appdata}/rutorrent/passwd`);
       lines.push('    docker run --rm httpd:2.4-alpine htpasswd -Bbn admin "REPLACE-WITH-YOUR-PASSWORD" \\');
-      lines.push(`      | sudo tee ${cfg.paths.appdata}/rtorrent/passwd/rutorrent.htpasswd > /dev/null`);
-      lines.push(`    sudo cp ${cfg.paths.appdata}/rtorrent/passwd/rutorrent.htpasswd \\`);
-      lines.push(`        ${cfg.paths.appdata}/rtorrent/passwd/rpc.htpasswd`);
-      lines.push(`    sudo chown -R ${cfg.puid}:${cfg.pgid} ${cfg.paths.appdata}/rtorrent/passwd`);
+      lines.push(`      | sudo tee ${cfg.paths.appdata}/rutorrent/passwd/rutorrent.htpasswd > /dev/null`);
+      lines.push(`    sudo cp ${cfg.paths.appdata}/rutorrent/passwd/rutorrent.htpasswd \\`);
+      lines.push(`        ${cfg.paths.appdata}/rutorrent/passwd/rpc.htpasswd`);
+      lines.push(`    sudo chown -R ${cfg.puid}:${cfg.pgid} ${cfg.paths.appdata}/rutorrent/passwd`);
       lines.push('');
       lines.push('Same credentials cover ruTorrent web UI and Ryokan XML-RPC.');
       lines.push('');
@@ -794,12 +815,29 @@ services:
   // wiring can find it — which makes `getElementById('compose-output')`
   // return null at runtime. Data attributes survive that rewrite.
   function rerender() {
-    const cfg = readForm();
-    if (!cfg) return;
-    const composeEl = document.querySelector('[data-picker="compose"] code');
-    const settingsEl = document.querySelector('[data-picker="settings"] code');
-    if (composeEl) composeEl.textContent = renderCompose(cfg);
-    if (settingsEl) settingsEl.textContent = renderSettings(cfg);
+    // Wrapped in try/catch for the same reason `init()` is — the
+    // picker IS the page; a silent throw from inside renderCompose
+    // / renderSettings (malformed input value, future renderer
+    // edit, etc.) would freeze the output at its last good state
+    // with no diagnostic.
+    try {
+      const cfg = readForm();
+      if (!cfg) return;
+      const composeEl = document.querySelector('[data-picker="compose"] code');
+      const settingsEl = document.querySelector('[data-picker="settings"] code');
+      if (composeEl) composeEl.textContent = renderCompose(cfg);
+      if (settingsEl) settingsEl.textContent = renderSettings(cfg);
+    } catch (err) {
+      const composeEl = document.querySelector('[data-picker="compose"] code');
+      if (composeEl) {
+        composeEl.textContent =
+          '# picker.js render error: ' +
+          (err && err.message ? err.message : String(err)) +
+          '\n# Open DevTools console for the full stack.';
+      }
+      // eslint-disable-next-line no-console
+      console.error('[picker.js rerender]', err);
+    }
   }
 
   function copyCompose() {
