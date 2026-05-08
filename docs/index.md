@@ -18,7 +18,9 @@ If you've used Sonarr for TV, the shape is the same. Ryokan is just the anime-tu
 
 ## System requirements
 
-Ryokan runs as a single Docker container. Modest:
+Ryokan runs as a single Docker container. If you're new to Docker, the [Docker overview](https://docs.docker.com/get-started/docker-overview/) is a 10-minute read that covers what containers, images, and volumes are; the rest of these docs assume you've got that mental model.
+
+Hardware-wise, requirements are modest:
 
 - **CPU**: anything from the last decade. ARM64 (Raspberry Pi, Apple Silicon under Docker Desktop) and x86_64 both supported.
 - **RAM**: ~150 MB at idle. Spikes briefly during library scans.

@@ -6,7 +6,7 @@ If you don't have a download client yet, or you want a complete stack with Jelly
 
 ## What you'll need
 
-- **Docker** installed (`docker --version` works at the terminal). If you don't have it: [Docker's getting-started guide](https://docs.docker.com/get-started/).
+- **Docker** installed (`docker --version` works at the terminal). New to Docker? Read [Docker's overview](https://docs.docker.com/get-started/docker-overview/) first; it covers what containers, images, and volumes are, which the rest of this page assumes you know.
 - **A torrent or usenet client** running somewhere your machine can reach. Doesn't have to be on the same host. Supported: qBittorrent, Deluge, Transmission, rTorrent, SABnzbd.
 - **About 10 minutes**.
 

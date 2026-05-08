@@ -2,7 +2,7 @@
 
 Ryokan ships as a Docker image at `ghcr.io/johnthreekay/ryokan:latest`. The image runs on `linux/amd64` and `linux/arm64`. The fastest way to get going is `docker compose up`.
 
-If you're new to Docker, skim [Docker's getting-started guide](https://docs.docker.com/get-started/) first; this page assumes you know what `docker compose up -d` does.
+If you're new to Docker, skim [Docker's overview](https://docs.docker.com/get-started/docker-overview/) first; this page assumes you know what `docker compose up -d` does.
 
 ## Quick install
 
