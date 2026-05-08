@@ -64,6 +64,7 @@ nav:
   - Installation:
     - Docker (recommended): install.md
     - Docker reference: docker.md
+    - Build from source: from-source.md
   - Guides:
     - Configuration: configuration.md
     - Download clients: download-clients.md
