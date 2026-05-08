@@ -53,24 +53,42 @@
     },
     rtorrent: {
       label: 'rTorrent (ruTorrent)',
-      image: 'lscr.io/linuxserver/rutorrent:latest',
+      // crazymax/rtorrent-rutorrent is the maintained image;
+      // linuxserver's rutorrent was deprecated and their README
+      // points users at this one.
+      image: 'crazymax/rtorrent-rutorrent:latest',
+      // XML-RPC; this is what Ryokan talks to. Reachable via
+      // Docker DNS only (`expose_main_port: false`); we don't
+      // need to host-map it.
       port: 8000,
-      extra_ports: ['51413:51413', '6881:6881/udp'],
+      expose_main_port: false,
+      // 8082:8080 host:container = ruTorrent web UI.
+      // 50000 = inbound BT peer connections.
+      // 6881/udp = DHT.
+      extra_ports: ['8082:8080', '50000:50000', '6881:6881/udp'],
       category: 'anime',
       download_path: '/downloads',
-      default_url: 'http://rtorrent:8000',
+      // /RPC2 path is required; rTorrent's XML-RPC endpoint.
+      default_url: 'http://rtorrent:8000/RPC2',
       config_dir: 'rtorrent',
+      // crazy-max image's config volume is /data (linuxserver was /config).
+      config_mount_target: '/data',
       env: {},
       protocol: 'torrent',
     },
     sabnzbd: {
       label: 'SABnzbd',
       image: 'lscr.io/linuxserver/sabnzbd:latest',
-      port: 8081,
+      // SAB listens on 8080 inside the container; we map it to host
+      // 8081 so the conventional 8080 stays free for qBit-on-host.
+      // Ryokan reaches SAB through Docker DNS at the *container*
+      // port (8080), not the host port (8081).
+      port: 8080,
+      host_port: 8081,
       extra_ports: [],
       category: 'anime',
       download_path: '/downloads',
-      default_url: 'http://sabnzbd:8081',
+      default_url: 'http://sabnzbd:8080',
       config_dir: 'sabnzbd',
       env: {},
       protocol: 'usenet',
@@ -96,9 +114,9 @@
       pgid: get('pgid').value || '1000',
       tz: get('tz').value || 'UTC',
       paths: {
-        downloads: get('downloads_path').value || '/srv/downloads',
+        downloads: get('downloads_path').value || '/srv/media/downloads',
         media: get('media_path').value || '/srv/media/anime',
-        appdata: get('appdata_path').value || '/srv/appdata',
+        appdata: get('appdata_path').value || '/srv/docker',
       },
     };
   }
@@ -119,12 +137,25 @@
 
     // When behind gluetun, the download client shares gluetun's
     // network namespace via `network_mode: "service:gluetun"`. Host
-    // ports get exposed on the gluetun container instead — they
+    // ports get exposed on the gluetun container instead; they
     // can't coexist with `network_mode: service:`. The download
     // client's own `networks:` and `ports:` blocks must be omitted.
+    //
+    // `host_port` overrides the host side of the main port mapping
+    // when host and container ports diverge (SAB listens on 8080
+    // inside but is mapped to 8081 outside). `expose_main_port:
+    // false` skips the main mapping entirely (rTorrent's XML-RPC
+    // is reachable via Docker DNS only; no host expose needed).
+    const mainMapping =
+      c.expose_main_port === false
+        ? null
+        : `"${c.host_port || c.port}:${c.port}"`;
     const portsList = behindVpn
       ? null
-      : [`"${c.port}:${c.port}"`, ...c.extra_ports.map((p) => `"${p}"`)];
+      : [
+          ...(mainMapping ? [mainMapping] : []),
+          ...c.extra_ports.map((p) => `"${p}"`),
+        ];
 
     const baseEnv = [
       `      PUID: "${cfg.puid}"`,
@@ -145,11 +176,30 @@
       lines.push('      - gluetun');
     } else {
       lines.push('    networks: [media]');
-      lines.push('    ports:');
-      portsList.forEach((p) => lines.push(`      - ${p}`));
+      if (portsList && portsList.length > 0) {
+        lines.push('    ports:');
+        portsList.forEach((p) => lines.push(`      - ${p}`));
+      }
     }
     lines.push('    volumes:');
-    lines.push(`      - ${cfg.paths.appdata}/${c.config_dir}:/config`);
+    const configTarget = c.config_mount_target || '/config';
+    lines.push(`      - ${cfg.paths.appdata}/${c.config_dir}:${configTarget}`);
+    // SAB splits in-progress (`/incomplete-downloads`) from completed
+    // (`/downloads`); without a mount for the incomplete side, SAB
+    // falls back to writing it under /config which clutters the
+    // config volume and makes pause/resume across container restarts
+    // unreliable.
+    if (kind === 'sabnzbd') {
+      lines.push(`      - ${cfg.paths.appdata}/sabnzbd/incomplete:/incomplete-downloads`);
+    }
+    // rTorrent's crazy-max image looks for htpasswd files at /passwd
+    // (rutorrent.htpasswd for the web UI, rpc.htpasswd for XML-RPC).
+    // Mount the folder unconditionally so users can drop files in to
+    // enable auth without having to edit the compose. When the folder
+    // is empty, the image runs without auth.
+    if (kind === 'rtorrent') {
+      lines.push(`      - ${cfg.paths.appdata}/rtorrent/passwd:/passwd`);
+    }
     lines.push(`      - ${cfg.paths.downloads}:${c.download_path}`);
     lines.push('    environment:');
     lines.push(envBlock);
@@ -238,14 +288,24 @@ ${deps.map((d) => `      - ${d}`).join('\n')}
     // Forward each behind-VPN download client's host port through
     // gluetun's network namespace. Without these, the WebUI is
     // unreachable from the host even though the container is
-    // running fine inside the VPN namespace.
+    // running fine inside the VPN namespace. Mirrors the
+    // host_port / expose_main_port logic in renderClient so
+    // SAB (host:container divergence) and rTorrent (XML-RPC
+    // not host-exposed) work correctly here too. SAB is usenet
+    // so it never passes the isBehindVpn filter, but the shape
+    // stays consistent.
     const portForwards = cfg.dlclients
       .filter((k) => isBehindVpn(k, cfg))
       .flatMap((k) => {
         const c = CLIENTS[k];
-        return [`      - "${c.port}:${c.port}"`].concat(
-          c.extra_ports.map((p) => `      - "${p}"`)
-        );
+        const mainMapping =
+          c.expose_main_port === false
+            ? null
+            : `      - "${c.host_port || c.port}:${c.port}"`;
+        return [
+          ...(mainMapping ? [mainMapping] : []),
+          ...c.extra_ports.map((p) => `      - "${p}"`),
+        ];
       });
     const portsBlock = portForwards.length
       ? `    ports:\n${portForwards.join('\n')}\n`
@@ -416,13 +476,30 @@ ${portsBlock}    volumes:
     const proxy = renderProxy(cfg);
     if (proxy) services.push(proxy);
 
+    // Enumerate per-service appdata subdirectories so the mkdir
+    // pre-creates each one with the right ownership. Without this,
+    // Docker creates lazy bind-mount targets as root on first up
+    // and a Jellyfin / Seerr / non-linuxserver container can fail
+    // to write to its own config volume.
+    const serviceDirs = ['ryokan'];
+    cfg.dlclients.forEach((k) => serviceDirs.push(CLIENTS[k].config_dir));
+    if (cfg.media_server === 'jellyfin') serviceDirs.push('jellyfin');
+    if (cfg.requests === 'seerr') serviceDirs.push('seerr');
+    if (cfg.vpn === 'gluetun') serviceDirs.push('gluetun');
+    if (cfg.proxy === 'caddy') serviceDirs.push('caddy');
+    if (cfg.proxy === 'traefik') serviceDirs.push('traefik');
+    if (cfg.proxy === 'nginx') serviceDirs.push('nginx');
+    const appdataPaths = serviceDirs
+      .map((d) => `${cfg.paths.appdata}/${d}`)
+      .join(' ');
+
     const header = `# =============================================================================
 # Ryokan stack: generated from the picker
 # =============================================================================
 #
 # Before first \`docker compose up\`:
-#   mkdir -p ${cfg.paths.downloads} ${cfg.paths.media} ${cfg.paths.appdata}
-#   chown -R ${cfg.puid}:${cfg.pgid} ${cfg.paths.downloads} ${cfg.paths.media} ${cfg.paths.appdata}
+#   sudo mkdir -p ${cfg.paths.downloads} ${cfg.paths.media} ${appdataPaths}
+#   sudo chown -R ${cfg.puid}:${cfg.pgid} ${cfg.paths.downloads} ${cfg.paths.media} ${cfg.paths.appdata}
 #
 # Path layout: ${cfg.paths.downloads} (downloads) and ${cfg.paths.media}
 # (library) should be on the same filesystem so post-processing can
@@ -472,6 +549,14 @@ services:
           lines.push('                 correct credentials until you turn off Host header validation.');
           lines.push('                 Tools → Options → Web UI → uncheck "Enable Host header validation",');
           lines.push('                 Save, then `docker compose restart qbittorrent`.');
+        } else if (kind === 'rtorrent') {
+          // crazy-max image looks for /passwd/rutorrent.htpasswd (web UI)
+          // and /passwd/rpc.htpasswd (XML-RPC). Without files, both are
+          // unauthenticated. The compose mounts /passwd unconditionally
+          // so users can drop files in to enable auth without editing
+          // the compose; the post-loop block below shows how to generate.
+          lines.push('  Username:      admin     (matches /passwd/rpc.htpasswd; see "Generate htpasswd" below)');
+          lines.push('  Password:      whatever you put in rpc.htpasswd');
         } else if (kind === 'sabnzbd') {
           lines.push('  API Key:       (paste from SAB → Config → General → API Key)');
         }
@@ -489,6 +574,25 @@ services:
         );
         lines.push('');
       });
+    }
+
+    if (cfg.dlclients.includes('rtorrent')) {
+      lines.push('--- Generate htpasswd for rTorrent (before first compose up) ---');
+      lines.push('');
+      lines.push('The crazy-max rtorrent-rutorrent image enforces basic auth on the');
+      lines.push('web UI and the XML-RPC endpoint when /passwd/rutorrent.htpasswd');
+      lines.push('and /passwd/rpc.htpasswd exist. Without the files, both are open.');
+      lines.push('Generate both with the same credentials in one shot:');
+      lines.push('');
+      lines.push(`    sudo mkdir -p ${cfg.paths.appdata}/rtorrent/passwd`);
+      lines.push('    docker run --rm httpd:2.4-alpine htpasswd -Bbn admin "REPLACE-WITH-YOUR-PASSWORD" \\');
+      lines.push(`      | sudo tee ${cfg.paths.appdata}/rtorrent/passwd/rutorrent.htpasswd > /dev/null`);
+      lines.push(`    sudo cp ${cfg.paths.appdata}/rtorrent/passwd/rutorrent.htpasswd \\`);
+      lines.push(`        ${cfg.paths.appdata}/rtorrent/passwd/rpc.htpasswd`);
+      lines.push(`    sudo chown -R ${cfg.puid}:${cfg.pgid} ${cfg.paths.appdata}/rtorrent/passwd`);
+      lines.push('');
+      lines.push('Same credentials cover ruTorrent web UI and Ryokan XML-RPC.');
+      lines.push('');
     }
 
     if (cfg.media_server === 'jellyfin') {

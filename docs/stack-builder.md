@@ -63,10 +63,10 @@ This is opinionated. Sane defaults beat a config matrix. If you need something t
 
 <fieldset>
   <legend>Host paths</legend>
-  <p class="hint">Where on your host the data lives. The defaults match the canonical layout. Both downloads and media should be on the same filesystem if you want post-processing to use hardlinks.</p>
-  <label>Downloads <input type="text" name="downloads_path" value="/srv/downloads"></label>
+  <p class="hint">Where on your host the data lives. Defaults follow the convention used by the <a href="quick-start.md">quick start</a>: media under <code>/srv/media/</code>, per-service config under <code>/srv/docker/&lt;service&gt;/</code>. Both downloads and the library should be on the same filesystem if you want post-processing to use hardlinks.</p>
+  <label>Downloads <input type="text" name="downloads_path" value="/srv/media/downloads"></label>
   <label>Media library <input type="text" name="media_path" value="/srv/media/anime"></label>
-  <label>App config root <input type="text" name="appdata_path" value="/srv/appdata"></label>
+  <label>Per-service config root <input type="text" name="appdata_path" value="/srv/docker"></label>
 </fieldset>
 
 </form>
@@ -86,7 +86,7 @@ After the stack is up, log into Ryokan at `http://localhost:8978` and paste thes
 ## Notes
 
 - **Hardlinks**: post-processing defaults to hardlink mode. Both the downloads and media paths above are mounted at matching paths inside Ryokan's container, so qBit-reports `/downloads/foo.mkv` and Ryokan-sees `/downloads/foo.mkv` (no path translation needed). If you split downloads and media across different host filesystems, hardlinks will fall back to copy automatically.
-- **First-run**: every container needs its `appdata` subdirectory pre-owned by the PUID/PGID you set above. `mkdir -p /srv/appdata/{ryokan,...} && chown -R 1000:1000 /srv/appdata` once before `docker compose up`.
+- **First-run**: every container needs its `/srv/docker/<service>/` subdirectory pre-owned by the PUID/PGID you set above. The generated compose's header comment includes the exact `mkdir + chown` for the services you picked.
 - **Reverse proxy**: the generated config is a stub. You'll need to point a real domain (or Cloudflare Tunnel route) at the proxy and edit the proxy's config file with your actual hostname.
 - **VPN**: Gluetun expects WireGuard or OpenVPN credentials in its env. Wrong/missing credentials show up as connection failures on the download client (which can't reach trackers). The gluetun container's logs are the right place to debug.
 - **qBit "Unauthorized" with correct credentials**: qBittorrent 4.5+ enables Host header validation by default. When Ryokan-in-container POSTs to `http://qbittorrent:8080`, the `Host:` header it sends is `qbittorrent:8080`, which qBit refuses with 401 even when the username and password are right. Symptom in Ryokan: Settings → Connections shows the qBit row stuck on "qBittorrent Unauthorized" while the WebUI accessed from your browser works fine. Fix: in the qBit WebUI, **Tools → Options → Web UI**, uncheck **"Enable Host header validation"** (or add `qbittorrent` and your LAN IP to the allowlist if you'd rather keep it on). Save, then `docker compose restart qbittorrent`. SAB and Transmission don't do this check, which is why they connect without the same workaround.
