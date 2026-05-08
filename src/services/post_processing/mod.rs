@@ -1234,22 +1234,6 @@ async fn import_torrent(
                     ),
                 )
                 .await;
-                // Issue #118 — fire `Imported` per-file. The classifier
-                // re-pass below is what populates `episode_quality_tags.quality_tag`,
-                // but for the notification we want the just-resolved
-                // value. Lookup happens inside `emit_imported` against
-                // the live row; if classification hasn't landed yet
-                // (UNKNOWN row from grab time) the event ships an empty
-                // tag rather than skipping.
-                crate::services::notifications::emit_imported(
-                    state,
-                    target_series_id,
-                    ep_num,
-                    &src.display().to_string(),
-                    &dest_video.display().to_string(),
-                )
-                .await;
-
                 // Post-download re-classification (Layers 5 + 6). Runs ffprobe
                 // on the landed file and walks the series directory for BD
                 // artifacts, then upserts episode_quality_tags.
@@ -1389,6 +1373,23 @@ async fn import_torrent(
                         .await;
                     }
                 }
+
+                // Issue #118 — fire `Imported` per-file. Deliberately
+                // sequenced AFTER `update_classification` / `record_grab`
+                // so the DB lookup inside `emit_imported` reads the
+                // post-download `quality_tag`. Pre-classify the row
+                // either had the grab-time tag (often UNKNOWN) or no
+                // row at all, which surfaced as an empty Quality field
+                // in the Discord embed and a missing `quality_tag`
+                // string in the webhook JSON.
+                crate::services::notifications::emit_imported(
+                    state,
+                    target_series_id,
+                    ep_num,
+                    &src.display().to_string(),
+                    &dest_video.display().to_string(),
+                )
+                .await;
 
                 let dest_basename = dest_video
                     .file_name()
