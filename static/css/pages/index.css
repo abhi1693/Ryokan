@@ -519,24 +519,47 @@
     border-color: var(--accent);
 }
 
-/* "Select" toggle button in the filter row. Default-mode look matches
-   the other btn-secondary pills; active state (mode on) inverts to
-   mauve fill so the user has a constant visual confirmation that
-   they're in selecting mode. */
-.bulk-select-toggle {
+/* "Select" toggle button in the topbar (base.html nav-links). Lives
+   here rather than in the page filter row so it sits in the
+   persistent topbar — the same place Sonarr surfaces its "Select
+   Series" page-mode toggle. Conditionally rendered only when
+   `page == "library"`; on other pages the button is not in the
+   DOM at all (so toggleBulkSelectMode() can't be invoked from
+   pages that don't load index.js).
+   Default-mode look matches the surrounding nav links; active
+   state (mode on) inverts to mauve fill for constant visual
+   confirmation that mode is on. */
+.nav-action.bulk-select-toggle {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    transition: background 0.15s ease-out, color 0.15s ease-out, border-color 0.15s ease-out;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 6px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s, border-color 0.15s, transform 0.1s;
 }
-.bulk-select-toggle.active {
+.nav-action.bulk-select-toggle:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+    border-color: var(--border-accent);
+}
+.nav-action.bulk-select-toggle.active {
     background: var(--accent);
     border-color: var(--accent);
     color: var(--bg);
 }
-.bulk-select-toggle.active:hover {
+.nav-action.bulk-select-toggle.active:hover {
     background: var(--accent-hover);
     border-color: var(--accent-hover);
+}
+.nav-action.bulk-select-toggle:active {
+    transform: scale(0.97);
 }
 .bulk-select-toggle-icon {
     flex-shrink: 0;
@@ -558,9 +581,10 @@
     pointer-events: none;
 }
 
-/* Sticky bottom toolbar. Pill-shaped capsule centered at the bottom,
-   slides up when selection is non-empty. The mauve glow ring matches
-   the selected-card glow so the two visual surfaces feel paired. */
+/* Sticky bottom toolbar. Soft-rounded rectangle (was pill in earlier
+   pass; squarer reads as "tool" rather than "toast") centered at the
+   bottom, slides up when in selecting mode. The mauve glow ring
+   matches the selected-card glow so the two surfaces feel paired. */
 .bulk-action-toolbar {
     position: fixed;
     bottom: 24px;
@@ -570,8 +594,8 @@
     backdrop-filter: blur(16px) saturate(140%);
     -webkit-backdrop-filter: blur(16px) saturate(140%);
     border: 1px solid rgba(203, 166, 247, 0.3);
-    border-radius: 999px;
-    padding: 8px 8px 8px 18px;
+    border-radius: 12px;
+    padding: 8px 12px;
     box-shadow:
         0 12px 32px -8px rgba(0, 0, 0, 0.6),
         0 0 0 1px rgba(203, 166, 247, 0.12),

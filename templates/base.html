@@ -146,6 +146,21 @@
             <a href="/downloads" class="{% if page == "downloads" %}active{% endif %}">Downloads</a>
             <a href="/settings" class="{% if page == "settings" %}active{% endif %}">Settings</a>
             <a href="/system" class="{% if page == "system" %}active{% endif %}">System</a>
+            {# Bulk-select toggle. Library-only — hidden on every other
+               page since it acts on the library card grid. The button
+               lives here (not in index.html's filter row) so the
+               affordance is in the persistent topbar, matching how
+               Sonarr surfaces "Select Series" as a top-level page-mode
+               toggle rather than an inline filter control. #}
+            {% if page == "library" %}
+            <button type="button" id="bulk-select-toggle" class="nav-action bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select multiple series for bulk actions">
+                <svg class="bulk-select-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="9 11 12 14 22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                <span class="bulk-select-toggle-label">Select</span>
+            </button>
+            {% endif %}
             <a href="/logout" class="nav-logout" hx-boost="false">Logout</a>
         </div>
     </nav>
