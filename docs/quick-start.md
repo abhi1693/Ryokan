@@ -233,10 +233,13 @@ Pick the download client you want to use and save the matching `docker-compose.y
         image: crazymax/rtorrent-rutorrent:latest
         container_name: rutorrent
         ports:
-          - "8080:8080"        # ruTorrent web UI
-          - "8000:8000"        # XML-RPC (Ryokan talks to this)
+          - "8181:8080"        # ruTorrent web UI (host:container; 8181 picked to leave 8080 free for other clients)
           - "50000:50000"      # BT incoming peer connections
           - "6881:6881/udp"    # DHT
+        # XML-RPC (port 8000 inside the container) isn't host-exposed —
+        # Ryokan talks to it via Docker's per-compose network at
+        # `http://rutorrent:8000/RPC2`. Add `- "8000:8000"` here only if
+        # you want to hit it from the host with curl for debugging.
         volumes:
           - rutorrent-data:/data
           - ./downloads:/downloads     # contains /downloads/temp and /downloads/complete after first start
@@ -406,12 +409,12 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
 
 === "rTorrent"
 
-    Open <http://localhost:8080> to confirm ruTorrent's web UI loads. The crazy-max image doesn't ship with auth by default; if you're exposing this beyond localhost, mount an htpasswd file at `/passwd` (the image's README covers how).
+    Open <http://localhost:8181> to confirm ruTorrent's web UI loads. The crazy-max image doesn't ship with auth by default; if you're exposing this beyond localhost, mount an htpasswd file at `/passwd` (the image's README covers how).
 
     In Ryokan's add-client form:
 
     - **Kind**: rTorrent
-    - **URL**: `http://rutorrent:8000/RPC2` (port 8000 is the dedicated XML-RPC port; 8080 is the web UI)
+    - **URL**: `http://rutorrent:8000/RPC2` (port 8000 is the dedicated XML-RPC port inside the container; Ryokan reaches it via Docker's per-compose DNS without it needing a host-side mapping)
     - **Username** / **Password**: leave blank unless you've set up htpasswd
     - **Label**: `ryokan-anime`
     - **Default for this protocol**: on
