@@ -131,6 +131,23 @@
     return CLIENTS[kind].protocol === 'torrent';
   }
 
+  // The URL Ryokan should use to reach a given client. Behind gluetun
+  // the client shares gluetun's network namespace — its container
+  // name doesn't resolve on the user-defined media network, only
+  // `gluetun` does — so we rewrite the host part of `default_url` to
+  // target `gluetun` while preserving the port and path. Port works
+  // out: containers in a shared namespace see each other's listeners
+  // on localhost, so qBit's 8080 inside that namespace is reachable
+  // as gluetun:8080 from peer containers on `media`. Standalone (no
+  // VPN) clients keep their own container-name URL.
+  function urlForClient(kind, cfg) {
+    const c = CLIENTS[kind];
+    if (isBehindVpn(kind, cfg)) {
+      return c.default_url.replace(`://${kind}:`, '://gluetun:');
+    }
+    return c.default_url;
+  }
+
   function renderClient(kind, cfg) {
     const c = CLIENTS[kind];
     const behindVpn = isBehindVpn(kind, cfg);
@@ -527,8 +544,12 @@ services:
     } else {
       cfg.dlclients.forEach((kind, i) => {
         const c = CLIENTS[kind];
+        const url = urlForClient(kind, cfg);
+        const vpnNote = isBehindVpn(kind, cfg)
+          ? '   # behind gluetun: talk to it via the gluetun container'
+          : '';
         lines.push(`${c.label}:`);
-        lines.push(`  URL:           ${c.default_url}`);
+        lines.push(`  URL:           ${url}${vpnNote}`);
         if (kind === 'qbittorrent') {
           // qBit 4.6.1+ removed the hardcoded admin/adminadmin default
           // and instead generates a random temporary password on first
