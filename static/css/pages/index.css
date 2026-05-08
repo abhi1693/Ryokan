@@ -473,10 +473,16 @@
     box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.35);
 }
 
-/* Checked: mauve fill, white check mark via inline SVG background.
-   Dark outer halo lifts the chip off bright cover art so the
-   selection is unmistakable. */
-.series-card-select:checked {
+/* Checked visual. Driven by BOTH `:checked` (the form-element state)
+   AND `.series-card.selected .series-card-select` (the JS-managed
+   class on the parent card). Belt-and-suspenders: we set both in JS
+   so either path succeeding keeps the visual in sync — important
+   because some hx-boost re-render cases were leaving `:checked`
+   out of step with our authoritative selection set.
+   Mauve fill, white check mark via inline SVG; dark outer halo
+   lifts the chip off bright cover art. */
+.series-card-select:checked,
+.series-card.selected > .series-card-select {
     background: var(--accent);
     border-color: var(--accent);
     box-shadow:
@@ -539,10 +545,14 @@
     padding: 6px 14px;
     border: none;
     border-radius: var(--radius);
+    /* Match `.nav-links a` exactly: 14px font, body-inherited line-
+       height (1.6 from base.css's `body`). The default UA stylesheet
+       on <button> sets `line-height: normal` which renders shorter
+       than the surrounding anchors, so we restate explicitly. */
     font-size: 14px;
     font-weight: 500;
     font-family: inherit;
-    line-height: 1.2;
+    line-height: 1.6;
     cursor: pointer;
     transition: color 0.15s, background 0.15s, transform 0.1s;
 }
