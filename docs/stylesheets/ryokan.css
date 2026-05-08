@@ -82,10 +82,29 @@
     text-decoration-color: var(--md-accent-fg-color);
 }
 
-/* Tabbed content (used in quick-start, download-clients): active tab */
-.md-typeset .tabbed-set > input:checked + label {
-    color: var(--md-accent-fg-color);
-    border-color: var(--md-accent-fg-color);
+/* Tabbed content (used in quick-start, download-clients).
+ *
+ * pymdownx.tabbed with `alternate_style: true` (which mkdocs.yml sets)
+ * places labels inside a <div class="tabbed-labels"> wrapper, so the
+ * naïve `input:checked + label` selector doesn't match. The CSS-only
+ * way to target the active label is the nth-child pattern: the Nth
+ * checked input lights up the Nth label inside .tabbed-labels.
+ * Enumerated up to 9 tabs (covers our 5-client max with headroom).
+ *
+ * Material applies these same selectors with --md-accent-fg-color, but
+ * its slate-scheme overrides win on specificity, so we re-state with
+ * !important to force the mauve through. */
+.md-typeset .tabbed-set > input:nth-child(1):checked ~ .tabbed-labels > :nth-child(1),
+.md-typeset .tabbed-set > input:nth-child(2):checked ~ .tabbed-labels > :nth-child(2),
+.md-typeset .tabbed-set > input:nth-child(3):checked ~ .tabbed-labels > :nth-child(3),
+.md-typeset .tabbed-set > input:nth-child(4):checked ~ .tabbed-labels > :nth-child(4),
+.md-typeset .tabbed-set > input:nth-child(5):checked ~ .tabbed-labels > :nth-child(5),
+.md-typeset .tabbed-set > input:nth-child(6):checked ~ .tabbed-labels > :nth-child(6),
+.md-typeset .tabbed-set > input:nth-child(7):checked ~ .tabbed-labels > :nth-child(7),
+.md-typeset .tabbed-set > input:nth-child(8):checked ~ .tabbed-labels > :nth-child(8),
+.md-typeset .tabbed-set > input:nth-child(9):checked ~ .tabbed-labels > :nth-child(9) {
+    color: var(--md-accent-fg-color) !important;
+    border-color: var(--md-accent-fg-color) !important;
 }
 .md-typeset .tabbed-labels > label:hover {
     color: var(--md-accent-fg-color);
