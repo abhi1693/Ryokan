@@ -1402,6 +1402,15 @@ async fn import_torrent(
                 // row at all, which surfaced as an empty Quality field
                 // in the Discord embed and a missing `quality_tag`
                 // string in the webhook JSON.
+                //
+                // Quality tag is best-effort: if `update_classification`
+                // / `record_grab` errored above, the helper's lookup
+                // falls back to `COALESCE(quality_tag, '') = ""` and
+                // the event ships with an empty tag rather than
+                // skipping the dispatch. The file did land — users
+                // legitimately want the import notification even when
+                // the persist sidecar errored, and the empty-tag UX is
+                // the same as a true UNKNOWN classification.
                 crate::services::notifications::emit_imported(
                     state,
                     target_series_id,

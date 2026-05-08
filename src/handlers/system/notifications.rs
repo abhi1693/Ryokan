@@ -788,11 +788,13 @@ mod tests {
     #[test]
     fn build_webhook_config_preserves_user_authored_header_order() {
         // Regression guard for the BTreeMap-shuffles-headers bug:
-        // the user-typed sequence (Authorization first, X-Foo second)
-        // must round-trip through save → DB → re-read in the same
-        // order. Pre-fix, BTreeMap collect alphabetized to
-        // (Authorization, X-Foo) — which happens to match here, so
-        // the second case (X-A, A-Authorization) is the real test.
+        // the user-typed sequence must round-trip through save → DB →
+        // re-read in the same order. Pinning this requires inputs
+        // where alphabetical and insertion order DISAGREE — pre-fix
+        // (BTreeMap collect) would alphabetize, post-fix (preserve_order
+        // serde_json) preserves insertion. Z-First typed first, A-Second
+        // typed second: the user wants `[Z-First, A-Second]`; the
+        // broken code would emit `[A-Second, Z-First]`.
         let form = UpsertForm {
             id: None,
             name: "p".into(),
@@ -800,11 +802,7 @@ mod tests {
             enabled: Some("on".into()),
             webhook_url: "https://example.com/x".into(),
             webhook_secret: "".into(),
-            // X-Aaa is user-typed first; alphabetically it would sort
-            // BEFORE B-Authorization, but the user-typed order has
-            // Authorization first. The wire JSON must preserve user
-            // order.
-            webhook_headers: "B-Authorization: Bearer xyz\nX-Aaa: 1".into(),
+            webhook_headers: "Z-First: 1\nA-Second: 2".into(),
             discord_webhook_url: "".into(),
             events: Default::default(),
         };
@@ -815,8 +813,8 @@ mod tests {
                 .iter()
                 .map(|(k, _)| k.as_str())
                 .collect::<Vec<_>>(),
-            vec!["B-Authorization", "X-Aaa"],
-            "header order must match user-authored input"
+            vec!["Z-First", "A-Second"],
+            "header order must match user-authored input, not alphabetical"
         );
     }
 
