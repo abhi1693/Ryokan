@@ -1,0 +1,114 @@
+/* Ryokan-themed Zensical / Material overrides.
+ *
+ * Mirrors the colors and font choices Ryokan uses in `static/css/base.css`
+ * so the docs site reads as part of the same product rather than a generic
+ * MkDocs site. Targeted overrides only — Material's defaults handle layout,
+ * spacing, and component shapes; this file just tunes the palette and adds
+ * Murecho for display headings.
+ */
+
+/* Murecho — Ryokan's display font, pulled from Google Fonts since the
+   docs site doesn't co-host the woff2 files in the source tree. */
+@import url('https://fonts.googleapis.com/css2?family=Murecho:wght@500;600;700;800&display=swap');
+
+/* ── Light scheme ─────────────────────────────────────────────────── */
+
+[data-md-color-scheme="default"] {
+    --md-primary-fg-color: #8b5fbf;          /* darker mauve so it reads on white */
+    --md-primary-fg-color--light: #cba6f7;
+    --md-primary-fg-color--dark: #6d3b9e;
+    --md-primary-bg-color: #ffffff;
+
+    --md-accent-fg-color: #b4a0ff;
+    --md-accent-fg-color--transparent: rgba(180, 160, 255, 0.1);
+
+    --md-typeset-a-color: #8b5fbf;
+}
+
+/* ── Dark (slate) scheme — match Ryokan's exact palette ───────────── */
+
+[data-md-color-scheme="slate"] {
+    /* Backgrounds */
+    --md-default-bg-color: #0f0f13;
+    --md-default-bg-color--light: #16161d;
+    --md-default-bg-color--lighter: #1e1e28;
+    --md-default-bg-color--lightest: #2a2a3a;
+
+    /* Foreground text */
+    --md-default-fg-color: #d4d4e0;
+    --md-default-fg-color--light: #c0c0d0;
+    --md-default-fg-color--lighter: #a0a0b8;
+    --md-default-fg-color--lightest: #7a7a96;
+
+    /* Primary + accent */
+    --md-primary-fg-color: #cba6f7;
+    --md-primary-fg-color--light: #d9bfff;
+    --md-primary-fg-color--dark: #cba6f7;
+    --md-primary-bg-color: #0f0f13;
+
+    --md-accent-fg-color: #b4a0ff;
+    --md-accent-fg-color--transparent: rgba(180, 160, 255, 0.12);
+
+    /* Typeset — links, prose */
+    --md-typeset-color: #d4d4e0;
+    --md-typeset-a-color: #cba6f7;
+    --md-typeset-mark-color: rgba(203, 166, 247, 0.25);
+
+    /* Code blocks */
+    --md-code-bg-color: #16161d;
+    --md-code-fg-color: #d4d4e0;
+    --md-code-hl-color: rgba(203, 166, 247, 0.2);
+
+    /* Admonitions */
+    --md-admonition-bg-color: #16161d;
+    --md-admonition-fg-color: #d4d4e0;
+
+    /* Header bar inherits primary; force the title text to white-ish */
+    --md-primary-bg-color--light: #e8e8f0;
+
+    /* Footer + table borders */
+    --md-footer-bg-color: #0a0a0e;
+    --md-footer-bg-color--dark: #0a0a0e;
+    --md-footer-fg-color: #d4d4e0;
+    --md-footer-fg-color--light: #c0c0d0;
+    --md-footer-fg-color--lighter: #7a7a96;
+}
+
+/* ── Murecho on top-level headings + the header bar title ──────────── */
+
+.md-typeset h1,
+.md-typeset h2,
+.md-header__title {
+    font-family: 'Murecho', system-ui, sans-serif;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+}
+
+.md-typeset h3 {
+    font-family: 'Murecho', system-ui, sans-serif;
+    font-weight: 600;
+}
+
+/* Inline code on dark gets a subtle mauve tint so it pops without
+   looking like a different element entirely. */
+[data-md-color-scheme="slate"] .md-typeset code {
+    background: rgba(203, 166, 247, 0.1);
+    color: #d4d4e0;
+    border: 1px solid rgba(203, 166, 247, 0.15);
+}
+
+/* Tabbed content (used in quick-start and download-clients) gets
+   the mauve accent on the active tab indicator. */
+[data-md-color-scheme="slate"] .md-typeset .tabbed-set > input:checked + label {
+    color: #cba6f7;
+    border-color: #cba6f7;
+}
+
+/* Admonition titles pick up the same mauve so info / tip / warning
+   blocks read as part of the same visual family. Material colors
+   the icon by type (info=blue, warning=orange) — leave those, just
+   make the surrounding chrome consistent with the rest of the page. */
+[data-md-color-scheme="slate"] .md-typeset .admonition,
+[data-md-color-scheme="slate"] .md-typeset details {
+    border-color: var(--md-default-bg-color--lightest);
+}
