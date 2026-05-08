@@ -115,6 +115,17 @@ struct SystemTemplate {
     /// the serial fan-out stays cheap.
     review_entries: Vec<episode_tags::NeedsReviewEntry>,
     title_language: String,
+    /// Issue gh-121 — notification provider rows for the System →
+    /// Notifications tab. Empty until the user adds the first one.
+    /// Only populated when `tab == "notifications"`. Each row is
+    /// pre-projected so the template doesn't need to re-deserialize
+    /// `config_json`.
+    notification_providers: Vec<notifications::ProviderView>,
+    /// Per-event matrix view for the inline edit form. When the page
+    /// renders without `?edit_id=`, this is the seed-default-on view
+    /// for a fresh create form. With `?edit_id=N`, this is the loaded
+    /// matrix for that provider.
+    notification_event_toggles: Vec<notifications::EventToggleView>,
 }
 
 #[derive(Deserialize)]
@@ -149,6 +160,7 @@ fn normalize_system_tab(tab: Option<String>) -> String {
         Some("tasks") => "tasks".to_string(),
         Some("review") => "review".to_string(),
         Some("credits") => "credits".to_string(),
+        Some("notifications") => "notifications".to_string(),
         _ => "logs".to_string(),
     }
 }
@@ -266,6 +278,21 @@ pub async fn system_page(
             Vec::new()
         }
     };
+    // Issue gh-121 — Notifications tab. Only loads when the user is
+    // viewing this tab so the join below stays cheap on every other
+    // tab. Edit-target resolution moved to the modal-fetch endpoint
+    // (`GET /system/notifications/{id}/edit-form`) when the card+modal
+    // frontend landed, so this future just loads the provider list +
+    // the default-on matrix seed for the create-form path.
+    let notification_payload_fut = async {
+        if tab == "notifications" {
+            let providers = notifications::load_provider_views(&state.db).await;
+            let toggles = notifications::matrix_view(&state.db, None).await;
+            (providers, toggles)
+        } else {
+            (Vec::new(), Vec::new())
+        }
+    };
 
     let (
         logs,
@@ -275,6 +302,7 @@ pub async fn system_page(
         scheduled_tasks,
         log_count_res,
         review_entries,
+        (notification_providers, notification_event_toggles),
     ) = tokio::join!(
         logs_fut,
         config::get_config(&state.db),
@@ -283,6 +311,7 @@ pub async fn system_page(
         scheduled_tasks_fut,
         log::count(&state.db),
         review_entries_fut,
+        notification_payload_fut,
     );
     let cfg = cfg_res.ok().flatten();
     let rss_last_run = rss_last_run_res.unwrap_or(None);
@@ -324,6 +353,9 @@ pub async fn system_page(
         ("system", LogCategory::System.label()),
         ("post_process", LogCategory::PostProcess.label()),
         ("scoring", LogCategory::Scoring.label()),
+        ("quality", LogCategory::Quality.label()),
+        ("external_sync", LogCategory::ExternalSync.label()),
+        ("notifications", LogCategory::Notifications.label()),
     ];
 
     let title_language = cfg
@@ -363,6 +395,8 @@ pub async fn system_page(
         scheduled_tasks,
         review_entries,
         title_language,
+        notification_providers,
+        notification_event_toggles,
     };
     Html(template.render().unwrap_or_default())
 }
@@ -467,6 +501,9 @@ pub async fn debug_settings_submit(
             ("system", LogCategory::System.label()),
             ("post_process", LogCategory::PostProcess.label()),
             ("scoring", LogCategory::Scoring.label()),
+            ("quality", LogCategory::Quality.label()),
+            ("external_sync", LogCategory::ExternalSync.label()),
+            ("notifications", LogCategory::Notifications.label()),
         ],
         rss_enabled: cfg.rss_enabled,
         rss_interval_minutes: cfg.rss_interval_minutes,
@@ -475,6 +512,8 @@ pub async fn debug_settings_submit(
         scheduled_tasks: scheduled_tasks::list(&state.db).await.unwrap_or_default(),
         review_entries: Vec::new(),
         title_language: cfg.title_language.clone(),
+        notification_providers: Vec::new(),
+        notification_event_toggles: Vec::new(),
     };
     Html(template.render().unwrap_or_default())
 }
@@ -1334,6 +1373,8 @@ pub async fn api_system_tasks(State(state): State<AppState>) -> Json<SystemTasks
     let tasks = state.tasks.snapshot().await;
     Json(SystemTasksResponse { tasks })
 }
+
+pub mod notifications;
 
 #[cfg(test)]
 mod endpoint_tests;

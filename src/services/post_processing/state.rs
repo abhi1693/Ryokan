@@ -413,6 +413,21 @@ async fn scan_for_unclassified(
         report.files_classified += 1;
         if result.needs_review {
             report.files_needing_review += 1;
+            // Issue #118 — fire `ClassifierNeedsReview` for the
+            // reclassify-sweep path (Settings → Reclassify all). Same
+            // event the post-download classifier fires; default-off
+            // in the matrix because this sweep can flip dozens of
+            // rows in one shot. Users opt in by enabling the event
+            // for a provider.
+            let verdict = result.label();
+            crate::services::notifications::emit_classifier_needs_review(
+                state,
+                item.series_id,
+                item.episode_number,
+                result.confidence as i32,
+                &verdict,
+            )
+            .await;
         }
     }
 

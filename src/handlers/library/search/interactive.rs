@@ -270,6 +270,24 @@ pub async fn search_batch_releases(
                         Some(dispatch_client_id),
                     )
                     .await;
+                    // Issue #118 — fire `Grabbed` on the interactive
+                    // batch auto-grab path. Same context shape as
+                    // auto_search (indexer + score + client_kind).
+                    let indexer = crate::services::notifications::resolve_indexer_name(
+                        &state,
+                        result.indexer_id,
+                    )
+                    .await;
+                    crate::services::notifications::emit_grabbed(
+                        &state,
+                        sid,
+                        ep_nums.first().copied().unwrap_or(0),
+                        &result.title,
+                        indexer,
+                        Some(result.score),
+                        Some(qbit.sonarr_impl_name().to_string()),
+                    )
+                    .await;
                 }
                 for ep_num in &ep_nums {
                     let _ = episode_tags::record_grab(

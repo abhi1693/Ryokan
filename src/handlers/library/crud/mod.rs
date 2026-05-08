@@ -1175,6 +1175,21 @@ pub async fn reclassify_episode(
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        // Issue #118 — fire `ClassifierNeedsReview` for the manual
+        // reclassify path (per-episode Reclassify button on the
+        // series page). Same event shape as the sweep + post-
+        // download paths.
+        if result.needs_review {
+            let verdict = result.label();
+            crate::services::notifications::emit_classifier_needs_review(
+                &state,
+                form.series_id,
+                form.episode_number,
+                result.confidence as i32,
+                &verdict,
+            )
+            .await;
+        }
     } else {
         let file_size = tokio::fs::metadata(&file_path)
             .await

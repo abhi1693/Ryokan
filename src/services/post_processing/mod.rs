@@ -866,15 +866,23 @@ async fn import_torrent(
         // in a routed batch the routes rows already carry per-sibling
         // episode numbers and the parent grab's list doesn't apply to
         // sibling files.
-        let ep_num = media::parse_episode_number(&filename_only.to_lowercase())
-            .map(|(_, ep)| ep)
-            .or_else(|| {
-                if routes_by_file.is_empty() {
-                    grab.episode_numbers.first().copied()
-                } else {
-                    None
-                }
-            });
+        //
+        // Captures the season alongside the episode so the offset path
+        // below can skip the absolute-numbering compensation when the
+        // filename used explicit `SxxEyy`. A file like
+        // `Mob.Psycho.100.S02E13.mkv` parses as `(Some(2), 13)` — the
+        // S02 marker says "this is episode 13 *within season 2*", so
+        // applying `cumulative_prior_episodes=12` would re-rewrite it
+        // to E1 of the season and import it under the wrong episode.
+        let parsed = media::parse_episode_number(&filename_only.to_lowercase());
+        let parsed_season = parsed.and_then(|(s, _)| s);
+        let ep_num = parsed.map(|(_, ep)| ep).or_else(|| {
+            if routes_by_file.is_empty() {
+                grab.episode_numbers.first().copied()
+            } else {
+                None
+            }
+        });
 
         let Some(raw_ep_num) = ep_num else {
             logger::warn(
@@ -893,15 +901,23 @@ async fn import_torrent(
         //      at grab time — e.g. smol Monogatari S07E14 → Owari S2 E01
         //      with offset 13, NoobSubs JoJo E25 → Egypt-hen E01 with
         //      offset 24.
-        //   2. Otherwise (single-series legacy fallback) use the
-        //      series's cumulative prior-cour episode count (#30) when
-        //      the parsed number is clearly in the absolute-numbering
-        //      range (greater than the prior-cour total). Example:
-        //      `[SubsPlease] Jujutsu Kaisen - 56` → raw_ep_num=56,
-        //      cumulative=47, 56 > 47 → offset=47, 56 - 47 = E9 of S3.
-        //      A relative-numbered release from the same series
-        //      ("Jujutsu Kaisen - 09", raw=9) correctly falls through
-        //      to offset=0 because 9 is not greater than 47.
+        //   2. Otherwise, if the filename used explicit `SxxEyy`, skip
+        //      the absolute-numbering compensation entirely. A
+        //      seasonal marker pins the episode number to its season,
+        //      so a file like `Mob.Psycho.100.S02E13` is genuinely E13
+        //      of S02 — applying `cumulative_prior_episodes=12` would
+        //      mis-rewrite it to E1 and the original E13 row in
+        //      `episode_quality_tags` would stay in `grabbed` forever.
+        //   3. Otherwise (bare-number absolute-numbering fallback) use
+        //      the series's cumulative prior-cour episode count (#30)
+        //      when the parsed number is clearly in the absolute-
+        //      numbering range (greater than the prior-cour total).
+        //      Example: `[SubsPlease] Jujutsu Kaisen - 56` →
+        //      raw_ep_num=56, cumulative=47, 56 > 47 → offset=47, 56 -
+        //      47 = E9 of S3. A relative-numbered release from the
+        //      same series ("Jujutsu Kaisen - 09", raw=9) correctly
+        //      falls through to offset=0 because 9 is not greater than
+        //      47.
         //
         // A non-positive result after subtraction means the file
         // landed on a sibling whose offset is larger than the file's
@@ -911,7 +927,11 @@ async fn import_torrent(
             .get(file_idx)
             .map(|(_, off)| *off)
             .unwrap_or_else(|| {
-                fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+                if parsed_season.is_some() {
+                    0
+                } else {
+                    fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+                }
             });
         let ep_num = raw_ep_num - ep_offset;
         if ep_num <= 0 {
@@ -1234,7 +1254,6 @@ async fn import_torrent(
                     ),
                 )
                 .await;
-
                 // Post-download re-classification (Layers 5 + 6). Runs ffprobe
                 // on the landed file and walks the series directory for BD
                 // artifacts, then upserts episode_quality_tags.
@@ -1273,6 +1292,26 @@ async fn import_torrent(
                 // `scan_library_for_unclassified` uses for externally
                 // imported files), UPDATE in-place via
                 // `update_classification` otherwise.
+                // Issue #118 — fire `ClassifierNeedsReview` when the
+                // post-download classifier flips this row into needs-
+                // review. Default-off in the per-event matrix because
+                // a reclassify sweep can produce hundreds of rows in
+                // a short window; users who want it opt in. The emit
+                // is keyed on `post.needs_review` (the in-memory
+                // ClassificationResult), not the DB row, since the
+                // helper below would have to re-read.
+                if post.needs_review {
+                    let verdict = post.label();
+                    crate::services::notifications::emit_classifier_needs_review(
+                        state,
+                        target_series_id,
+                        ep_num,
+                        post.confidence as i32,
+                        &verdict,
+                    )
+                    .await;
+                }
+
                 let persist_result = if row_exists {
                     // `update_classification` stamps
                     // classification_attempted_at internally.
@@ -1355,6 +1394,32 @@ async fn import_torrent(
                     }
                 }
 
+                // Issue #118 — fire `Imported` per-file. Deliberately
+                // sequenced AFTER `update_classification` / `record_grab`
+                // so the DB lookup inside `emit_imported` reads the
+                // post-download `quality_tag`. Pre-classify the row
+                // either had the grab-time tag (often UNKNOWN) or no
+                // row at all, which surfaced as an empty Quality field
+                // in the Discord embed and a missing `quality_tag`
+                // string in the webhook JSON.
+                //
+                // Quality tag is best-effort: if `update_classification`
+                // / `record_grab` errored above, the helper's lookup
+                // falls back to `COALESCE(quality_tag, '') = ""` and
+                // the event ships with an empty tag rather than
+                // skipping the dispatch. The file did land — users
+                // legitimately want the import notification even when
+                // the persist sidecar errored, and the empty-tag UX is
+                // the same as a true UNKNOWN classification.
+                crate::services::notifications::emit_imported(
+                    state,
+                    target_series_id,
+                    ep_num,
+                    &src.display().to_string(),
+                    &dest_video.display().to_string(),
+                )
+                .await;
+
                 let dest_basename = dest_video
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -1370,6 +1435,19 @@ async fn import_torrent(
                     &state.db,
                     LogCategory::PostProcess,
                     &format!("File op failed for '{}'", filename_only),
+                    &e.to_string(),
+                )
+                .await;
+                // Issue #118 — fire `ImportFailed` per-file. Captures
+                // the file-op error string (cross-fs copy failure,
+                // permission denied, disk full, ENOSPC). Episode
+                // number is known here because the `claims_this_episode`
+                // guard above resolved it.
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
                     &e.to_string(),
                 )
                 .await;

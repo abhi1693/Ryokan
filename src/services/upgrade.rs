@@ -397,6 +397,25 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                             Some(dispatch_client_id),
                         )
                         .await;
+                        // Issue #118 — fire `Grabbed` for upgrade-sweep
+                        // grabs. Same context shape as the auto_search
+                        // path (indexer + score + client_kind) since
+                        // both run through the scoring pipeline.
+                        let indexer = crate::services::notifications::resolve_indexer_name(
+                            state,
+                            result.indexer_id,
+                        )
+                        .await;
+                        crate::services::notifications::emit_grabbed(
+                            state,
+                            row.id,
+                            ep_nums.first().copied().unwrap_or(0),
+                            &result.title,
+                            indexer,
+                            Some(result.score),
+                            Some(client.sonarr_impl_name().to_string()),
+                        )
+                        .await;
                     }
                     for ep_num in &ep_nums {
                         let _ = episode_tags::record_grab(

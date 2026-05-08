@@ -37,8 +37,9 @@
 
 use async_trait::async_trait;
 use sqlx::SqlitePool;
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 pub mod discord;
@@ -282,6 +283,49 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Resolve `indexer_id` to its display name via the live indexer
+/// cache snapshot. Returns `None` for `indexer_id = None` (Nyaa-direct
+/// path) and for ids that aren't currently in the cache (recently
+/// deleted indexer). Centralized so the per-call-site `emit_grabbed`
+/// wiring doesn't have to repeat the snapshot-walk pattern.
+pub async fn resolve_indexer_name(
+    state: &crate::AppState,
+    indexer_id: Option<i64>,
+) -> Option<String> {
+    let id = indexer_id?;
+    let snap = state.indexers.read().await.clone();
+    snap.iter()
+        .find(|i| i.id() == id)
+        .map(|i| i.name().to_string())
+}
+
+/// Resolve `series_id` to a non-empty display title via the standard
+/// romaji → english → native → bare-title fallback chain. Returns
+/// `None` when the series row is missing OR every title column is
+/// empty (a partial-fetch path may insert a row before any title
+/// source resolved). Centralized so every `emit_*` helper that needs
+/// a series title flows through one SQL shape — drift between four
+/// hand-maintained copies surfaces as the wire-event title drifting
+/// across event kinds, which would break downstream receivers
+/// matching on the value.
+async fn resolve_series_title(db: &SqlitePool, series_id: i64) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT CASE
+                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
+                  WHEN COALESCE(title_english, '') <> '' THEN title_english
+                  WHEN COALESCE(title_native, '') <> '' THEN title_native
+                  ELSE title
+                END
+         FROM series WHERE id = ?",
+    )
+    .bind(series_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s: &String| !s.is_empty())
+}
+
 /// Convenience: build a `Grabbed` event from the call-site context
 /// and dispatch it through the cache. Centralizes the field shape so
 /// every call site builds the same struct — adding a field on the
@@ -312,32 +356,7 @@ pub async fn emit_grabbed(
     if providers.is_empty() {
         return;
     }
-    // The CASE expression always returns SOME string for an existing
-    // row (falling through to the bare `title` column), but every
-    // column can be the empty string for a row that was added through
-    // a partial-fetch path before any title source resolved. The
-    // outer `.filter(|s| !s.is_empty())` collapses that case to None
-    // so the dispatch short-circuits rather than emitting with an
-    // empty title — same shape `discord::resolve_cover_url` uses for
-    // `cover_url`. Without the filter, query_scalar returns
-    // `Some("")` and the `let Some(...)` arm proceeds with an empty
-    // title.
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT CASE
-                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
-                  WHEN COALESCE(title_english, '') <> '' THEN title_english
-                  WHEN COALESCE(title_native, '') <> '' THEN title_native
-                  ELSE title
-                END
-         FROM series WHERE id = ?",
-    )
-    .bind(series_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s: &String| !s.is_empty());
-    let Some(series_title) = title else {
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
         tracing::debug!(
             "notifications::emit_grabbed: series #{series_id} not found, skipping dispatch"
         );
@@ -354,6 +373,251 @@ pub async fn emit_grabbed(
             indexer,
             score,
             client_kind,
+        },
+    );
+}
+
+/// Convenience: dispatch an `Imported` event from
+/// `services::post_processing` after a per-file copy/hardlink/move
+/// succeeds. Resolves `series_title` and `quality_tag` from the DB
+/// the same way `emit_grabbed` resolves `series_title`. The event is
+/// fire-and-forget on top of the dispatch task so the post-processing
+/// loop doesn't block on receiver latency.
+#[allow(clippy::too_many_arguments)]
+pub async fn emit_imported(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: i32,
+    source_path: &str,
+    dest_path: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
+        tracing::debug!(
+            "notifications::emit_imported: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    // Quality tag is best-effort — the row may not exist for an
+    // unmonitored episode the user grabbed manually, in which case
+    // we surface an empty tag rather than skipping the event.
+    let quality_tag: String = sqlx::query_scalar::<_, String>(
+        "SELECT COALESCE(quality_tag, '') FROM episode_quality_tags
+             WHERE series_id = ? AND episode_number = ?",
+    )
+    .bind(series_id)
+    .bind(episode_number)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .unwrap_or_default();
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::Imported {
+            series_id,
+            series_title,
+            episode_number,
+            source_path: source_path.to_string(),
+            dest_path: dest_path.to_string(),
+            quality_tag,
+        },
+    );
+}
+
+/// Convenience: dispatch an `ImportFailed` event from
+/// `services::post_processing`. Fired on per-file failures (couldn't
+/// parse episode number, file not video, fs op error). `episode_number`
+/// is optional because some failure paths happen before parse.
+pub async fn emit_import_failed(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: Option<i32>,
+    source_path: &str,
+    reason: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
+        tracing::debug!(
+            "notifications::emit_import_failed: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::ImportFailed {
+            series_id,
+            series_title,
+            episode_number,
+            source_path: source_path.to_string(),
+            reason: reason.to_string(),
+        },
+    );
+}
+
+/// Convenience: dispatch a `ClassifierNeedsReview` event from
+/// `models::episode_tags::update_classification` when the row being
+/// written has `needs_review = true`. Single write site; one event
+/// per row that flips into the needs-review state. Default-off in
+/// the per-event matrix because classifier reclassify sweeps can
+/// produce hundreds of rows in a short window.
+pub async fn emit_classifier_needs_review(
+    state: &crate::AppState,
+    series_id: i64,
+    episode_number: i32,
+    confidence: i32,
+    verdict_summary: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
+        tracing::debug!(
+            "notifications::emit_classifier_needs_review: series #{series_id} not found, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::ClassifierNeedsReview {
+            series_id,
+            series_title,
+            episode_number,
+            confidence,
+            verdict_summary: verdict_summary.to_string(),
+        },
+    );
+}
+
+/// Per-id "fired recently" state for `IndexerDown` and
+/// `DownloadClientUnreachable`. Both events are emitted opportunistically
+/// from hot paths (RSS poll, status probe) that can re-fire dozens of
+/// times an hour for a single broken target — without dedup, a
+/// misconfigured indexer would spam every Discord webhook on every RSS
+/// tick. The cooldown is per-id so two different broken indexers don't
+/// suppress each other's first ping.
+///
+/// `Instant` is the firing time; `remaining` returns `None` once the
+/// stamp is older than [`HEALTH_DEDUP_WINDOW`]. Lazily evicts on read so
+/// the table doesn't grow forever on long-lived processes.
+const HEALTH_DEDUP_WINDOW: Duration = Duration::from_secs(60 * 60);
+
+static INDEXER_DOWN_FIRED: LazyLock<StdMutex<HashMap<i64, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+static DC_UNREACHABLE_FIRED: LazyLock<StdMutex<HashMap<i64, Instant>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Returns true if the caller should fire the event. Stamps `now`
+/// when allowed so the next call within the window short-circuits.
+fn dedup_check(map: &StdMutex<HashMap<i64, Instant>>, id: i64) -> bool {
+    let Ok(mut guard) = map.lock() else {
+        // Poisoned lock — rather than swallow the event, allow the
+        // fire. The next successful lock will overwrite the stamp.
+        return true;
+    };
+    let now = Instant::now();
+    match guard.get(&id) {
+        Some(prev) if now.duration_since(*prev) < HEALTH_DEDUP_WINDOW => false,
+        _ => {
+            guard.insert(id, now);
+            true
+        }
+    }
+}
+
+/// Test-only: drop the dedup stamp for a single indexer id.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_indexer_down_dedup_for_tests(id: i64) {
+    if let Ok(mut g) = INDEXER_DOWN_FIRED.lock() {
+        g.remove(&id);
+    }
+}
+
+/// Test-only: drop the dedup stamp for a single download-client id.
+#[cfg(any(test, feature = "test-support"))]
+pub fn reset_dc_unreachable_dedup_for_tests(id: i64) {
+    if let Ok(mut g) = DC_UNREACHABLE_FIRED.lock() {
+        g.remove(&id);
+    }
+}
+
+/// Convenience: dispatch an `IndexerDown` event with per-id dedup
+/// (1h cooldown per `indexer_id`). Fired from the RSS-tick indexer poll
+/// when an `Indexer::search()` call returns Err — that's the continuous
+/// background poll that surfaces "your indexer started failing"
+/// without waiting on a user to open the Settings UI. Subsequent
+/// failures during the cooldown window are suppressed; once the
+/// indexer recovers and a single window passes without a fire, the
+/// next failure re-fires.
+///
+/// `indexer_name` is resolved from the live indexer cache snapshot
+/// (matching `resolve_indexer_name`'s shape); a stale id that's been
+/// deleted from the cache short-circuits with no event.
+pub async fn emit_indexer_down(state: &crate::AppState, indexer_id: i64, reason: &str) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    if !dedup_check(&INDEXER_DOWN_FIRED, indexer_id) {
+        return;
+    }
+    let Some(indexer_name) = resolve_indexer_name(state, Some(indexer_id)).await else {
+        tracing::debug!(
+            "notifications::emit_indexer_down: indexer #{indexer_id} not in cache, skipping dispatch"
+        );
+        return;
+    };
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::IndexerDown {
+            indexer_name,
+            reason: reason.to_string(),
+        },
+    );
+}
+
+/// Convenience: dispatch a `DownloadClientUnreachable` event with
+/// per-id dedup (1h cooldown per `download_client_id`). Fired from the
+/// Settings → Connections status-probe handler when `client.test()`
+/// returns Err. The probe fires on Settings → Connections page load
+/// and on the auto-refresh cadence, so dedup is the difference
+/// between one ping and a stream of identical alerts.
+///
+/// `client_kind` is the wire kind discriminator ("qbittorrent",
+/// "deluge", etc.) resolved from the row, so the event payload can be
+/// correlated to the impl. `client_label` is the kind-pretty-print used
+/// in the log line.
+pub async fn emit_download_client_unreachable(
+    state: &crate::AppState,
+    client_id: i64,
+    client_kind: &str,
+    reason: &str,
+) {
+    let providers = state.notification_providers.read().await.clone();
+    if providers.is_empty() {
+        return;
+    }
+    if !dedup_check(&DC_UNREACHABLE_FIRED, client_id) {
+        return;
+    }
+    dispatch(
+        &state.notification_providers,
+        state.db.clone(),
+        NotificationEvent::DownloadClientUnreachable {
+            client_kind: client_kind.to_string(),
+            reason: reason.to_string(),
         },
     );
 }
@@ -759,5 +1023,56 @@ mod tests {
         // call site uses 0 today, but the saturating_sub and the
         // edge condition cost nothing.
         assert_eq!(truncate("hi", 0), "hi");
+    }
+
+    // Dedup tests live in their own private map so they can't race
+    // against the production `INDEXER_DOWN_FIRED` /
+    // `DC_UNREACHABLE_FIRED` tables under nextest's default parallelism.
+    // The production paths exercise the same `dedup_check` function;
+    // the production maps just hold the live state.
+    fn private_map() -> StdMutex<HashMap<i64, Instant>> {
+        StdMutex::new(HashMap::new())
+    }
+
+    #[test]
+    fn dedup_check_fires_first_call() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+    }
+
+    #[test]
+    fn dedup_check_suppresses_second_call_within_window() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+        assert!(
+            !dedup_check(&map, 1),
+            "second call within HEALTH_DEDUP_WINDOW must short-circuit"
+        );
+    }
+
+    #[test]
+    fn dedup_check_is_per_id() {
+        let map = private_map();
+        assert!(dedup_check(&map, 1));
+        assert!(
+            dedup_check(&map, 2),
+            "different id must NOT inherit id 1's stamp — per-target dedup"
+        );
+        assert!(!dedup_check(&map, 1));
+        assert!(!dedup_check(&map, 2));
+    }
+
+    #[test]
+    fn dedup_check_re_fires_after_window_elapses() {
+        // Inject an Instant from > HEALTH_DEDUP_WINDOW ago. Without
+        // this, the test would have to actually sleep 1h. The
+        // production path observes the same comparison.
+        let map = private_map();
+        let stale = Instant::now() - HEALTH_DEDUP_WINDOW - Duration::from_secs(1);
+        map.lock().unwrap().insert(1, stale);
+        assert!(
+            dedup_check(&map, 1),
+            "stamp older than HEALTH_DEDUP_WINDOW must re-fire"
+        );
     }
 }

@@ -67,15 +67,18 @@ pub enum NotificationEvent {
         confidence: i32,
         verdict_summary: String,
     },
-    /// Defined but unwired — see issue #118 "Hook points". Either an
-    /// opportunistic dedup'd hook or a dedicated health-check task
-    /// is real follow-up work; the variant is here so the dispatcher
-    /// and provider impls don't need to change later.
+    /// Fired from the RSS-tick indexer poll when `Indexer::search()`
+    /// returns Err. Wired with per-indexer-id 1h dedup in
+    /// `services::notifications::emit_indexer_down`; rate-limit cooldown
+    /// errors are suppressed since the upstream is already signaling
+    /// its own backoff.
     IndexerDown {
         indexer_name: String,
         reason: String,
     },
-    /// Same status as `IndexerDown` — defined but unwired.
+    /// Fired from the Settings → Connections status probe handler when
+    /// `client.test()` returns Err. Wired with per-client-id 1h dedup
+    /// in `services::notifications::emit_download_client_unreachable`.
     DownloadClientUnreachable { client_kind: String, reason: String },
     /// Fired in `services/external_sync/mod.rs` at the same point that
     /// flips the sticky `last_sync_auth_failed` flag. `provider` is

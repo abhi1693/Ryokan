@@ -181,3 +181,60 @@ async fn users_exist_atomic_promotes_on_first_protected_request() {
         "cache should be promoted to true after successful has_users read"
     );
 }
+
+/// Regression: `/setup` POST must seed a default `config` row so the
+/// per-tab subform handlers (settings_general_submit /
+/// settings_quality_submit / settings_integrations_submit) don't bail
+/// with "No config row found — run /setup first." the very first time
+/// the user opens Settings → Connections after creating their account.
+///
+/// The pre-fix shape created the user + session and called it done;
+/// the user landed on Settings → Connections, edited Jellyfin, hit
+/// Save, and got an error message that contradicted the action they
+/// had just completed. The seed runs from `setup_submit` directly
+/// after `create_user` and is upsert-shaped so a re-run can't
+/// clobber an already-saved config (defense in depth — `has_users`
+/// gates the path above this anyway).
+#[tokio::test]
+async fn setup_submit_seeds_default_config_row() {
+    let db = in_memory_pool().await;
+    let state = fresh_install_state(db.clone());
+
+    // Sanity check: no config row exists pre-setup.
+    let pre = crate::models::config::get_config(&db).await.unwrap();
+    assert!(
+        pre.is_none(),
+        "no config row should exist on a fresh install before /setup runs"
+    );
+
+    let app = handler_router(state);
+    let body = "username=admin&password=hunter2-test-password&confirm=hunter2-test-password";
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/setup")
+                .header(header::HOST, "ryokan.local")
+                .header(header::ORIGIN, "http://ryokan.local")
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::SEE_OTHER,
+        "setup POST should redirect after success"
+    );
+
+    // Post-condition: the config row exists. We don't pin specific
+    // field values — `Config::default()` is the contract; this test
+    // is the gate that enforces "row exists at all" so the subform
+    // handlers can read it.
+    let post = crate::models::config::get_config(&db).await.unwrap();
+    assert!(
+        post.is_some(),
+        "config row should be seeded by setup_submit so subform saves don't bail"
+    );
+}

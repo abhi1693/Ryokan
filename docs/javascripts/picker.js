@@ -461,6 +461,17 @@ services:
           lines.push('                 Find it with:  docker logs qbittorrent | grep -i "temporary password"');
           lines.push('                 Log in with that, set a permanent password under');
           lines.push('                 Tools → Options → Web UI → Authentication, then paste it here.');
+          // qBit 4.5+ enables Host header validation by default. The
+          // Host header on requests from Ryokan-in-container is
+          // `qbittorrent:8080`, which qBit rejects with 401 even when
+          // the credentials are correct. Symptom: Ryokan shows the
+          // row stuck on "qBittorrent Unauthorized" while the WebUI
+          // works fine from a browser. Standard homelab workaround
+          // is to disable the check entirely.
+          lines.push('  Heads-up:      Settings → Connections will say "qBittorrent Unauthorized" even with');
+          lines.push('                 correct credentials until you turn off Host header validation.');
+          lines.push('                 Tools → Options → Web UI → uncheck "Enable Host header validation",');
+          lines.push('                 Save, then `docker compose restart qbittorrent`.');
         } else if (kind === 'sabnzbd') {
           lines.push('  API Key:       (paste from SAB → Config → General → API Key)');
         }

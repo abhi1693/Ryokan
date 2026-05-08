@@ -941,7 +941,23 @@ pub async fn settings_download_clients_status(
     let (version, error) = match client {
         Some(c) => match c.test().await {
             Ok(v) => (Some(v), String::new()),
-            Err(e) => (None, e),
+            Err(e) => {
+                // Opportunistic DownloadClientUnreachable notification
+                // with per-id 1h dedup. Per-row `kind` is the wire
+                // discriminator we already resolved at the top of the
+                // handler; pass it through to the event payload so a
+                // user with multiple qBit instances can correlate the
+                // ping. The "Client not in active pool" arm below is
+                // a configuration state, not a reachability failure,
+                // so it deliberately doesn't fire.
+                if let Some(r) = row.as_ref() {
+                    crate::services::notifications::emit_download_client_unreachable(
+                        &state, id, &r.kind, &e,
+                    )
+                    .await;
+                }
+                (None, e)
+            }
         },
         None => (
             None,

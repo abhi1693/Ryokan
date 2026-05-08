@@ -1,0 +1,128 @@
+{# Card grid + add tile + shared edit/add modal. Same pattern +
+   class names as templates/partials/settings/download_clients/list.html:
+   each card body click fetches the edit form into the modal body via
+   htmx.ajax(); the "+ Add" tile fetches the add form into the same
+   body. Save returns this whole #notif-section partial so a
+   successful save re-renders the cards (with the modal hidden + reset
+   for free).
+
+   `notif-card` / `notif-card-grid` / etc. are CSS-aliased to the
+   `dc-card-*` rules in static/css/pages/settings.css — same visual
+   primitives, namespace-distinct selectors so a future per-section
+   tweak doesn't bleed across. #}
+<div id="notif-section" class="notif-section">
+    <div class="notif-card-grid">
+        {% if notification_providers.is_empty() %}
+        <div class="notif-empty">
+            <p class="form-hint" style="margin: 0">
+                No notification providers configured yet. Add a webhook (ntfy / Apprise / n8n / custom) or a Discord channel to start receiving events.
+            </p>
+        </div>
+        {% endif %}
+
+        {% for p in notification_providers %}
+        <article class="notif-card" id="notif-card-{{ p.id }}">
+            <div class="notif-card-body"
+                 role="button"
+                 tabindex="0"
+                 data-notif-id="{{ p.id }}"
+                 data-notif-name="{{ p.name }}"
+                 onclick="openNotificationEditModal(this.dataset.notifId, this.dataset.notifName)"
+                 onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openNotificationEditModal(this.dataset.notifId, this.dataset.notifName); }"
+                 aria-label="Edit {{ p.name }}">
+                <div class="notif-card-header">
+                    <div class="notif-card-title">
+                        <strong class="notif-card-name">{{ p.name }}</strong>
+                        <span class="notif-kind-pill notif-kind-pill-{{ p.kind }}">{% if p.kind == "webhook" %}Webhook{% else if p.kind == "discord" %}Discord{% else %}{{ p.kind }}{% endif %}</span>
+                    </div>
+                    {% if p.enabled %}
+                    <span class="notif-status-pill notif-status-pill-ok">Enabled</span>
+                    {% else %}
+                    <span class="notif-status-pill notif-status-pill-disabled">Disabled</span>
+                    {% endif %}
+                </div>
+                <dl class="notif-card-meta">
+                    {% if p.kind == "webhook" %}
+                        {% if let Some(url) = p.webhook_url.as_ref() %}
+                        <div class="notif-card-meta-row">
+                            <dt>URL</dt>
+                            <dd><code>{{ url }}</code></dd>
+                        </div>
+                        {% endif %}
+                        {% if p.webhook_has_secret %}
+                        <div class="notif-card-meta-row">
+                            <dt>Secret</dt>
+                            <dd><code>[set]</code></dd>
+                        </div>
+                        {% endif %}
+                    {% else if p.kind == "discord" %}
+                        {% if p.discord_webhook_url.is_some() %}
+                        <div class="notif-card-meta-row">
+                            <dt>Webhook</dt>
+                            <dd><code>[set]</code></dd>
+                        </div>
+                        {% else %}
+                        <div class="notif-card-meta-row">
+                            <dt>Webhook</dt>
+                            <dd><code>(not configured)</code></dd>
+                        </div>
+                        {% endif %}
+                    {% endif %}
+                </dl>
+            </div>
+            {# Corner × delete only. Test fires from the modal's
+               Send-test button (edit_form_body.html) — keeping a
+               second per-card test action wasn't pulling its weight
+               and rendered uncolored because the icon-only variant
+               had no styling. Stop-propagation so the click doesn't
+               bubble up to the body's edit-modal click handler. #}
+            <div class="notif-card-actions" onclick="event.stopPropagation()">
+                <form method="post" action="/system/notifications/delete"
+                      hx-post="/system/notifications/delete"
+                      hx-target="#notif-section"
+                      hx-swap="outerHTML"
+                      data-ryokan-confirm-title="Delete provider?"
+                      data-ryokan-confirm-body="Remove '{{ p.name }}'. Pending notifications using this provider will be dropped. This cannot be undone."
+                      data-ryokan-confirm-yes="Delete"
+                      data-ryokan-confirm-no="Cancel"
+                      data-ryokan-confirm-danger="1"
+                      style="margin:0">
+                    <input type="hidden" name="id" value="{{ p.id }}">
+                    <button type="submit" class="btn btn-icon-danger" title="Delete {{ p.name }}" aria-label="Delete {{ p.name }}">×</button>
+                </form>
+            </div>
+        </article>
+        {% endfor %}
+
+        {# "+ Add provider" tile. Same pattern as the per-card click;
+           fetches the add form into the modal body via the
+           openNotificationAddModal() helper. #}
+        <div class="notif-card notif-card-add"
+             role="button"
+             tabindex="0"
+             onclick="openNotificationAddModal()"
+             onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); openNotificationAddModal(); }">
+            <div class="notif-card-add-icon">+</div>
+            <div class="notif-card-add-label">Add notification provider</div>
+        </div>
+    </div>
+
+    {# Shared modal — body content is replaced by HTMX on each open
+       (Add or Edit). Initial render is the Add form so a section-
+       partial swap (after a successful save) leaves the modal at
+       display:none with the right body for the next Add click. #}
+    <div class="modal-backdrop" id="notif-modal" style="display:none"
+         role="dialog" aria-modal="true" aria-labelledby="notif-modal-title">
+        <div class="modal" style="max-width: 720px">
+            <div class="modal-header">
+                <h3 id="notif-modal-title">Add notification provider</h3>
+                <button class="btn-icon" type="button" onclick="closeNotificationModal()" aria-label="Close">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div id="notif-modal-body">
+{%~ include "partials/system/notifications/add_form_body.html" ~%}
+            </div>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,12 @@
+{# Tab body for System → Notifications (issue gh-121). Mirrors the
+   download_clients tab shape: a card grid + add tile + shared modal,
+   wrapped in the section element that re-renders in one swap on
+   every successful save / delete (closes the modal + refreshes the
+   cards atomically). #}
+<div class="notif-page">
+    <p class="form-hint" style="margin-bottom: 16px;">
+        Outbound notification providers. Webhook fans out the canonical event JSON; Discord renders embeds.
+        Per-event opt-in is configured per-provider in the edit form. Per-event toggles take effect on the next dispatch with no restart.
+    </p>
+    {%~ include "partials/system/notifications/list.html" ~%}
+</div>

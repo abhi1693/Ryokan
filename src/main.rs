@@ -879,6 +879,33 @@ async fn main() {
             "/api/notifications/{id}/test",
             post(handlers::notifications::test_provider),
         )
+        // Issue gh-121 — notification provider CRUD via form-POST.
+        // System → Notifications tab; cache rebuild happens inside
+        // the upsert / delete handlers so the very next dispatch
+        // sees the new shape.
+        .route(
+            "/system/notifications/upsert",
+            post(handlers::system::notifications::notifications_upsert),
+        )
+        .route(
+            "/system/notifications/delete",
+            post(handlers::system::notifications::notifications_delete),
+        )
+        .route(
+            "/system/notifications/{id}/edit-form",
+            get(handlers::system::notifications::notifications_edit_form),
+        )
+        // gh-121 card+modal frontend — section refresh + add-form body
+        // routes serve the HTMX swap targets used by the upsert/delete
+        // post-save fragment-render and the add-modal click handler.
+        .route(
+            "/system/notifications/section",
+            get(handlers::system::notifications::notifications_section),
+        )
+        .route(
+            "/system/notifications/add-form",
+            get(handlers::system::notifications::notifications_add_form),
+        )
         .route(
             "/api/download-clients/section",
             get(handlers::settings::download_clients::settings_download_clients_section),
