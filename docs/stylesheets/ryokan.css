@@ -1,82 +1,26 @@
-/* Ryokan-themed Material overrides.
+/* Ryokan-themed Material overrides — minimal.
  *
- * Goal: docs site reads as part of the same product as Ryokan's UI.
- * Ryokan's visual signature is dark backgrounds + sparing mauve accent
- * (#cba6f7) on interactive states (active tabs, links, hover, focus).
- * The header bar is *dark*, not mauve; the mauve only shows up on
- * interactive elements.
+ * Material's default light + dark palettes own the body: backgrounds,
+ * text, code blocks, footer, header bar. This file only overrides
+ * the **accent** color (links + interactive states) so it matches
+ * Ryokan's signature mauve, and adds Murecho on display headings.
  */
 
 @import url('https://fonts.googleapis.com/css2?family=Murecho:wght@500;600;700;800&display=swap');
 
-/* ── Light scheme ─────────────────────────────────────────────────── */
+/* ── Accent token only ────────────────────────────────────────────── */
 
 [data-md-color-scheme="default"] {
-    /* Header gets the slightly-darker neutral; mauve accent only on
-       hover / active. Light-mode mauve has to be darker to read on
-       white. */
-    --md-primary-fg-color: #1e1e28;
-    --md-primary-fg-color--light: #2a2a3a;
-    --md-primary-fg-color--dark: #0f0f13;
-    --md-primary-bg-color: #e8e8f0;
-    --md-primary-bg-color--light: #d4d4e0;
-
-    --md-accent-fg-color: #8b5fbf;
+    --md-accent-fg-color: #8b5fbf;          /* darker mauve for white bg */
     --md-accent-fg-color--transparent: rgba(139, 95, 191, 0.1);
-    --md-accent-bg-color: #ffffff;
-
     --md-typeset-a-color: #8b5fbf;
 }
 
-/* ── Dark (slate) scheme ──────────────────────────────────────────── */
-
 [data-md-color-scheme="slate"] {
-    /* Page bg ramp matches Ryokan's static/css/base.css exactly. */
-    --md-default-bg-color: #0f0f13;
-    --md-default-bg-color--light: #16161d;
-    --md-default-bg-color--lighter: #1e1e28;
-    --md-default-bg-color--lightest: #2a2a3a;
-
-    --md-default-fg-color: #d4d4e0;
-    --md-default-fg-color--light: #c0c0d0;
-    --md-default-fg-color--lighter: #a0a0b8;
-    --md-default-fg-color--lightest: #7a7a96;
-
-    /* Header bar: pure dark, like Ryokan's topbar. Mauve does NOT
-       go here — Material darkens primary in its slate scheme and
-       the result reads muddy. Keep the accent for interactive
-       states and let the deep dark do the heavy lifting. */
-    --md-primary-fg-color: #0a0a0e;
-    --md-primary-fg-color--light: #16161d;
-    --md-primary-fg-color--dark: #050507;
-    --md-primary-bg-color: #e8e8f0;
-    --md-primary-bg-color--light: #d4d4e0;
-
-    /* Accent — saturated mauve for all interactive states */
-    --md-accent-fg-color: #cba6f7;
+    --md-accent-fg-color: #cba6f7;          /* Ryokan's signature mauve */
     --md-accent-fg-color--transparent: rgba(203, 166, 247, 0.15);
-    --md-accent-bg-color: #ffffff;
-
-    /* Body */
-    --md-typeset-color: #d4d4e0;
     --md-typeset-a-color: #cba6f7;
     --md-typeset-mark-color: rgba(203, 166, 247, 0.25);
-
-    /* Code */
-    --md-code-bg-color: #16161d;
-    --md-code-fg-color: #d4d4e0;
-    --md-code-hl-color: rgba(203, 166, 247, 0.2);
-
-    /* Admonitions */
-    --md-admonition-bg-color: #16161d;
-    --md-admonition-fg-color: #d4d4e0;
-
-    /* Footer */
-    --md-footer-bg-color: #0a0a0e;
-    --md-footer-bg-color--dark: #050507;
-    --md-footer-fg-color: #d4d4e0;
-    --md-footer-fg-color--light: #c0c0d0;
-    --md-footer-fg-color--lighter: #7a7a96;
 }
 
 /* ── Murecho on display headings ──────────────────────────────────── */
@@ -84,115 +28,56 @@
 .md-typeset h1,
 .md-typeset h2,
 .md-typeset h3,
-.md-header__title,
-.md-nav__title {
+.md-header__title {
     font-family: 'Murecho', system-ui, sans-serif;
     font-weight: 700;
     letter-spacing: -0.01em;
 }
-
 .md-typeset h3 { font-weight: 600; }
 
-/* H2 sections get a subtle mauve accent like Ryokan's section
-   dividers. Border-bottom rather than full underline so it reads as
-   a structural separator, not as a link. */
-[data-md-color-scheme="slate"] .md-typeset h2 {
-    border-bottom: 1px solid rgba(203, 166, 247, 0.15);
-    padding-bottom: 0.4em;
-}
+/* ── Mauve on interactive states ──────────────────────────────────── */
 
-/* ── Aggressive accent on interactive states ──────────────────────── */
-
-/* Top-nav tabs: active tab is mauve text + mauve underline. */
-[data-md-color-scheme="slate"] .md-tabs__link {
-    color: var(--md-default-fg-color--light);
-    opacity: 1;
-}
-[data-md-color-scheme="slate"] .md-tabs__link:hover,
-[data-md-color-scheme="slate"] .md-tabs__link--active,
-[data-md-color-scheme="slate"] .md-tabs__item--active .md-tabs__link {
+/* Top-nav: active tab + hover */
+.md-tabs__link:hover,
+.md-tabs__link--active,
+.md-tabs__item--active .md-tabs__link {
     color: var(--md-accent-fg-color);
 }
-[data-md-color-scheme="slate"] .md-tabs__item--active::after,
-[data-md-color-scheme="slate"] .md-tabs__link--active::after {
+.md-tabs__item--active::after,
+.md-tabs__link--active::after {
     border-color: var(--md-accent-fg-color);
 }
 
-/* Right-side TOC: active section pulled into view is mauve. */
-[data-md-color-scheme="slate"] .md-nav__link--active,
-[data-md-color-scheme="slate"] .md-nav__link--active > code,
-[data-md-color-scheme="slate"] .md-nav__item .md-nav__link--active {
+/* Right-side TOC: active section + hover */
+.md-nav__link--active,
+.md-nav__link--active > code {
     color: var(--md-accent-fg-color);
 }
-[data-md-color-scheme="slate"] .md-nav__link:focus,
-[data-md-color-scheme="slate"] .md-nav__link:hover {
+.md-nav__link:hover {
     color: var(--md-accent-fg-color);
 }
 
-/* Body links: typeset color set above; add a mauve underline on hover
-   so the affordance is unmistakable. */
-[data-md-color-scheme="slate"] .md-typeset a {
+/* Body links */
+.md-typeset a {
     color: var(--md-accent-fg-color);
     text-decoration: none;
 }
-[data-md-color-scheme="slate"] .md-typeset a:hover {
-    color: #d9bfff;
+.md-typeset a:hover {
     text-decoration: underline;
     text-decoration-color: var(--md-accent-fg-color);
 }
 
-/* Search box: dark, with mauve focus glow. */
-[data-md-color-scheme="slate"] .md-search__form {
-    background-color: rgba(255, 255, 255, 0.04);
-}
-[data-md-color-scheme="slate"] [data-md-toggle="search"]:checked ~ .md-header .md-search__form,
-[data-md-color-scheme="slate"] .md-search__form:hover,
-[data-md-color-scheme="slate"] .md-search__input:focus {
-    background-color: rgba(203, 166, 247, 0.08);
-    box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.4);
-}
-[data-md-color-scheme="slate"] .md-search__input {
-    color: var(--md-default-fg-color);
-}
-
-/* Inline code: subtle mauve tint so it pops against the body text
-   without competing with the accent on actual links. */
-[data-md-color-scheme="slate"] .md-typeset code {
-    background: rgba(203, 166, 247, 0.1);
-    color: #d4d4e0;
-    border: 1px solid rgba(203, 166, 247, 0.15);
-}
-/* But not inside <pre> code blocks (where the syntax-highlight
-   theme owns the foreground colors). */
-[data-md-color-scheme="slate"] .md-typeset pre code,
-[data-md-color-scheme="slate"] .md-typeset .highlight code {
-    background: transparent;
-    border: none;
-}
-
-/* Tabbed content (used in quick-start, download-clients): active tab
-   has a mauve underline + slightly bolder text. */
-[data-md-color-scheme="slate"] .md-typeset .tabbed-set > input:checked + label {
+/* Tabbed content (used in quick-start, download-clients): active tab */
+.md-typeset .tabbed-set > input:checked + label {
     color: var(--md-accent-fg-color);
     border-color: var(--md-accent-fg-color);
 }
-[data-md-color-scheme="slate"] .md-typeset .tabbed-labels > label:hover {
+.md-typeset .tabbed-labels > label:hover {
     color: var(--md-accent-fg-color);
 }
 
-/* Admonition borders use a subtle accent so the boxes don't look
-   stark against the dark bg. */
-[data-md-color-scheme="slate"] .md-typeset .admonition,
-[data-md-color-scheme="slate"] .md-typeset details {
-    border-color: var(--md-default-bg-color--lightest);
-}
-
-/* The "in this page" sidebar header on the right gets the mauve
-   accent so it pulls focus the same way Ryokan's section headings do. */
-[data-md-color-scheme="slate"] .md-nav--secondary .md-nav__title {
-    color: var(--md-accent-fg-color);
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    opacity: 0.85;
+/* Search box focus ring */
+.md-search__input:focus,
+[data-md-toggle="search"]:checked ~ .md-header .md-search__form {
+    box-shadow: 0 0 0 1px rgba(203, 166, 247, 0.4);
 }
