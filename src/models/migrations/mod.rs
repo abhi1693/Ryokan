@@ -2649,6 +2649,43 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Issue #114 — scoped API keys. `key_hash` stores the sha256 hex
+    // of the plaintext key (which is shown to the user exactly once
+    // at creation time and never recoverable, matching the GitHub PAT
+    // UX). `scopes` is a JSON array of scope strings (see
+    // `models::api_key::ALL_SCOPES`); stored as TEXT because the set
+    // is small enough that a real JSON1 query isn't worth the cost.
+    // `last_used_at` is best-effort — touched after a successful
+    // request match so users can identify abandoned keys for
+    // cleanup.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key_hash TEXT NOT NULL UNIQUE,
+            scopes TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            last_used_at INTEGER,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Lookup index on the hash so the per-request middleware path
+    // (sha256(plaintext) → SELECT WHERE key_hash = ?) is O(log N)
+    // even at hundreds of keys. UNIQUE on the column is enforced
+    // at create time too — duplicate plaintext between users is
+    // astronomically unlikely with 32-byte CSPRNG output, but the
+    // constraint also catches the post-rotate-on-collision case
+    // we'd otherwise have to handle in the model.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash)")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

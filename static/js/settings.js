@@ -1561,3 +1561,322 @@ if (window.__ryokanSettingsRelativeTimeTimer) {
         init();
     }
 })();
+
+// ─── Issue #114 — scoped API keys ────────────────────────────────
+//
+// CRUD against /api/api-keys/* with a one-time-plaintext modal flow.
+// Wrapped in an IIFE so the var-at-module-scope rule (CLAUDE.md
+// per-page JS quirks) applies; the function is reentered every
+// time hx-boost re-runs the script after a body swap.
+//
+// State machine:
+//   1. List view (server-rendered + JS re-rendered after CRUD).
+//   2. Create button → modal opens with name + scope checkbox form.
+//   3. Submit → POST /api/api-keys → response carries plaintext +
+//      view. Modal swaps to "save your key" view with a copy button.
+//   4. "I've saved it" → close modal, refresh list via GET /api/api-keys.
+//
+// Per-row toggle / delete go through their own JSON endpoints; the
+// row markup is mutated in place rather than re-fetching the entire
+// list, which would cost a round-trip per click and feel laggy.
+(function () {
+    function fmtUnix(ts) {
+        if (!ts) return '';
+        try {
+            return new Date(ts * 1000).toLocaleString();
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function hydrateTimestamps() {
+        document.querySelectorAll('[data-api-key-created]').forEach(function (el) {
+            var ts = parseInt(el.dataset.apiKeyCreated, 10);
+            if (ts) el.textContent = fmtUnix(ts);
+        });
+        document.querySelectorAll('[data-api-key-last-used]').forEach(function (el) {
+            var raw = el.dataset.apiKeyLastUsed;
+            if (raw && raw.length > 0) {
+                el.textContent = fmtUnix(parseInt(raw, 10));
+            }
+        });
+    }
+
+    function escHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function renderRow(view) {
+        var scopeBadges = view.scopes
+            .map(function (s) { return '<span class="badge api-key-scope-badge">' + escHtml(s) + '</span>'; })
+            .join(' ');
+        var lastUsed = view.last_used_at
+            ? escHtml(fmtUnix(view.last_used_at))
+            : '<span class="muted">never</span>';
+        return ''
+            + '<tr data-api-key-id="' + view.id + '">'
+            +   '<td class="api-key-name">' + escHtml(view.name) + '</td>'
+            +   '<td>' + scopeBadges + '</td>'
+            +   '<td class="api-key-last-used" data-api-key-last-used="' + (view.last_used_at || '') + '">' + lastUsed + '</td>'
+            +   '<td class="api-key-created" data-api-key-created="' + view.created_at + '">' + escHtml(fmtUnix(view.created_at)) + '</td>'
+            +   '<td>'
+            +     '<label class="api-key-toggle">'
+            +       '<input type="checkbox" class="api-key-enabled-toggle" data-api-key-id="' + view.id + '"' + (view.enabled ? ' checked' : '') + '>'
+            +       '<span class="api-key-toggle-label">' + (view.enabled ? 'Enabled' : 'Disabled') + '</span>'
+            +     '</label>'
+            +   '</td>'
+            +   '<td>'
+            +     '<button type="button" class="btn btn-danger btn-sm api-key-delete-btn" data-api-key-id="' + view.id + '" data-api-key-name="' + escHtml(view.name) + '">Delete</button>'
+            +   '</td>'
+            + '</tr>';
+    }
+
+    function renderList(views) {
+        var listEl = document.getElementById('api-keys-list');
+        if (!listEl) return;
+        if (!views || views.length === 0) {
+            listEl.innerHTML = '<div class="empty-state"><p>No API keys yet. Create one to get started.</p></div>';
+            return;
+        }
+        var rows = views.map(renderRow).join('');
+        listEl.innerHTML = ''
+            + '<table class="settings-table api-keys-table">'
+            +   '<thead><tr><th>Name</th><th>Scopes</th><th>Last used</th><th>Created</th><th>Enabled</th><th></th></tr></thead>'
+            +   '<tbody>' + rows + '</tbody>'
+            + '</table>';
+        wireListEvents();
+    }
+
+    async function refreshList() {
+        try {
+            var res = await fetch('/api/api-keys', { credentials: 'same-origin' });
+            if (!res.ok) return;
+            var views = await res.json();
+            renderList(views);
+        } catch (_) {
+            // Best-effort refresh; a failure leaves the previous list
+            // visible rather than blanking the tab.
+        }
+    }
+
+    function openCreateModal() {
+        var modal = document.getElementById('api-keys-create-modal');
+        if (!modal) return;
+        // Reset the form to step 1 every open so a previous create's
+        // plaintext doesn't persist.
+        var formStep = document.getElementById('api-keys-create-form-step');
+        var resultStep = document.getElementById('api-keys-create-result-step');
+        var errEl = document.getElementById('api-keys-create-error');
+        var nameEl = document.getElementById('api-keys-create-name');
+        if (formStep) formStep.hidden = false;
+        if (resultStep) resultStep.hidden = true;
+        if (errEl) {
+            errEl.hidden = true;
+            errEl.textContent = '';
+        }
+        if (nameEl) nameEl.value = '';
+        // Default scopes: only `calendar` checked (mirrors the
+        // template's initial state).
+        document
+            .querySelectorAll('#api-keys-create-form input[name="scope"]')
+            .forEach(function (el) { el.checked = el.value === 'calendar'; });
+        modal.hidden = false;
+        if (nameEl) nameEl.focus();
+    }
+
+    function closeCreateModal() {
+        var modal = document.getElementById('api-keys-create-modal');
+        if (modal) modal.hidden = true;
+    }
+
+    async function submitCreateForm(ev) {
+        ev.preventDefault();
+        var nameEl = document.getElementById('api-keys-create-name');
+        var errEl = document.getElementById('api-keys-create-error');
+        var submitBtn = document.getElementById('api-keys-create-submit');
+        if (!nameEl) return;
+
+        var scopes = Array
+            .from(document.querySelectorAll('#api-keys-create-form input[name="scope"]:checked'))
+            .map(function (el) { return el.value; })
+            .join(',');
+        var fd = new URLSearchParams();
+        fd.set('name', nameEl.value);
+        fd.set('scopes', scopes);
+
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Creating...';
+        }
+        if (errEl) {
+            errEl.hidden = true;
+            errEl.textContent = '';
+        }
+        try {
+            var res = await fetch('/api/api-keys', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: fd.toString(),
+            });
+            if (!res.ok) {
+                var msg = await res.text();
+                if (errEl) {
+                    errEl.textContent = msg || ('Create failed (HTTP ' + res.status + ')');
+                    errEl.hidden = false;
+                }
+                return;
+            }
+            var data = await res.json();
+            // Step 2: show plaintext.
+            var formStep = document.getElementById('api-keys-create-form-step');
+            var resultStep = document.getElementById('api-keys-create-result-step');
+            var plaintextEl = document.getElementById('api-keys-plaintext');
+            if (formStep) formStep.hidden = true;
+            if (resultStep) resultStep.hidden = false;
+            if (plaintextEl) {
+                plaintextEl.value = data.plaintext;
+                plaintextEl.select();
+            }
+        } catch (e) {
+            if (errEl) {
+                errEl.textContent = 'Network error: ' + e.message;
+                errEl.hidden = false;
+            }
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create';
+            }
+        }
+    }
+
+    async function copyPlaintext() {
+        var plaintextEl = document.getElementById('api-keys-plaintext');
+        var confirmEl = document.getElementById('api-keys-copy-confirm');
+        if (!plaintextEl) return;
+        try {
+            await navigator.clipboard.writeText(plaintextEl.value);
+            if (confirmEl) {
+                confirmEl.hidden = false;
+                setTimeout(function () { confirmEl.hidden = true; }, 2000);
+            }
+        } catch (_) {
+            // Fallback: select the input so the user can ctrl-C.
+            plaintextEl.select();
+            plaintextEl.setSelectionRange(0, 99999);
+        }
+    }
+
+    async function toggleKeyEnabled(id, enabled) {
+        try {
+            var fd = new URLSearchParams();
+            fd.set('enabled', enabled ? 'true' : 'false');
+            var res = await fetch('/api/api-keys/' + id + '/toggle', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: fd.toString(),
+            });
+            if (!res.ok) return false;
+            var view = await res.json();
+            // Update the row's label in place; the checkbox already
+            // shows the correct visual state because the user clicked it.
+            var row = document.querySelector('tr[data-api-key-id="' + id + '"]');
+            if (row) {
+                var label = row.querySelector('.api-key-toggle-label');
+                if (label) label.textContent = view.enabled ? 'Enabled' : 'Disabled';
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async function deleteKey(id, name) {
+        var confirmed = window.confirm(
+            'Delete API key "' + name + '"? This cannot be undone. Any integration using this key will start receiving 401 errors immediately.'
+        );
+        if (!confirmed) return;
+        try {
+            var res = await fetch('/api/api-keys/' + id + '/delete', {
+                method: 'POST',
+                credentials: 'same-origin',
+            });
+            if (!res.ok) {
+                if (window.ryokanToast) window.ryokanToast('Delete failed', 'error');
+                return;
+            }
+            // Remove the row immediately; refresh the list to fill
+            // back to the empty-state if this was the last key.
+            var row = document.querySelector('tr[data-api-key-id="' + id + '"]');
+            if (row) row.remove();
+            var remaining = document.querySelectorAll('#api-keys-list tbody tr').length;
+            if (remaining === 0) refreshList();
+        } catch (_) {
+            if (window.ryokanToast) window.ryokanToast('Network error', 'error');
+        }
+    }
+
+    function wireListEvents() {
+        document.querySelectorAll('.api-key-enabled-toggle').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('change', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                if (!id) return;
+                toggleKeyEnabled(id, el.checked).then(function (ok) {
+                    if (!ok) el.checked = !el.checked; // revert
+                });
+            });
+        });
+        document.querySelectorAll('.api-key-delete-btn').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('click', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                var name = el.dataset.apiKeyName || '';
+                if (id) deleteKey(id, name);
+            });
+        });
+    }
+
+    function init() {
+        // Only wire when the api-keys tab is rendered. Selector doubles
+        // as a tab-presence check; a no-op on every other tab.
+        if (!document.getElementById('api-keys-tab')) return;
+        hydrateTimestamps();
+        wireListEvents();
+
+        var createBtn = document.getElementById('api-keys-create-btn');
+        if (createBtn) createBtn.addEventListener('click', openCreateModal);
+
+        var form = document.getElementById('api-keys-create-form');
+        if (form) form.addEventListener('submit', submitCreateForm);
+
+        var copyBtn = document.getElementById('api-keys-copy-btn');
+        if (copyBtn) copyBtn.addEventListener('click', copyPlaintext);
+
+        var savedBtn = document.getElementById('api-keys-saved-btn');
+        if (savedBtn) savedBtn.addEventListener('click', function () {
+            closeCreateModal();
+            refreshList();
+        });
+
+        // Generic modal-close handler for the overlay + cancel buttons.
+        document.querySelectorAll('[data-modal-close="api-keys-create-modal"]').forEach(function (el) {
+            el.addEventListener('click', closeCreateModal);
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();

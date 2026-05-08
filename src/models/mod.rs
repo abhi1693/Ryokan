@@ -1,3 +1,4 @@
+pub mod api_key;
 pub mod artwork_cache;
 pub mod config;
 pub mod custom_formats;

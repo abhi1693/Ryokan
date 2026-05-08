@@ -667,6 +667,22 @@ async fn main() {
             "/api/library/bulk/delete",
             post(handlers::library::bulk::bulk_delete),
         )
+        // Issue #114 — scoped API keys CRUD. All endpoints are
+        // cookie-auth gated (the `protected_routes` group's
+        // require_auth middleware wraps them). The plaintext is
+        // surfaced exactly once on `create` and never again.
+        .route(
+            "/api/api-keys",
+            get(handlers::api_keys::list).post(handlers::api_keys::create),
+        )
+        .route(
+            "/api/api-keys/{id}/toggle",
+            post(handlers::api_keys::toggle),
+        )
+        .route(
+            "/api/api-keys/{id}/delete",
+            post(handlers::api_keys::delete),
+        )
         .route(
             "/api/series/{anilist_id}/auto-search",
             post(handlers::library::search::auto_search_series),
