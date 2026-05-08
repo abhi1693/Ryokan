@@ -268,9 +268,6 @@ Pick the download client you want to use and save the matching `docker-compose.y
 
     Replace `REPLACE-WITH-YOUR-PASSWORD` with whatever you want; same credentials work for ruTorrent's web UI and the connection Ryokan makes. Step 4 walks through plugging them into Ryokan.
 
-    !!! note "Image swap from linuxserver to crazy-max"
-        linuxserver/rutorrent is deprecated; their README points at crazy-max's image as the maintained alternative. Different volume layout (one `/data` instead of `/config`), different port set, but the rTorrent it wraps is the same.
-
 === "SABnzbd"
 
     ```yaml
