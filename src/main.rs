@@ -664,6 +664,10 @@ async fn main() {
             post(handlers::library::bulk::bulk_monitor),
         )
         .route(
+            "/api/library/bulk/delete",
+            post(handlers::library::bulk::bulk_delete),
+        )
+        .route(
             "/api/series/{anilist_id}/auto-search",
             post(handlers::library::search::auto_search_series),
         )

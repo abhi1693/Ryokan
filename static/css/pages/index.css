@@ -638,11 +638,11 @@
 }
 
 .bulk-action-toolbar .btn-sm {
-    padding: 6px 14px;
+    padding: 6px 12px;
     font-size: 13px;
     font-weight: 600;
-    border-radius: 999px;
-    transition: background 0.15s ease-out, transform 0.1s ease-out;
+    border-radius: 7px;
+    transition: background 0.15s ease-out, transform 0.1s ease-out, border-color 0.15s ease-out, color 0.15s ease-out;
 }
 .bulk-action-toolbar .btn-sm:active {
     transform: scale(0.96);

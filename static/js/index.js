@@ -379,10 +379,65 @@ function selectAllVisibleSeries() {
     renderBulkToolbar();
 }
 
+// True when every visible card is in the selected set (and there's at
+// least one visible card). Drives the Select-all toggle's label.
+function areAllVisibleSelected() {
+    var anyVisible = false;
+    var allSelected = true;
+    var cards = document.querySelectorAll('.series-card');
+    for (var i = 0; i < cards.length; i++) {
+        var card = cards[i];
+        if (card.style.display === 'none') continue;
+        anyVisible = true;
+        var id = parseInt(card.dataset.seriesId, 10);
+        if (!id || !bulkSelectedIds.has(id)) {
+            allSelected = false;
+            break;
+        }
+    }
+    return anyVisible && allSelected;
+}
+
+// Toggle the Select-all action: if every visible card is already
+// selected, deselect all visible. Otherwise select all visible.
+// Bound to the toolbar's #bulk-action-select-all-btn.
+function toggleSelectAllVisible() {
+    if (!bulkSelectMode) return;
+    if (areAllVisibleSelected()) {
+        document.querySelectorAll('.series-card').forEach(function (card) {
+            if (card.style.display === 'none') return;
+            var id = parseInt(card.dataset.seriesId, 10);
+            if (!id || !bulkSelectedIds.has(id)) return;
+            bulkSelectedIds.delete(id);
+            card.classList.remove('selected');
+            var cb = card.querySelector('.series-card-select');
+            if (cb) cb.checked = false;
+        });
+    } else {
+        selectAllVisibleSeries();
+    }
+    renderBulkToolbar();
+}
+
+// Inline chip click handler. Stops propagation + preventDefault so
+// the parent <a>'s navigation doesn't fire even when the document-
+// level delegation hasn't been re-attached (hx-boost re-renders the
+// grid; document-level events survive but inline handlers are
+// replaced with the new DOM, so making the chip own its click
+// guarantees correct behavior regardless of listener state).
+function bulkChipClick(ev, seriesId) {
+    ev.stopPropagation();
+    ev.preventDefault();
+    if (!bulkSelectMode) return;
+    toggleSeriesSelectById(seriesId);
+}
+
 function renderBulkToolbar() {
     var bar = document.getElementById('bulk-action-toolbar');
     var num = document.getElementById('bulk-action-count-num');
     var monitorBtn = document.getElementById('bulk-action-monitor-btn');
+    var deleteBtn = document.getElementById('bulk-action-delete-btn');
+    var selectAllBtn = document.getElementById('bulk-action-select-all-btn');
     if (!bar || !num) return;
     num.textContent = String(bulkSelectedIds.size);
     // Toolbar visibility tracks selecting MODE, not selection count —
@@ -395,7 +450,12 @@ function renderBulkToolbar() {
         bar.hidden = true;
         bar.classList.remove('visible');
     }
-    if (monitorBtn) monitorBtn.disabled = bulkSelectedIds.size === 0;
+    var hasSelection = bulkSelectedIds.size > 0;
+    if (monitorBtn) monitorBtn.disabled = !hasSelection;
+    if (deleteBtn) deleteBtn.disabled = !hasSelection;
+    if (selectAllBtn) {
+        selectAllBtn.textContent = areAllVisibleSelected() ? 'Deselect all' : 'Select all';
+    }
 }
 
 function clearBulkSelection() {
@@ -496,8 +556,12 @@ function renderBulkOutcome(outcome, verb) {
     var ok = (outcome.succeeded || []).length;
     var bad = (outcome.failed || []).length;
     if (!window.ryokanToast) return;
-    var modal = document.getElementById('bulk-monitor-modal');
-    if (modal) modal.style.display = 'none';
+    // Close any open bulk modal — different actions trigger from
+    // different modals but the outcome rendering is shared.
+    ['bulk-monitor-modal', 'bulk-delete-modal'].forEach(function (id) {
+        var m = document.getElementById(id);
+        if (m) m.style.display = 'none';
+    });
 
     if (bad === 0) {
         // All succeeded: toast + exit mode (which clears selection).
@@ -542,39 +606,116 @@ function renderBulkOutcome(outcome, verb) {
 
 // One-shot global listeners. The `__ryokan*` boot guard pattern keeps
 // hx-boost re-execs of this file from accumulating duplicate handlers
-// on every nav-back into /.
+// on every nav-back into /. Delegated click + keydown listeners are
+// attached to `document` rather than the library grid because the
+// grid element gets replaced on hx-boost navigation; document-level
+// listeners survive the swap. Inline `onclick` on the chip itself
+// belt-and-suspenders this for the chip-specific case.
 if (!window.__ryokanBulkSelectInit) {
     window.__ryokanBulkSelectInit = true;
 
-    // Delegated click handler on the grid. In selecting mode this
-    // intercepts every card click, preventDefaults the parent <a>'s
+    // Document-level delegated click. In selecting mode, intercepts
+    // every card-body click, preventDefaults the parent <a>'s
     // navigation, and toggles selection. Outside selecting mode it
-    // does nothing — cards navigate as normal.
-    var grid = document.getElementById('library-grid');
-    if (grid) {
-        grid.addEventListener('click', function (ev) {
-            if (!bulkSelectMode) return;
-            var card = ev.target.closest('.series-card');
-            if (!card) return;
-            ev.preventDefault();
-            ev.stopPropagation();
-            var id = parseInt(card.dataset.seriesId, 10);
-            if (!id) return;
-            toggleSeriesSelectById(id);
-        });
-    }
+    // returns early. Skips clicks already handled inline by the chip
+    // itself (those have stopPropagation, but defense-in-depth).
+    document.addEventListener('click', function (ev) {
+        if (!bulkSelectMode) return;
+        // Inline chip handler already handled this; don't double-toggle.
+        if (ev.target.classList && ev.target.classList.contains('series-card-select')) {
+            return;
+        }
+        var card = ev.target.closest && ev.target.closest('.series-card');
+        if (!card) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        var id = parseInt(card.dataset.seriesId, 10);
+        if (!id) return;
+        toggleSeriesSelectById(id);
+    });
 
-    // Esc: exits the bulk monitor modal first if open; otherwise
-    // exits selecting mode (which clears the selection on the way out).
+    // Esc: exits the bulk delete modal first if open, then bulk
+    // monitor modal, then selecting mode (clears selection on the
+    // way out).
     document.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Escape') return;
-        var modal = document.getElementById('bulk-monitor-modal');
-        if (modal && modal.style.display !== 'none' && modal.style.display !== '') {
-            modal.style.display = 'none';
+        var deleteModal = document.getElementById('bulk-delete-modal');
+        if (deleteModal && deleteModal.style.display !== 'none' && deleteModal.style.display !== '') {
+            deleteModal.style.display = 'none';
+            return;
+        }
+        var monitorModal = document.getElementById('bulk-monitor-modal');
+        if (monitorModal && monitorModal.style.display !== 'none' && monitorModal.style.display !== '') {
+            monitorModal.style.display = 'none';
             return;
         }
         if (bulkSelectMode) {
             exitBulkSelectMode();
+        }
+    });
+}
+
+// ── Bulk delete modal ──────────────────────────────────────────────
+
+function openBulkDeleteModal() {
+    if (bulkSelectedIds.size === 0) return;
+    var modal = document.getElementById('bulk-delete-modal');
+    var count = document.getElementById('bulk-delete-count');
+    var checkbox = document.getElementById('bulk-delete-files-toggle');
+    var confirmBtn = document.getElementById('bulk-delete-confirm-btn');
+    if (count) count.textContent = String(bulkSelectedIds.size);
+    if (checkbox) checkbox.checked = false;
+    if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.textContent = 'Remove from library';
+    }
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeBulkDeleteModal(event) {
+    if (event && event.target && event.currentTarget && event.target !== event.currentTarget) {
+        if (!event.target.closest('.btn-icon') && !event.target.classList.contains('btn-secondary')) {
+            return;
+        }
+    }
+    var modal = document.getElementById('bulk-delete-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function confirmBulkDelete() {
+    if (bulkSelectedIds.size === 0) return;
+    var ids = Array.from(bulkSelectedIds);
+    var checkbox = document.getElementById('bulk-delete-files-toggle');
+    var deleteFiles = !!(checkbox && checkbox.checked);
+    var confirmBtn = document.getElementById('bulk-delete-confirm-btn');
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Removing…';
+    }
+    fetch('/api/library/bulk/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ series_ids: ids, delete_files: deleteFiles })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (outcome) {
+        // Remove succeeded cards from the DOM directly — they're
+        // gone server-side, so leaving them in the grid would be
+        // misleading. Failed cards stay (per renderBulkOutcome's
+        // partial-failure logic).
+        (outcome.succeeded || []).forEach(function (id) {
+            var card = document.getElementById('series-' + id);
+            if (card) card.remove();
+        });
+        renderBulkOutcome(outcome, 'Removed from library');
+    })
+    .catch(function (e) {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Remove from library';
+        }
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Bulk delete failed', body: (e && e.message) || 'Network error', log: true });
         }
     });
 }

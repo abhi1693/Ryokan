@@ -44,6 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
+use crate::models::{config, grabbed_torrents, series};
 use crate::services::logger;
 
 /// Per-series outcome envelope returned from synchronous bulk endpoints.
@@ -128,6 +129,157 @@ pub async fn bulk_monitor(
     .await;
 
     Json(BulkOutcome { succeeded, failed })
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkDeleteRequest {
+    pub series_ids: Vec<i64>,
+    /// When true, also walks `grabbed_torrents` for each series and
+    /// asks the resolved download client to drop the torrent + its
+    /// files, then recursively removes the on-disk folder under
+    /// `media_root/<folder_name>`. When false, only the database
+    /// rows for the series are removed (cascade + `rss_seen`
+    /// NULL-out via [`series::remove`]); files stay on disk and
+    /// active torrents stay in their download clients.
+    pub delete_files: bool,
+}
+
+/// `POST /api/library/bulk/delete` — remove a list of series from the
+/// library. Per-series cleanup runs in a loop; failures don't abort
+/// the batch.
+///
+/// Recycle bin (#123) hasn't shipped yet, so `delete_files: true`
+/// performs a permanent unlink. The Confirmation modal in the
+/// frontend warns that this can't be undone. When recycle ships,
+/// the file-removal branch swaps to a recycle-bin call without
+/// changing this handler's wire shape.
+#[utoipa::path(
+    post,
+    path = "/api/library/bulk/delete",
+    tag = "Library",
+    summary = "Bulk-remove series from library",
+    request_body = BulkDeleteRequest,
+    responses(
+        (status = 200, description = "Outcome envelope; check `failed` for per-series errors", body = BulkOutcome),
+    ),
+)]
+pub async fn bulk_delete(
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Json<BulkOutcome> {
+    if req.series_ids.is_empty() {
+        return Json(BulkOutcome {
+            succeeded: vec![],
+            failed: vec![],
+        });
+    }
+
+    // Resolve media_root once at the top — bulk delete pays a single
+    // config fetch instead of N when delete_files is true. Returns
+    // None when config isn't loaded (shouldn't happen post-setup; we
+    // guard rather than crash).
+    let media_root: Option<String> = if req.delete_files {
+        config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.media_root)
+    } else {
+        None
+    };
+
+    let mut succeeded = Vec::with_capacity(req.series_ids.len());
+    let mut failed = Vec::new();
+    for series_id in &req.series_ids {
+        match delete_one_series(&state, *series_id, req.delete_files, media_root.as_deref()).await {
+            Ok(()) => succeeded.push(*series_id),
+            Err(reason) => failed.push(BulkFailure {
+                series_id: *series_id,
+                reason,
+            }),
+        }
+    }
+
+    let failed_ids: Vec<i64> = failed.iter().map(|f| f.series_id).collect();
+    logger::info(
+        &state.db,
+        LogCategory::Library,
+        &format!(
+            "Bulk delete: {} succeeded, {} failed",
+            succeeded.len(),
+            failed.len()
+        ),
+        &format!(
+            "action=delete delete_files={} failed_ids={:?}",
+            req.delete_files, failed_ids
+        ),
+    )
+    .await;
+
+    Json(BulkOutcome { succeeded, failed })
+}
+
+/// Per-series delete worker for [`bulk_delete`]. Returns `Result<(),
+/// String>` so the loop can collect failures into `BulkOutcome.failed`
+/// without aborting the batch.
+///
+/// Order of operations matters: torrent-client cleanup first (failures
+/// are best-effort; logged but not fatal), then on-disk folder removal,
+/// then `series::remove` for the DB cascade. If we DB-removed first,
+/// a subsequent `grabbed_torrents` lookup for the file/torrent
+/// cleanup would return nothing (FK cascade dropped the rows) and
+/// active torrents would orphan in their clients.
+async fn delete_one_series(
+    state: &AppState,
+    series_id: i64,
+    delete_files: bool,
+    media_root: Option<&str>,
+) -> Result<(), String> {
+    if delete_files {
+        // 1. Tell each grab's download client to drop the torrent +
+        //    its files. Best-effort: per-client failures log but don't
+        //    fail the series. The user explicitly asked for files-
+        //    out-too; a transient client outage shouldn't pin the
+        //    series in their library forever.
+        let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
+            .await
+            .map_err(|e| format!("list grabs: {e}"))?;
+        for &(_grab_id, ref hash, dc_id) in &hashes {
+            if hash.is_empty() {
+                continue;
+            }
+            if let Some(client) = state.resolve_grab_client(dc_id, hash).await {
+                let _ = client.delete(hash, true).await;
+            }
+        }
+
+        // 2. Remove the on-disk folder. spawn_blocking because
+        //    remove_dir_all walks every file and a deep BD library
+        //    folder can take a few seconds. media_root is None when
+        //    config wasn't loadable; in that case we skip file
+        //    removal but still proceed to the DB delete (the user
+        //    pressed Delete, the entry should disappear from their
+        //    library — orphaned files are recoverable).
+        if let Some(root) = media_root
+            && let Ok(Some(s)) = series::get_by_id(&state.db, series_id).await
+            && !s.folder_name.is_empty()
+        {
+            let folder = std::path::PathBuf::from(root).join(&s.folder_name);
+            if folder.exists() {
+                let folder_for_blocking = folder.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::fs::remove_dir_all(folder_for_blocking)
+                })
+                .await;
+            }
+        }
+    }
+
+    // 3. DB cascade. `series::remove` is the canonical path; it does
+    //    the rss_seen NULL-out + every other FK-cascading delete.
+    series::remove(&state.db, series_id)
+        .await
+        .map_err(|e| format!("db remove: {e}"))
 }
 
 #[cfg(test)]
@@ -255,6 +407,49 @@ mod tests {
         };
         let state = crate::test_support::build_test_app_state(pool, None);
         let Json(outcome) = bulk_monitor(axum::extract::State(state), Json(req)).await;
+        assert!(outcome.succeeded.is_empty());
+        assert!(outcome.failed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_removes_db_rows_when_delete_files_false() {
+        // Covers the "remove from library only" path: rows go from
+        // `series` (and cascade across the FK graph), files stay
+        // on disk. delete_files=false also skips the
+        // grabbed_torrents walk, so this test doesn't need a
+        // download client mock.
+        let pool = in_memory_pool().await;
+        let a = insert_series(&pool, 1, "A").await;
+        let b = insert_series(&pool, 2, "B").await;
+
+        let req = BulkDeleteRequest {
+            series_ids: vec![a, b],
+            delete_files: false,
+        };
+        let state = crate::test_support::build_test_app_state(pool.clone(), None);
+        let Json(outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
+
+        assert_eq!(outcome.succeeded.len(), 2);
+        assert!(outcome.failed.is_empty());
+        for id in [a, b] {
+            let exists: Option<(i64,)> = sqlx::query_as("SELECT id FROM series WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&pool)
+                .await
+                .unwrap();
+            assert!(exists.is_none(), "series {id} should be DB-removed");
+        }
+    }
+
+    #[tokio::test]
+    async fn bulk_delete_empty_selection_is_200_noop() {
+        let pool = in_memory_pool().await;
+        let req = BulkDeleteRequest {
+            series_ids: vec![],
+            delete_files: false,
+        };
+        let state = crate::test_support::build_test_app_state(pool, None);
+        let Json(outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
         assert!(outcome.succeeded.is_empty());
         assert!(outcome.failed.is_empty());
     }

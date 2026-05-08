@@ -126,16 +126,18 @@
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}" data-series-id="{{ s.id }}">
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
-           toggleBulkSelectMode). In mode, the entire card body becomes
-           a click target for selection — the .library-grid delegated
-           handler in index.js preventDefaults the parent <a>'s
-           navigation and toggles selection, so we don't need an inline
-           onclick here. The native input stays for keyboard +
-           screen-reader semantics. #}
+           toggleBulkSelectMode). The inline onclick stops propagation
+           AND default — without preventDefault, the parent <a>'s
+           navigation can still fire because the click bubbled up
+           before our document-level delegation got to preventDefault
+           it on hx-boosted pages where the listener wasn't yet
+           re-attached. Inline-handling here makes chip clicks
+           always-do-the-right-thing regardless of listener state. #}
         <input type="checkbox"
                class="series-card-select"
                aria-label="Select for bulk action"
-               tabindex="-1">
+               tabindex="-1"
+               onclick="bulkChipClick(event, {{ s.id }})">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
             {# Decorative — the title renders as visible text in
@@ -175,17 +177,48 @@
 {# Bulk action toolbar (issue #125). Mounted as soon as the user
    enters bulk-select mode (see toggleBulkSelectMode in index.js).
    Bottom-stuck so it stays reachable while the user scrolls the
-   grid selecting more cards. The action buttons (currently Set
-   monitor mode) act on the selected set; "Done" exits mode +
-   clears selection. #}
+   grid selecting more cards. Layout: count, select-all toggle,
+   action buttons (gated on N > 0), exit. #}
 <div id="bulk-action-toolbar" class="bulk-action-toolbar" aria-live="polite" hidden>
     <div class="bulk-action-toolbar-inner">
         <span class="bulk-action-count"><span id="bulk-action-count-num">0</span> selected</span>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllVisibleSeries()">Select all</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="toggleSelectAllVisible()" id="bulk-action-select-all-btn">Select all</button>
         <span class="bulk-action-divider" aria-hidden="true"></span>
-        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkMonitorModal()" id="bulk-action-monitor-btn">Set monitor mode</button>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkMonitorModal()" id="bulk-action-monitor-btn" disabled>Set monitor mode</button>
+        <button type="button" class="btn btn-danger btn-sm" onclick="openBulkDeleteModal()" id="bulk-action-delete-btn" disabled>Delete</button>
         <span class="bulk-action-divider" aria-hidden="true"></span>
         <button type="button" class="btn btn-ghost btn-sm" onclick="exitBulkSelectMode()">Done</button>
+    </div>
+</div>
+
+{# Bulk delete confirmation modal. Distinct from the per-row
+   data-ryokan-confirm-* pattern because we collect a delete-files
+   checkbox alongside the confirmation. Recycle bin (#123) hasn't
+   shipped yet, so file removal is a permanent unlink — confirmation
+   copy emphasises "cannot be undone." #}
+<div class="modal-backdrop" id="bulk-delete-modal" style="display:none" onclick="closeBulkDeleteModal(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px">
+        <div class="modal-header">
+            <h3>Remove from library</h3>
+            <button type="button" class="btn-icon" onclick="closeBulkDeleteModal(event)" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p style="margin: 0 0 12px;">Remove <strong><span id="bulk-delete-count">0</span> series</strong> from your library.</p>
+            <label class="checkbox-row" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius: var(--radius); background: var(--bg-elevated);">
+                <input type="checkbox" id="bulk-delete-files-toggle" style="margin-top: 3px;">
+                <span>
+                    <strong style="display:block; color: var(--text-bright); font-size: 14px;">Also delete files from disk</strong>
+                    <span class="form-hint" style="display:block; margin-top: 2px;">Permanently remove the on-disk media folders and tell every download client to drop the active torrents. <strong style="color: var(--red);">Cannot be undone.</strong></span>
+                </span>
+            </label>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeBulkDeleteModal(event)">Cancel</button>
+            <span class="modal-footer-spacer"></span>
+            <button type="button" id="bulk-delete-confirm-btn" class="btn btn-danger" onclick="confirmBulkDelete()">Remove from library</button>
+        </div>
     </div>
 </div>
 
