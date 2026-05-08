@@ -236,7 +236,7 @@ Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to c
         image: crazymax/rtorrent-rutorrent:latest
         container_name: rutorrent
         ports:
-          - "8181:8080"        # ruTorrent web UI (host:container; 8181 picked to leave 8080 free for other clients)
+          - "8082:8080"        # ruTorrent web UI (host:container; 8082 picked to leave 8080 free for other clients)
           - "50000:50000"      # BT incoming peer connections
           - "6881:6881/udp"    # DHT
         # XML-RPC (port 8000 inside the container) isn't host-exposed.
@@ -413,7 +413,7 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
 
 === "rTorrent"
 
-    Open <http://localhost:8181> to confirm ruTorrent's web UI loads. If you set up htpasswd in step 1, you'll be prompted for the credentials you generated; log in with `admin` and your password.
+    Open <http://localhost:8082> to confirm ruTorrent's web UI loads. If you set up htpasswd in step 1, you'll be prompted for the credentials you generated; log in with `admin` and your password.
 
     In Ryokan's add-client form:
 
