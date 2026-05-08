@@ -46,3 +46,7 @@ If you'd rather build the stack yourself, work through these in order:
 ## Demo
 
 There isn't a hosted demo (Ryokan is an admin-tool that talks to your private library and download clients; nothing to safely show off without signing visitors into a real account). The fastest way to see the UI is to run the Docker container locally; it works offline against the bundled defaults so you can poke around before configuring anything real.
+
+---
+
+*Last updated: 2026-05-07.*

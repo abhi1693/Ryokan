@@ -101,7 +101,7 @@ If you want imports to actually land somewhere your media server can see, you ne
 Now grabs that finish will be hardlinked or copied into `/srv/media/anime/<show name>/Season 01/`.
 
 !!! warning "PUID and PGID matter once you mount real folders"
-    The `1000:1000` defaults in the compose file work for most homelabs but not all. If files Ryokan writes show up with the wrong owner, run `id -u` and `id -g` on your media-owning user and update `PUID` / `PGID` to match. The [Docker reference](docker.md#puid-pgid) explains why.
+    The `1000:1000` defaults in the compose file work for most homelabs but not all. If files Ryokan writes show up with the wrong owner, run `id -u` and `id -g` on your media-owning user and update `PUID` / `PGID` to match. [Installation → PUID and PGID](install.md#puid-and-pgid) explains why.
 
 ## 7. (Optional) Link AniList or MAL
 
@@ -112,3 +112,7 @@ If you want Ryokan to add new shows automatically when you mark them watching on
 - **[Configuration](configuration.md)** explains every Settings tab so you can tune scoring, choose between hardlink and copy, set up a quality profile, and so on.
 - **[Stack builder](stack-builder.md)** is worth a look even if you're already up and running; it generates the rest of the homelab stack (Jellyfin, Seerr, reverse proxy) in the same shape.
 - **[Troubleshooting](troubleshooting.md)** has the most common stumbles and their fixes.
+
+---
+
+*Last updated: 2026-05-07.*
