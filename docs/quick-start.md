@@ -236,13 +236,14 @@ Pick the download client you want to use and save the matching `docker-compose.y
           - "8181:8080"        # ruTorrent web UI (host:container; 8181 picked to leave 8080 free for other clients)
           - "50000:50000"      # BT incoming peer connections
           - "6881:6881/udp"    # DHT
-        # XML-RPC (port 8000 inside the container) isn't host-exposed —
+        # XML-RPC (port 8000 inside the container) isn't host-exposed.
         # Ryokan talks to it via Docker's per-compose network at
         # `http://rutorrent:8000/RPC2`. Add `- "8000:8000"` here only if
         # you want to hit it from the host with curl for debugging.
         volumes:
           - rutorrent-data:/data
           - ./downloads:/downloads     # contains /downloads/temp and /downloads/complete after first start
+          - ./passwd:/passwd           # htpasswd files for web UI + RPC auth
         environment:
           - PUID=1000
           - PGID=1000
@@ -255,6 +256,17 @@ Pick the download client you want to use and save the matching `docker-compose.y
       jellyfin-cache:
       rutorrent-data:
     ```
+
+    **Set up basic auth before bringing the stack up.** The crazy-max image looks for htpasswd files at `/passwd/rutorrent.htpasswd` (web UI) and `/passwd/rpc.htpasswd` (XML-RPC, the endpoint Ryokan uses). When the files exist, nginx enforces auth in front of both; when they don't, both are unauthenticated. Generate both with the same credentials in one shot:
+
+    ```sh
+    mkdir -p ~/ryokan-stack/passwd
+    cd ~/ryokan-stack
+    docker run --rm httpd:2.4-alpine htpasswd -Bbn admin "REPLACE-WITH-YOUR-PASSWORD" \
+      | tee passwd/rutorrent.htpasswd > passwd/rpc.htpasswd
+    ```
+
+    Replace `REPLACE-WITH-YOUR-PASSWORD` with whatever you want; same credentials work for ruTorrent's web UI and the connection Ryokan makes. Step 4 walks through plugging them into Ryokan.
 
     !!! note "Image swap from linuxserver to crazy-max"
         linuxserver/rutorrent is deprecated; their README points at crazy-max's image as the maintained alternative. Different volume layout (one `/data` instead of `/config`), different port set, but the rTorrent it wraps is the same.
@@ -409,15 +421,18 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
 
 === "rTorrent"
 
-    Open <http://localhost:8181> to confirm ruTorrent's web UI loads. The crazy-max image doesn't ship with auth by default; if you're exposing this beyond localhost, mount an htpasswd file at `/passwd` (the image's README covers how).
+    Open <http://localhost:8181> to confirm ruTorrent's web UI loads. If you set up htpasswd in step 1, you'll be prompted for the credentials you generated; log in with `admin` and your password.
 
     In Ryokan's add-client form:
 
     - **Kind**: rTorrent
     - **URL**: `http://rutorrent:8000/RPC2` (port 8000 is the dedicated XML-RPC port inside the container; Ryokan reaches it via Docker's per-compose DNS without it needing a host-side mapping)
-    - **Username** / **Password**: leave blank unless you've set up htpasswd
+    - **Username**: `admin` (matches the htpasswd you generated in step 1)
+    - **Password**: the password you put in the htpasswd file
     - **Label**: `ryokan-anime`
     - **Default for this protocol**: on
+
+    If you skipped htpasswd in step 1 (you'll have to manually delete the `./passwd:/passwd` mount from the compose), leave Username and Password blank.
 
 === "SABnzbd"
 
