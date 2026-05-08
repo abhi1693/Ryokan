@@ -433,7 +433,7 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
     In Ryokan's add-client form:
 
     - **Kind**: SABnzbd
-    - **URL**: `http://sabnzbd:8080`
+    - **URL**: `http://sabnzbd:8080` (the **container** port, not the 8081 host mapping. Ryokan reaches SAB through Docker's per-compose network where SAB is still on its native 8080; the 8081 in the compose is only for your browser to hit from the host.)
     - **API Key**: paste the full API key
     - **Category**: `ryokan-anime` (Ryokan auto-creates this in SAB if it doesn't exist)
     - **Default for this protocol**: on
