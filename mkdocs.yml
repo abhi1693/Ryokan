@@ -57,13 +57,17 @@ theme:
     code: JetBrains Mono
 
 nav:
-  - Home: index.md
-  - Install: install.md
-  - Stack builder: stack-builder.md
-  - Docker: docker.md
-  - Configuration: configuration.md
-  - Download clients: download-clients.md
-  - External accounts: external-accounts.md
+  - Getting started:
+    - Welcome: index.md
+    - Quick start: quick-start.md
+    - Stack builder: stack-builder.md
+  - Installation:
+    - Docker (recommended): install.md
+    - Docker reference: docker.md
+  - Guides:
+    - Configuration: configuration.md
+    - Download clients: download-clients.md
+    - External accounts: external-accounts.md
   - Troubleshooting: troubleshooting.md
   - FAQ: faq.md
 
