@@ -9,12 +9,13 @@ If you've used Sonarr for TV, the shape is the same. Ryokan is just the anime-tu
 
 ## What you can do with it
 
-- **Pick a show on AniList or MAL → it gets added to your Ryokan library.** The optional watch-list sync runs every 30 minutes and pulls new entries automatically.
-- **Search a network of sources at once.** Built-in [Nyaa](https://nyaa.si) search, plus any torznab or newznab indexer you have set up through Prowlarr or Jackett, plus direct RSS feeds, plus push notifications from autobrr.
-- **Score every release and pick the best one.** Combine a quality profile, [TRaSH-Guides](https://trash-guides.info)-compatible Custom Formats, and SeaDex picks to choose what gets grabbed.
-- **Send grabs to whichever download client you use.** qBittorrent, Deluge, Transmission, rTorrent, or SABnzbd. Multiple clients work at once.
+- **Track anime from AniList or MAL.** Link your account and Ryokan auto-adds shows you mark as watching. Or add them manually from Ryokan's search.
+- **Search multiple sources at once.** Built-in [Nyaa](https://nyaa.si) search, torznab and newznab indexers via Prowlarr or Jackett, direct RSS feeds, and autobrr webhooks all merge into one ranked result list.
+- **Pick the best release automatically.** A quality profile, [TRaSH-Guides](https://trash-guides.info)-compatible Custom Formats (the same scoring rules Sonarr uses), and optional [SeaDex](https://releases.moe) picks (a community-curated list of best anime releases) decide what gets grabbed.
+- **Re-grab when something better lands.** Set a quality cutoff once; Ryokan watches for upgrades and replaces older grabs as higher-scoring releases show up.
+- **Use the download client you already have.** qBittorrent, Deluge, Transmission, rTorrent, or SABnzbd. Run more than one at once and Ryokan routes per-grab.
 - **Land files in your library automatically.** Hardlink (default; keeps the torrent seeding), copy, or move.
-- **Plug into Seerr.** Ryokan exposes a Sonarr/Radarr-shaped API so Seerr can request anime through it just like it asks Sonarr for TV.
+- **Plug into Seerr.** Ryokan exposes a Sonarr/Radarr-compatible API so Seerr requests anime the same way it asks Sonarr for TV.
 
 ## Get started
 
