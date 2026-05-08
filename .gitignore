@@ -5,6 +5,7 @@
 *.db-shm
 *.db-wal
 .env
+.venv-docs/
 /.claude/*
 !/.claude/agents/
 !/.claude/skills/
