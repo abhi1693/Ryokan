@@ -6,7 +6,14 @@ If you don't have a download client yet, or you want a complete stack with Jelly
 
 ## What you'll need
 
-- **Docker** installed (`docker --version` works at the terminal). New to Docker? Read [Docker's overview](https://docs.docker.com/get-started/docker-overview/) first; it covers what containers, images, and volumes are, which the rest of this page assumes you know.
+- **Docker** installed and **Docker Compose v2** available. Verify both at the terminal:
+
+    ```sh
+    docker --version            # any 20.10+ is fine
+    docker compose version      # note the space; this is the v2 plugin
+    ```
+
+    Docker Desktop ships Compose v2 bundled. On Linux you may need a separate package (`docker-compose-plugin` on Debian/Ubuntu, `docker-compose` on Arch). New to Docker? Read [Docker's overview](https://docs.docker.com/get-started/docker-overview/) first; it covers what containers, images, and volumes are, which the rest of this page assumes you know.
 - **A torrent or usenet client** running somewhere your machine can reach. Doesn't have to be on the same host. Supported: qBittorrent, Deluge, Transmission, rTorrent, SABnzbd.
 - **About 10 minutes**.
 
