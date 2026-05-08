@@ -460,9 +460,17 @@
     }
 }
 
-/* Hover (unchecked): brighten the border so the chip reads as
-   "ready to click" without committing to mauve yet. */
-.library-grid.selecting .series-card:hover .series-card-select:not(:checked) {
+/* Hover-over-unselected: brighten the border so the chip reads as
+   "ready to click" without committing to mauve yet. The
+   `:not(.selected)` on the card is load-bearing: without it, this
+   rule's higher specificity (4,1 over the checked rule's 2,1)
+   overrode `.selected > .series-card-select`, so hovering a
+   selected chip would briefly flip the mauve back to dark — looked
+   like the checkmark was disappearing on hover. Excluding selected
+   cards from this rule keeps the mauve visual stable.
+   `:not(:checked)` is kept too as belt-and-suspenders for paths
+   where `:checked` latches but `.selected` somehow didn't. */
+.library-grid.selecting .series-card:not(.selected):hover .series-card-select:not(:checked) {
     border-color: rgba(232, 232, 240, 0.75);
     background: rgba(15, 15, 19, 0.75);
 }
