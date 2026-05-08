@@ -13,10 +13,10 @@
         <link rel="canonical" href="https://johnthreekay.github.io/Ryokan/docs/docker/">
       
       
-        <link rel="prev" href="../stack-builder/">
+        <link rel="prev" href="../install/">
       
       
-        <link rel="next" href="../configuration/">
+        <link rel="next" href="../from-source/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Docker - Ryokan</title>
+        <title>Docker reference - Ryokan</title>
       
     
     
@@ -58,6 +58,8 @@
       
     
     
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
       <link rel="stylesheet" href="../stylesheets/picker.css">
     
     <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
@@ -76,7 +78,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="pink">
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
   
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
@@ -85,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#docker" class="md-skip">
+        <a href="#docker-reference" class="md-skip">
           Skip to content
         </a>
       
@@ -119,7 +121,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Docker
+              Docker reference
             
           </span>
         </div>
@@ -132,7 +134,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
     
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
@@ -142,7 +144,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
     
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
@@ -202,46 +204,17 @@
   
   
   
-    <li class="md-tabs__item">
-      <a href="./.." class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
   
-  Home
+  Getting started
 
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../install/" class="md-tabs__link">
-        
-  
-  Install
-
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../stack-builder/" class="md-tabs__link">
-        
-  
-  Stack builder
-
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -252,30 +225,17 @@
     
   
   
-    <li class="md-tabs__item md-tabs__item--active">
-      <a href="././" class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../install/" class="md-tabs__link">
+          
   
-  Docker
+  Installation
 
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../configuration/" class="md-tabs__link">
-        
-  
-  Configuration
-
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -284,30 +244,17 @@
   
   
   
-    <li class="md-tabs__item">
-      <a href="../download-clients/" class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item">
+        <a href="../configuration/" class="md-tabs__link">
+          
   
-  Download clients
+  Guides
 
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../external-accounts/" class="md-tabs__link">
-        
-  
-  External accounts
-
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -394,6 +341,56 @@
   
   
   
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Getting started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="./.." class="md-nav__link">
         
@@ -402,7 +399,7 @@
   <span class="md-ellipsis">
     
   
-  Home
+  Welcome
 
     
   </span>
@@ -413,22 +410,23 @@
     </li>
   
 
-    
-      
-      
+              
+            
+              
+                
   
   
   
   
     <li class="md-nav__item">
-      <a href="../install/" class="md-nav__link">
+      <a href="../quick-start/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-  Install
+  Quick start
 
     
   </span>
@@ -439,9 +437,10 @@
     </li>
   
 
-    
-      
-      
+              
+            
+              
+                
   
   
   
@@ -465,9 +464,99 @@
     </li>
   
 
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
     
       
       
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Installation
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../install/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Docker (recommended)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
   
   
     
@@ -489,7 +578,7 @@
   <span class="md-ellipsis">
     
   
-  Docker
+  Docker reference
 
     
   </span>
@@ -506,7 +595,7 @@
   <span class="md-ellipsis">
     
   
-  Docker
+  Docker reference
 
     
   </span>
@@ -532,32 +621,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#volume-layout" class="md-nav__link">
-    <span class="md-ellipsis">
-      <span class="md-typeset">
-        Volume layout
-      </span>
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#puid-pgid" class="md-nav__link">
-    <span class="md-ellipsis">
-      <span class="md-typeset">
-        PUID / PGID
-      </span>
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#environment-variables" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
         Environment variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#volume-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Volume layout
       </span>
     </span>
   </a>
@@ -586,6 +664,28 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#reset-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reset auth
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-behind-a-reverse-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running behind a reverse proxy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -593,9 +693,94 @@
     </li>
   
 
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
     
       
       
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Guides
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
   
   
   
@@ -619,9 +804,37 @@
     </li>
   
 
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
     
-      
-      
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
   
   
   
@@ -645,9 +858,10 @@
     </li>
   
 
-    
-      
-      
+              
+            
+              
+                
   
   
   
@@ -668,6 +882,14 @@
   
 
       </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
     </li>
   
 
@@ -765,32 +987,21 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#volume-layout" class="md-nav__link">
-    <span class="md-ellipsis">
-      <span class="md-typeset">
-        Volume layout
-      </span>
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#puid-pgid" class="md-nav__link">
-    <span class="md-ellipsis">
-      <span class="md-typeset">
-        PUID / PGID
-      </span>
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
   <a href="#environment-variables" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
         Environment variables
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#volume-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Volume layout
       </span>
     </span>
   </a>
@@ -819,6 +1030,28 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#reset-auth" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Reset auth
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-behind-a-reverse-proxy" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Running behind a reverse proxy
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -837,30 +1070,10 @@
   
 
 
-<h1 id="docker">Docker<a class="headerlink" href="#docker" title="Anchor link">&para;</a></h1>
-<p>The published image is <code>ghcr.io/johnthreekay/ryokan:latest</code>. Architectures: <code>linux/amd64</code> and <code>linux/arm64</code>. The repo's <code>docker-compose.yml</code> is the canoncal reference. You can start there and adjust to taste.</p>
-<h2 id="volume-layout">Volume layout<a class="headerlink" href="#volume-layout" title="Anchor link">&para;</a></h2>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">volumes</span><span class="p">:</span>
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-data:/data</span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="c1"># Optional, uncomment for post-processing:</span>
-</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="c1"># - /srv/downloads:/downloads</span>
-</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="c1"># - /srv/media/anime:/media/anime</span>
-</span></code></pre></div>
-<p><strong><code>/data</code> (required)</strong> holds the SQLite DB, the artwork blob cache, the encryption key, the anibridge mappings cache, and any sentinel files. Loss of <code>/data</code> means losing your library state, queued grabs, scoring history, OAuth tokens, etc. The named-volume default (<code>ryokan-data</code>) keeps it inside Docker; bind-mount to a host path if you want the DB visible from the host filesystem.</p>
-<p><strong><code>/downloads</code></strong> and <strong><code>/media/...</code></strong> are the post-processing source and destination. They're optional in the sense that Ryokan boots without them, but post-processing requires both to be visible inside the container at the same paths you configure in Settings → Download Clients (per-client download path) and Settings → General (media root).</p>
-<div class="admonition warning">
-<p class="admonition-title">User-mounted paths are <em>not</em> chowned</p>
-<p>The entrypoint chowns <code>/data</code> to the runtime UID/GID, but <strong>deliberately not</strong> <code>/downloads</code> or <code>/media/...</code>. Chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of your <em>arr stack relies on. Set <code>PUID</code> / <code>PGID</code> to match the user that already owns those host paths. That's the linuxserver.io convention and what other </em>arr containers expect.</p>
-</div>
-<h2 id="puid-pgid">PUID / PGID<a class="headerlink" href="#puid-pgid" title="Anchor link">&para;</a></h2>
-<div class="language-yaml highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="nt">environment</span><span class="p">:</span>
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUID=1000</span>
-</span><span id="__span-1-3"><a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PGID=1000</span>
-</span></code></pre></div>
-<p>The entrypoint creates a <code>ryokan</code> user inside the container with the supplied UID/GID, chowns <code>/data</code>, then drops privileges via <code>gosu</code> before exec'ing the binary. Files Ryokan writes to mounted paths land with the supplied ownership.</p>
-<p>To find the right values, run <code>id -u</code> and <code>id -g</code> on the host as the user that owns your media library. If you're running everything else as a single non-root user (typical homelab), <code>1000:1000</code> is the default and usually right.</p>
+<h1 id="docker-reference">Docker reference<a class="headerlink" href="#docker-reference" title="Anchor link">&para;</a></h1>
+<p>Reference for environment variables, healthcheck behavior, volume layout, and update semantics. For step-by-step install, see <a href="../install/">Installation</a>.</p>
 <h2 id="environment-variables">Environment variables<a class="headerlink" href="#environment-variables" title="Anchor link">&para;</a></h2>
-<p>The full list lives in the repo's root <code>CLAUDE.md</code>; what follows is the user-facing subset. Most users only need <code>PUID</code> / <code>PGID</code> / <code>RUST_LOG</code>.</p>
+<p>Most users only need <code>PUID</code>, <code>PGID</code>, and <code>TZ</code>. The rest are for fine-tuning.</p>
 <table>
 <thead>
 <tr>
@@ -873,75 +1086,103 @@
 <tr>
 <td><code>LISTEN_ADDR</code></td>
 <td><code>0.0.0.0:8978</code></td>
-<td>TCP bind. Change the port if 8978 conflicts.</td>
+<td>TCP bind. Change the port if 8978 conflicts with something else.</td>
 </tr>
 <tr>
 <td><code>PUID</code> / <code>PGID</code></td>
 <td><code>1000</code> / <code>1000</code></td>
-<td>Runtime UID/GID. Match your host's media-owning user.</td>
+<td>Runtime UID/GID. Match your host's media-owning user. See <a href="../install/#puid-and-pgid">Installation → PUID and PGID</a>.</td>
+</tr>
+<tr>
+<td><code>TZ</code></td>
+<td>unset (UTC)</td>
+<td>Container timezone. Determines what timestamps look like in the UI and logs. Standard tzdata names like <code>America/Chicago</code> or <code>Europe/London</code>.</td>
 </tr>
 <tr>
 <td><code>RUST_LOG</code></td>
 <td><code>ryokan=info</code> (image)</td>
-<td>Log filter. <code>ryokan=debug</code> for verbose output while debugging.</td>
+<td>Console log filter. Set to <code>ryokan=debug</code> for verbose output while debugging.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_TRUSTED_PROXY</code></td>
-<td>unset → off</td>
-<td>Trust <code>X-Forwarded-For</code> / <code>X-Real-IP</code> for client IP. <strong>Off by default</strong>; flip on only behind a reverse proxy that overwrites these headers on ingress. Otherwise an attacker can spoof a fresh IP per attempt and bypass the per-IP login throttle.</td>
+<td>unset (off)</td>
+<td>Trust <code>X-Forwarded-For</code> and <code>X-Real-IP</code> for client IP. Off by default. Flip on only behind a reverse proxy that overwrites these headers on ingress; otherwise an attacker can spoof a fresh IP per attempt and bypass the per-IP login throttle.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_COOKIE_SECURE</code></td>
-<td>unset → off</td>
+<td>unset (off)</td>
 <td>Append <code>Secure</code> to the session cookie. Off by default so HTTP localhost works; flip on for HTTPS.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_RESET_AUTH</code></td>
 <td>unset</td>
-<td>Set to <code>1</code> <em>and</em> create a <code>data/.reset-auth</code> sentinel file to wipe <code>users</code> + <code>sessions</code> on next boot. Both are required so a stuck-on env var can't silently wipe auth on every boot.</td>
+<td>Set to <code>1</code> <em>and</em> create a <code>data/.reset-auth</code> sentinel file to wipe users and sessions on next boot. Both required so a stuck-on env var can't silently wipe auth on every boot. See <a href="#reset-auth">Reset auth</a>.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_DB_LOG_LEVEL</code></td>
 <td><code>info</code></td>
-<td>Write-side floor for the DB-backed <code>logs</code> table (separate from <code>RUST_LOG</code>). <code>trace</code> / <code>debug</code> / <code>info</code> / <code>warn</code> / <code>error</code>.</td>
+<td>Write-side floor for the DB-backed logs table (separate from <code>RUST_LOG</code>). One of <code>trace</code>, <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>. Read-side filtering on the System → Logs page is independent.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_ENCRYPTION_KEY</code></td>
-<td>unset → file fallback</td>
-<td>Base64-encoded 32-byte AEAD key for <code>services::crypto</code>. <strong>Loading priority</strong>: env var → key file → auto-generated on first run. <strong>Key rotation isn't supported</strong>; changing it invalidates all encrypted OAuth tokens.</td>
+<td>unset (file fallback)</td>
+<td>Base64-encoded 32-byte AEAD key for encrypting OAuth tokens. Loading priority: env var, then key file, then auto-generated on first run. <strong>Key rotation isn't supported</strong>; changing it invalidates all stored OAuth tokens and you'll need to re-link external accounts.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_KEY_FILE_PATH</code></td>
 <td><code>/data/.ryokan-key</code> (Docker)</td>
-<td>Where the auto-generated key lives. Set in the image; don't change unless you know you need to.</td>
+<td>Where the auto-generated encryption key lives. Set in the image. Don't change unless you have a specific reason.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_ANIBRIDGE_CACHE_DIR</code></td>
 <td><code>/data/cache/anibridge</code> (Docker)</td>
-<td>Where the TMDB↔AL mappings cache lives. Without this set, the cache fails to persist and every restart re-downloads ~9MB.</td>
+<td>Where the TMDB-to-AniList mappings cache lives. If unset, the cache fails to persist and every restart re-downloads about 9 MB.</td>
 </tr>
 <tr>
 <td><code>RYOKAN_MEDIA_CACHE_DIR</code></td>
 <td><code>/data/cache/artwork</code> (Docker)</td>
-<td>Artwork blob cache root (content-addressed).</td>
+<td>Artwork blob cache root. Content-addressed, so duplicate cover art doesn't re-store.</td>
 </tr>
 </tbody>
 </table>
+<h2 id="volume-layout">Volume layout<a class="headerlink" href="#volume-layout" title="Anchor link">&para;</a></h2>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-data:/data</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/downloads:/downloads</span><span class="w">          </span><span class="c1"># optional but required for post-processing</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/media/anime:/media/anime</span><span class="w">      </span><span class="c1"># optional but required for post-processing</span>
+</span></code></pre></div>
+<p><strong><code>/data</code> (required)</strong> holds the SQLite database, the artwork blob cache, the encryption key, the anibridge mappings cache, and any sentinel files. Loss of <code>/data</code> means losing your library state, queued grabs, scoring history, and OAuth tokens. The named-volume default (<code>ryokan-data</code>) keeps it inside Docker; bind-mount to a host path if you want the database visible from the host filesystem.</p>
+<p><strong><code>/downloads</code> and <code>/media/...</code></strong> are post-processing's source and destination. They're optional in the sense that Ryokan boots without them, but post-processing requires both to be visible inside the container at the same paths your download client uses for "complete" files and the path you set in Settings → General → Media Root Path.</p>
 <h2 id="healthcheck">Healthcheck<a class="headerlink" href="#healthcheck" title="Anchor link">&para;</a></h2>
 <p>The image ships with:</p>
-<div class="language-dockerfile highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">HEALTHCHECK</span><span class="w"> </span>--interval<span class="o">=</span>30s<span class="w"> </span>--timeout<span class="o">=</span>5s<span class="w"> </span>--start-period<span class="o">=</span>30s<span class="w"> </span>--retries<span class="o">=</span><span class="m">3</span><span class="w"> </span><span class="se">\</span>
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span>CMD<span class="w"> </span>curl<span class="w"> </span>-fsS<span class="w"> </span>http://localhost:8978/login<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
+<div class="language-dockerfile highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">HEALTHCHECK</span><span class="w"> </span>--interval<span class="o">=</span>30s<span class="w"> </span>--timeout<span class="o">=</span>5s<span class="w"> </span>--start-period<span class="o">=</span>30s<span class="w"> </span>--retries<span class="o">=</span><span class="m">3</span><span class="w"> </span><span class="se">\</span>
+</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span>CMD<span class="w"> </span>curl<span class="w"> </span>-fsS<span class="w"> </span>http://localhost:8978/login<span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="nb">exit</span><span class="w"> </span><span class="m">1</span>
 </span></code></pre></div>
-<p><code>start-period=30s</code> covers cold-boot work: <code>models::migrate</code> (idempotent ALTER TABLEs across the whole schema), <code>bcrypt::warm_timing_equalizer</code> spawn_blocking, the multi-client cache rebuild, and optional Jellyfin client init. ARM64 first-runs occasionally bumped against the prior 10s budget; 30s matches the CI smoke-test poll window.</p>
+<p>The probe targets <code>/login</code> because that's the canonical "is Ryokan up" endpoint. There is no <code>/healthz</code>. <code>/login</code> returns 200 once the auth UI is live, or 303 redirecting to <code>/setup</code> on a fresh container with no users yet. Both are valid "up" signals.</p>
+<p><code>start-period=30s</code> covers cold-boot work: idempotent migrations, password-hash warmup, the multi-client cache rebuild, and optional Jellyfin client init. ARM64 first-runs occasionally bumped against an earlier 10-second budget; 30 seconds matches the CI smoke-test poll window.</p>
 <h2 id="updating">Updating<a class="headerlink" href="#updating" title="Anchor link">&para;</a></h2>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>pull
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>pull
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
 </span></code></pre></div>
-<p>The volume preserves your data. The image's binary is replaced; migrations run on next boot (idempotent. Applying twice is a no-op.)</p>
+<p>The named volume preserves your data. The image's binary is replaced. Migrations run automatically on next boot and are idempotent: applying twice is a no-op.</p>
 <div class="admonition danger">
 <p class="admonition-title">Don't <code>docker compose down -v</code></p>
-<p>The <code>-v</code> flag removes named volumes. With the documented setup that means deleting your DB, encryption key, OAuth tokens, and library state. There's no undo. <code>down</code> without <code>-v</code> is safe.</p>
+<p>The <code>-v</code> flag removes named volumes. With the documented setup, that means deleting your DB, encryption key, OAuth tokens, and library state. There's no undo. <code>down</code> without <code>-v</code> is safe.</p>
 </div>
+<h2 id="reset-auth">Reset auth<a class="headerlink" href="#reset-auth" title="Anchor link">&para;</a></h2>
+<p>If you forget your admin password and have no other recovery path, you can wipe the users and sessions tables and create a new admin account on next boot. Two steps are required so a stuck-on env var can't silently wipe auth on every restart:</p>
+<ol>
+<li>Add <code>RYOKAN_RESET_AUTH=1</code> to your compose file's environment block.</li>
+<li>Create the sentinel file: <code>touch /path/to/your/data-volume/.reset-auth</code>.</li>
+</ol>
+<p>Restart the container. On boot, Ryokan deletes both tables, removes the sentinel, and <code>/setup</code> opens for a fresh admin account.</p>
+<p>OAuth tokens, library state, scoring history, and Custom Formats are preserved. Only authentication state is wiped.</p>
+<h2 id="running-behind-a-reverse-proxy">Running behind a reverse proxy<a class="headerlink" href="#running-behind-a-reverse-proxy" title="Anchor link">&para;</a></h2>
+<p>If you put Ryokan behind nginx, Caddy, Traefik, or similar, set <code>RYOKAN_TRUSTED_PROXY=1</code> so the per-IP login throttle reads <code>X-Forwarded-For</code> from the proxy instead of the proxy's own IP. The proxy must overwrite these headers on ingress (don't pass through whatever the client sent), or you've just added a header-spoofing bypass.</p>
+<p>Also set <code>RYOKAN_COOKIE_SECURE=1</code> if the proxy serves Ryokan over HTTPS, so the session cookie carries the <code>Secure</code> flag.</p>
+<p>The <a href="../stack-builder/">Stack builder</a> generates Caddy / Traefik / nginx config with the right header rewrites and env-var combinations.</p>
+<hr />
+<p><em>Last updated: 2026-05-07.</em></p>
 
 
 

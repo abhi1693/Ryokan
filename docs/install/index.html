@@ -13,10 +13,10 @@
         <link rel="canonical" href="https://johnthreekay.github.io/Ryokan/docs/install/">
       
       
-        <link rel="prev" href="./..">
+        <link rel="prev" href="../stack-builder/">
       
       
-        <link rel="next" href="../stack-builder/">
+        <link rel="next" href="../docker/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Install - Ryokan</title>
+        <title>Docker installation - Ryokan</title>
       
     
     
@@ -58,6 +58,8 @@
       
     
     
+      <link rel="stylesheet" href="../stylesheets/ryokan.css">
+    
       <link rel="stylesheet" href="../stylesheets/picker.css">
     
     <script>__md_scope=new URL("..",location),__md_scope.pathname.endsWith("/")||(__md_scope=new URL(__md_scope.pathname+"/",location)),__md_hash=e=>[...e].reduce(((e,t)=>(e<<5)-e+t.charCodeAt(0)),0),__md_get=(e,t=localStorage,_=__md_scope)=>JSON.parse(t.getItem(_.pathname+"."+e)),__md_set=(e,t,_=localStorage,a=__md_scope)=>{try{_.setItem(a.pathname+"."+e,JSON.stringify(t))}catch(e){}},document.documentElement.setAttribute("data-platform",navigator.platform)</script>
@@ -76,7 +78,7 @@
     
     
     
-    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="pink">
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple">
   
     
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
@@ -85,7 +87,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#install" class="md-skip">
+        <a href="#docker-installation" class="md-skip">
           Skip to content
         </a>
       
@@ -119,7 +121,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Install
+              Docker installation
             
           </span>
         </div>
@@ -132,7 +134,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: light)" data-md-color-scheme="default" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
     
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a4 4 0 0 0-4 4 4 4 0 0 0 4 4 4 4 0 0 0 4-4 4 4 0 0 0-4-4m0 10a6 6 0 0 1-6-6 6 6 0 0 1 6-6 6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
@@ -142,7 +144,7 @@
     
     
     
-    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="pink"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    <input class="md-option" data-md-color-media="(prefers-color-scheme: dark)" data-md-color-scheme="slate" data-md-color-primary="deep-purple" data-md-color-accent="deep-purple"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
     
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 18c-.89 0-1.74-.2-2.5-.55C11.56 16.5 13 14.42 13 12s-1.44-4.5-3.5-5.45C10.26 6.2 11.11 6 12 6a6 6 0 0 1 6 6 6 6 0 0 1-6 6m8-9.31V4h-4.69L12 .69 8.69 4H4v4.69L.69 12 4 15.31V20h4.69L12 23.31 15.31 20H20v-4.69L23.31 12z"/></svg>
@@ -202,14 +204,17 @@
   
   
   
-    <li class="md-tabs__item">
-      <a href="./.." class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item">
+        <a href="./.." class="md-tabs__link">
+          
   
-  Home
+  Getting started
 
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -220,30 +225,17 @@
     
   
   
-    <li class="md-tabs__item md-tabs__item--active">
-      <a href="././" class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="././" class="md-tabs__link">
+          
   
-  Install
+  Installation
 
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../stack-builder/" class="md-tabs__link">
-        
-  
-  Stack builder
-
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -252,62 +244,17 @@
   
   
   
-    <li class="md-tabs__item">
-      <a href="../docker/" class="md-tabs__link">
-        
+    
+    
+      <li class="md-tabs__item">
+        <a href="../configuration/" class="md-tabs__link">
+          
   
-  Docker
+  Guides
 
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../configuration/" class="md-tabs__link">
-        
-  
-  Configuration
-
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../download-clients/" class="md-tabs__link">
-        
-  
-  Download clients
-
-      </a>
-    </li>
-  
-
-      
-        
-  
-  
-  
-  
-    <li class="md-tabs__item">
-      <a href="../external-accounts/" class="md-tabs__link">
-        
-  
-  External accounts
-
-      </a>
-    </li>
+        </a>
+      </li>
+    
   
 
       
@@ -394,6 +341,56 @@
   
   
   
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_1" id="__nav_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Getting started
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Getting started
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="./.." class="md-nav__link">
         
@@ -402,7 +399,7 @@
   <span class="md-ellipsis">
     
   
-  Home
+  Welcome
 
     
   </span>
@@ -413,9 +410,126 @@
     </li>
   
 
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../quick-start/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Quick start
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../stack-builder/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Stack builder
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
     
       
       
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Installation
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Installation
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
   
   
     
@@ -437,7 +551,7 @@
   <span class="md-ellipsis">
     
   
-  Install
+  Docker (recommended)
 
     
   </span>
@@ -454,7 +568,7 @@
   <span class="md-ellipsis">
     
   
-  Install
+  Docker (recommended)
 
     
   </span>
@@ -480,10 +594,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#docker-recommended" class="md-nav__link">
+  <a href="#quick-install" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        Docker (Recommended)
+        Quick install
       </span>
     </span>
   </a>
@@ -491,10 +605,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#from-source" class="md-nav__link">
+  <a href="#recommended-install-with-media-folders" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        From source
+        Recommended install (with media folders)
       </span>
     </span>
   </a>
@@ -502,10 +616,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#healthcheck-and-ports" class="md-nav__link">
+  <a href="#puid-and-pgid" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        Healthcheck and ports
+        PUID and PGID
       </span>
     </span>
   </a>
@@ -523,6 +637,28 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#updating" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Updating
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Where next
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -530,35 +666,10 @@
     </li>
   
 
-    
-      
-      
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../stack-builder/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-  Stack builder
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-    
-      
-      
+              
+            
+              
+                
   
   
   
@@ -571,7 +682,7 @@
   <span class="md-ellipsis">
     
   
-  Docker
+  Docker reference
 
     
   </span>
@@ -582,9 +693,94 @@
     </li>
   
 
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../from-source/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Build from source
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
     
       
       
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Guides
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+  Guides
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
   
   
   
@@ -608,9 +804,37 @@
     </li>
   
 
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../system/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
     
-      
-      
+  
+  Configuration (cont.)
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
   
   
   
@@ -634,9 +858,10 @@
     </li>
   
 
-    
-      
-      
+              
+            
+              
+                
   
   
   
@@ -657,6 +882,14 @@
   
 
       </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
     </li>
   
 
@@ -754,10 +987,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#docker-recommended" class="md-nav__link">
+  <a href="#quick-install" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        Docker (Recommended)
+        Quick install
       </span>
     </span>
   </a>
@@ -765,10 +998,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#from-source" class="md-nav__link">
+  <a href="#recommended-install-with-media-folders" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        From source
+        Recommended install (with media folders)
       </span>
     </span>
   </a>
@@ -776,10 +1009,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#healthcheck-and-ports" class="md-nav__link">
+  <a href="#puid-and-pgid" class="md-nav__link">
     <span class="md-ellipsis">
       <span class="md-typeset">
-        Healthcheck and ports
+        PUID and PGID
       </span>
     </span>
   </a>
@@ -791,6 +1024,28 @@
     <span class="md-ellipsis">
       <span class="md-typeset">
         First-run setup
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#updating" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Updating
+      </span>
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#where-next" class="md-nav__link">
+    <span class="md-ellipsis">
+      <span class="md-typeset">
+        Where next
       </span>
     </span>
   </a>
@@ -815,41 +1070,89 @@
   
 
 
-<h1 id="install">Install<a class="headerlink" href="#install" title="Anchor link">&para;</a></h1>
-<p>You have two options for installing Ryokan: pulling the Docker image or building from source.</p>
-<h2 id="docker-recommended">Docker (Recommended)<a class="headerlink" href="#docker-recommended" title="Anchor link">&para;</a></h2>
-<p>The Docker image is published to GHCR on every tag at <code>ghcr.io/johnthreekay/ryokan:latest</code>. The repo also provides a <code>docker-compose.yml</code> you can copy verbatim:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>curl<span class="w"> </span>-O<span class="w"> </span>https://raw.githubusercontent.com/johnthreekay/Ryokan/main/docker-compose.yml
-</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
-</span></code></pre></div>
-<p>Open <code>http://localhost:8978</code> and run through the first-run setup. See the <a href="../docker/">Docker page</a> for volume mounts, PUID/PGID, and the full environment-variable reference.</p>
-<h2 id="from-source">From source<a class="headerlink" href="#from-source" title="Anchor link">&para;</a></h2>
-<p>You'll need:</p>
-<ul>
-<li><strong>Rust 1.95+</strong> (enforced via <code>Cargo.toml</code>'s <code>package.rust-version</code>).</li>
-<li><strong>C / C++ toolchain + <code>cmake</code></strong>: two crates compile native code at build time. <code>anitomy-sys</code> ships C++ source it builds via <code>cc</code> for anime title tokenization, and <code>aws-lc-sys</code> builds aws-lc via cmake (rustls' crypto provider since reqwest 0.13).</li>
-<li><strong><code>mold</code> + <code>clang</code></strong>: Ryokan pins <code>linker = "clang"</code> with <code>-fuse-ld=mold</code> for x86_64 + aarch64 Linux in <code>.cargo/config.toml</code>. Cuts incremental link time 3-5× vs ld/lld. Without them: <code>linker 'clang' not found</code> or <code>ld.mold not found</code> at first build.</li>
-<li><strong><code>cargo-nextest</code></strong> for the canonical <code>cargo t</code> test alias. Falls through to plain <code>cargo test</code> if not installed.</li>
-</ul>
-<p>Install the toolchain bits on Arch:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>sudo<span class="w"> </span>pacman<span class="w"> </span>-S<span class="w"> </span>mold<span class="w"> </span>clang<span class="w"> </span>cmake
-</span><span id="__span-1-2"><a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>cargo-nextest<span class="w"> </span>--locked
-</span></code></pre></div>
-<p>Or Debian/Ubuntu:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>sudo<span class="w"> </span>apt<span class="w"> </span>install<span class="w"> </span>mold<span class="w"> </span>clang<span class="w"> </span>cmake
-</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>cargo<span class="w"> </span>install<span class="w"> </span>cargo-nextest<span class="w"> </span>--locked
+<h1 id="docker-installation">Docker installation<a class="headerlink" href="#docker-installation" title="Anchor link">&para;</a></h1>
+<p>Ryokan ships as a Docker image at <code>ghcr.io/johnthreekay/ryokan:latest</code>. The image runs on <code>linux/amd64</code> and <code>linux/arm64</code>. The fastest way to get going is <code>docker compose up</code>.</p>
+<p>If you're new to Docker, skim <a href="https://docs.docker.com/get-started/docker-overview/">Docker's overview</a> first; this page assumes you know what <code>docker compose up -d</code> does.</p>
+<h2 id="quick-install">Quick install<a class="headerlink" href="#quick-install" title="Anchor link">&para;</a></h2>
+<p>Save this as <code>docker-compose.yml</code>:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nt">services</span><span class="p">:</span>
+</span><span id="__span-0-2"><a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="nt">ryokan</span><span class="p">:</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ghcr.io/johnthreekay/ryokan:latest</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8978:8978&quot;</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-0-8"><a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-data:/data</span>
+</span><span id="__span-0-9"><a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+</span><span id="__span-0-10"><a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUID=1000</span>
+</span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PGID=1000</span>
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TZ=Etc/UTC</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">  </span><span class="nt">ryokan-data</span><span class="p">:</span>
 </span></code></pre></div>
 <p>Then:</p>
-<div class="language-sh highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/johnthreekay/Ryokan.git
-</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nb">cd</span><span class="w"> </span>Ryokan
-</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>cargo<span class="w"> </span>run<span class="w">                </span><span class="c1"># 0.0.0.0:8978, creates data/ryokan.db on first run</span>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-1-1"><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
 </span></code></pre></div>
-<p>The first build takes a while (aws-lc, anitomy C++, full dep tree). Subsequent rebuilds are fast; mold links the <code>ryokan</code> binary in under a second.</p>
-<h2 id="healthcheck-and-ports">Healthcheck and ports<a class="headerlink" href="#healthcheck-and-ports" title="Anchor link">&para;</a></h2>
-<p>Ryokan listens on <code>0.0.0.0:8978</code> by default (override with <code>LISTEN_ADDR</code>). The Docker image's healthcheck probes <code>GET /login</code> since that's the canonical "is Ryokan up" endpoint. There is no <code>/healthz</code>; <code>/login</code> returns 200 once the auth UI is live, or 303 redirecting to <code>/setup</code> on a fresh container with no users yet (both are valid "up" signals).</p>
+<p>Open <a href="http://localhost:8978">http://localhost:8978</a> and create your admin account on the setup page. You're done.</p>
+<h2 id="recommended-install-with-media-folders">Recommended install (with media folders)<a class="headerlink" href="#recommended-install-with-media-folders" title="Anchor link">&para;</a></h2>
+<p>The Quick install doesn't mount your media library or your download client's complete folder yet. To make post-processing actually move files into your library, you need two more volume mounts:</p>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-2-1"><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">services</span><span class="p">:</span>
+</span><span id="__span-2-2"><a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">ryokan</span><span class="p">:</span>
+</span><span id="__span-2-3"><a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">image</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ghcr.io/johnthreekay/ryokan:latest</span>
+</span><span id="__span-2-4"><a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">container_name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan</span>
+</span><span id="__span-2-5"><a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="nt">ports</span><span class="p">:</span>
+</span><span id="__span-2-6"><a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="s">&quot;8978:8978&quot;</span>
+</span><span id="__span-2-7"><a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-2-8"><a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ryokan-data:/data</span>
+</span><span id="__span-2-9"><a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/downloads:/downloads</span><span class="w">          </span><span class="c1"># where your download client puts completed files</span>
+</span><span id="__span-2-10"><a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/srv/media/anime:/media/anime</span><span class="w">      </span><span class="c1"># where Ryokan should land imported episodes</span>
+</span><span id="__span-2-11"><a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="nt">environment</span><span class="p">:</span>
+</span><span id="__span-2-12"><a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUID=1000</span>
+</span><span id="__span-2-13"><a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PGID=1000</span>
+</span><span id="__span-2-14"><a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">      </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">TZ=America/Chicago</span>
+</span><span id="__span-2-15"><a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="w">    </span><span class="nt">restart</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">unless-stopped</span>
+</span><span id="__span-2-16"><a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>
+</span><span id="__span-2-17"><a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="nt">volumes</span><span class="p">:</span>
+</span><span id="__span-2-18"><a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="w">  </span><span class="nt">ryokan-data</span><span class="p">:</span>
+</span></code></pre></div>
+<p>The colon in volume mounts means: left side is your host filesystem path, right side is the path inside the container. Ryokan only sees the right side. So:</p>
+<ul>
+<li>Inside the container, "complete downloads" live at <code>/downloads</code>. Configure your download client to put its completed files here.</li>
+<li>Inside the container, "the library" lives at <code>/media/anime</code>. Set Settings → General → Media Root Path to <code>/media/anime</code>.</li>
+</ul>
+<p>These paths must match what your download client sees. If qBittorrent thinks files are at <code>/downloads/movies/foo.mkv</code> but Ryokan thinks they're at <code>/srv/downloads/foo.mkv</code>, post-processing fails. The <a href="../stack-builder/">Stack builder</a> generates compose files with matching paths automatically.</p>
+<h2 id="puid-and-pgid">PUID and PGID<a class="headerlink" href="#puid-and-pgid" title="Anchor link">&para;</a></h2>
+<div class="language-yaml highlight"><pre><span></span><code><span id="__span-3-1"><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">environment</span><span class="p">:</span>
+</span><span id="__span-3-2"><a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PUID=1000</span>
+</span><span id="__span-3-3"><a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PGID=1000</span>
+</span></code></pre></div>
+<p>These set the user/group ID Ryokan runs as inside the container. Set them to match the user that owns your media files on the host.</p>
+<p>To find the right values: run <code>id -u</code> and <code>id -g</code> on the host as the user who owns <code>/srv/media/anime</code> (or wherever your library lives). Most homelabs run everything as a single non-root user with ID 1000, in which case the defaults are fine.</p>
+<p>This is the <a href="https://docs.linuxserver.io/general/understanding-puid-and-pgid/">linuxserver.io convention</a>, shared with the rest of the *arr stack. Setting them right means files Ryokan writes match the rest of your media's ownership.</p>
+<div class="admonition warning">
+<p class="admonition-title">User-mounted paths are NOT chowned</p>
+<p>The container chowns <code>/data</code> to the supplied PUID/PGID, but does not chown <code>/downloads</code> or <code>/media/...</code>. Chowning a 10TB media library would stall startup for hours and could clobber ownership the rest of your *arr stack relies on. Pick PUID/PGID that already match your media's owner instead.</p>
+</div>
 <h2 id="first-run-setup">First-run setup<a class="headerlink" href="#first-run-setup" title="Anchor link">&para;</a></h2>
-<p>The first time Ryokan boots, navigating to <code>/</code> redirects to <code>/setup</code>. Create an admin account there. Once a user has been created, <code>/setup</code> redirects to <code>/login</code> and won't accept further submissions.</p>
-<p>If you need to reset the admin account (forgot password, username, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart: see the <code>RYOKAN_RESET_AUTH</code> env var in the <a href="../docker/#environment-variables">Docker page</a>.</p>
+<p>The first time Ryokan boots, navigating to <code>/</code> redirects to <code>/setup</code>. Create an admin account there. Once an account exists, <code>/setup</code> redirects to <code>/login</code> and won't accept further submissions.</p>
+<p>If you need to reset the admin account later (forgot password, etc.), there's a deliberate two-step gate to avoid an accidental wipe-on-restart. See <a href="../docker/#reset-auth">Docker reference → Reset auth</a>.</p>
+<h2 id="updating">Updating<a class="headerlink" href="#updating" title="Anchor link">&para;</a></h2>
+<div class="language-sh highlight"><pre><span></span><code><span id="__span-4-1"><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>docker<span class="w"> </span>compose<span class="w"> </span>pull
+</span><span id="__span-4-2"><a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a>docker<span class="w"> </span>compose<span class="w"> </span>up<span class="w"> </span>-d
+</span></code></pre></div>
+<p>The named volume preserves your data. Migrations run automatically on next boot and are idempotent (applying twice is a no-op). For more on migrations and <code>docker compose down -v</code> safety, see <a href="../docker/#updating">Docker reference → Updating</a>.</p>
+<h2 id="where-next">Where next<a class="headerlink" href="#where-next" title="Anchor link">&para;</a></h2>
+<ul>
+<li><strong><a href="../configuration/">Configuration</a></strong>: the Settings tabs.</li>
+<li><strong><a href="../download-clients/">Download clients</a></strong>: per-client setup notes.</li>
+<li><strong><a href="../external-accounts/">External accounts</a></strong>: link AniList or MAL.</li>
+<li><strong><a href="../docker/">Docker reference</a></strong>: full environment variable table, healthcheck shape, advanced topics.</li>
+<li><strong><a href="../from-source/">Build from source</a></strong>: if you're contributing to Ryokan or running pre-release commits instead of the Docker image.</li>
+</ul>
+<hr />
+<p><em>Last updated: 2026-05-07.</em></p>
 
 
 
