@@ -1,12 +1,14 @@
 # Troubleshooting
 
-Common issues, with concrete diagnostic steps.
+Concrete diagnostic steps for the most common things that break. If the symptom isn't covered here, **System → Logs** ([System → Logs reference](system.md#logs)) is usually the next stop; almost every Ryokan operation writes a log line, filterable by subsystem.
 
 ## Things to check first
 
-- **System → Logs** filters per category (AniList, Jikan, Kitsu, Grab, AutoSearch, Nyaa, DownloadClient, Jellyfin, etc). Most "why didn't this work" answers live here.
-- **Test connection** on each download-client row (Settings → Download Clients) and each indexer row (Settings → Indexers). Connection tests catch most config issues at config time rather than at grab time.
-- **The grab-history modal** on each episode shows every release ever grabbed for that episode, with state (`grabbed` / `completed` / `failed` / `removed` / `replaced`) and timestamp. Useful for "why is this episode in this state" questions.
+Before drilling into a specific symptom below, three quick checks resolve most issues:
+
+- **System → Logs**, filtered by category to whatever subsystem you suspect (AniList, Jikan, Kitsu, Grab, AutoSearch, Nyaa, DownloadClient, Jellyfin, PostProcess, etc.). Pick the one matching what you were doing when the issue appeared.
+- **Test connection** on each download-client row (Settings → Download Clients) and each indexer row (Settings → Indexers). Connection tests catch most config issues at config time rather than at grab time. The [Download clients](download-clients.md) page lists per-client gotchas.
+- **The grab-history modal** on each episode (click the episode in the library page, then the History button) shows every release ever grabbed for that episode, with state (`grabbed` / `completed` / `failed` / `removed` / `replaced`) and timestamp. Useful for "why is this episode in this state?" questions.
 
 ## SAB downloads disappear from Ryokan but still download in SAB
 
@@ -77,4 +79,12 @@ Check System → Logs filtered to `Search` and `AutoSearch`. The most common cau
 
 ## Migrations failing on first boot
 
-Ryokan's migrations are designed to be idempotent (`ALTER TABLE … ADD COLUMN … .ok()` swallows already-exists errors), but a corrupt SQLite file from an earlier crash can wedge them. Stop Ryokan, back up `data/ryokan.db`, run `sqlite3 data/ryokan.db "PRAGMA integrity_check;"`. If it reports anything other than `ok`, restore from a backup or accept losing the DB and starting fresh.
+Ryokan's migrations are idempotent by design (each `ALTER TABLE … ADD COLUMN` swallows already-exists errors), so applying twice is a no-op. The thing that wedges them is a corrupt SQLite file from an earlier crash. To check:
+
+1. Stop Ryokan: `docker compose down ryokan` (no `-v`).
+2. Back up the DB: `cp /srv/docker/ryokan/ryokan.db /srv/docker/ryokan/ryokan.db.backup` (path is wherever you put `/data` in your compose).
+3. Check integrity: `sqlite3 /srv/docker/ryokan/ryokan.db "PRAGMA integrity_check;"`. If it returns `ok`, the DB itself is fine and the migration error is something else (network during migration? unusual). If it returns anything other than `ok`, the DB is corrupt; restore from your backup or accept losing the DB and starting fresh (delete the file, restart Ryokan, the first-run setup runs again).
+
+---
+
+*Last updated: 2026-05-07.*
