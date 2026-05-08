@@ -230,15 +230,16 @@ Pick the download client you want to use and save the matching `docker-compose.y
         restart: unless-stopped
 
       rutorrent:
-        image: lscr.io/linuxserver/rutorrent:latest
+        image: crazymax/rtorrent-rutorrent:latest
         container_name: rutorrent
         ports:
-          - "8181:80"          # ruTorrent web UI
-          - "51413:51413"      # BT
-          - "51413:51413/udp"
+          - "8080:8080"        # ruTorrent web UI
+          - "8000:8000"        # XML-RPC (Ryokan talks to this)
+          - "50000:50000"      # BT incoming peer connections
+          - "6881:6881/udp"    # DHT
         volumes:
-          - rutorrent-config:/config
-          - ./downloads:/downloads
+          - rutorrent-data:/data
+          - ./downloads:/downloads     # contains /downloads/temp and /downloads/complete after first start
         environment:
           - PUID=1000
           - PGID=1000
@@ -249,8 +250,11 @@ Pick the download client you want to use and save the matching `docker-compose.y
       ryokan-data:
       jellyfin-config:
       jellyfin-cache:
-      rutorrent-config:
+      rutorrent-data:
     ```
+
+    !!! note "Image swap from linuxserver to crazy-max"
+        linuxserver/rutorrent is deprecated; their README points at crazy-max's image as the maintained alternative. Different volume layout (one `/data` instead of `/config`), different port set, but the rTorrent it wraps is the same.
 
 === "SABnzbd"
 
@@ -290,10 +294,11 @@ Pick the download client you want to use and save the matching `docker-compose.y
         image: lscr.io/linuxserver/sabnzbd:latest
         container_name: sabnzbd
         ports:
-          - "8081:8080"        # host:container; SAB lives on 8080 internally
+          - "8081:8080"          # host:container; SAB lives on 8080 internally
         volumes:
           - sabnzbd-config:/config
-          - ./downloads:/downloads
+          - sabnzbd-incomplete:/incomplete-downloads   # in-progress (named volume; not on host filesystem)
+          - ./downloads:/downloads                     # completed (shared with Ryokan + Jellyfin)
         environment:
           - PUID=1000
           - PGID=1000
@@ -305,7 +310,11 @@ Pick the download client you want to use and save the matching `docker-compose.y
       jellyfin-config:
       jellyfin-cache:
       sabnzbd-config:
+      sabnzbd-incomplete:
     ```
+
+    !!! note "Why two folders?"
+        SAB splits in-progress (`/incomplete-downloads`) from completed (`/downloads`). The compose maps the in-progress side to a Docker named volume so it's tucked out of the way; only completed downloads land in your stack folder where Ryokan reads them.
 
 Bring it up:
 
@@ -314,6 +323,14 @@ docker compose up -d
 ```
 
 Ryokan is now on port 8978, Jellyfin on 8096, your download client on its default port. The named volumes (`ryokan-data`, `jellyfin-config`, etc.) are managed by Docker and live under `/var/lib/docker/volumes/`; only the bind mounts (`./downloads`, `./media/anime`) end up in your stack folder.
+
+??? info "How each client uses `/downloads`"
+    The five clients structure that folder differently. Ryokan only reads completed files, so all five layouts work transparently.
+
+    - **qBittorrent / Deluge**: write files directly to `/downloads/<category>/<file>` (or `/downloads/<file>` if no category is set). Single shared folder.
+    - **Transmission**: writes everything to `/downloads/`, with a `.part` suffix on the filename while the torrent is in flight; renames on completion.
+    - **rTorrent**: splits `/downloads/temp/` (in-progress) and `/downloads/complete/` (completed); files move from temp to complete when the torrent finishes.
+    - **SABnzbd**: uses a separate folder for in-progress (`/incomplete-downloads/`, mapped to a Docker named volume in the compose so it stays out of the way) and `/downloads/` for completed.
 
 !!! tip "Already running Jellyfin or your download client elsewhere?"
     Drop the relevant service block (and its volume entry at the bottom) from the compose, and skip the corresponding setup step below. Make sure the existing instance can read `./media/anime` for Jellyfin or write to `./downloads` for the download client, or adjust paths accordingly.
@@ -389,13 +406,13 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
 
 === "rTorrent"
 
-    Open <http://localhost:8181> to confirm ruTorrent's web UI loads. The linuxserver/rutorrent image doesn't ship with auth; if you're exposing this beyond localhost, add an `htpasswd` block in front of nginx (the image's docs cover how).
+    Open <http://localhost:8080> to confirm ruTorrent's web UI loads. The crazy-max image doesn't ship with auth by default; if you're exposing this beyond localhost, mount an htpasswd file at `/passwd` (the image's README covers how).
 
     In Ryokan's add-client form:
 
     - **Kind**: rTorrent
-    - **URL**: `http://rutorrent/RPC2`
-    - **Username** / **Password**: leave blank unless you set up `htpasswd`
+    - **URL**: `http://rutorrent:8000/RPC2` (port 8000 is the dedicated XML-RPC port; 8080 is the web UI)
+    - **Username** / **Password**: leave blank unless you've set up htpasswd
     - **Label**: `ryokan-anime`
     - **Default for this protocol**: on
 
