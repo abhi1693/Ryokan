@@ -12,16 +12,22 @@ You don't need a download client running in advance; we'll deploy one alongside 
 
 ## 1. Run Ryokan, Jellyfin, and your download client
 
-Create a folder for your stack and `cd` into it. The compose file plus the bind-mounted host folders (`./downloads`, `./media/anime`) will all live here.
+Set up the host paths. The compose file lives in `/srv/stack/`; per-service config and state go under `/srv/docker/<service>/`; downloads and the media library go under `/srv/media/`.
 
 ```sh
-mkdir -p ~/ryokan-stack/{downloads,media/anime}
-cd ~/ryokan-stack
+sudo mkdir -p /srv/stack /srv/media/{downloads,anime} /srv/docker
+sudo chown 1000:1000 /srv/media/downloads /srv/media/anime
+cd /srv/stack
 ```
 
-Pick the download client you want to use and save the matching `docker-compose.yml` in that folder. All five composes deploy Ryokan + Jellyfin alongside the chosen client; the three services share `./media/anime` so files Ryokan imports show up in Jellyfin automatically.
+Adjust `1000:1000` if your host user has different IDs (`id -u` and `id -g` to check). Pick the download client you want to use, create its per-service folder, and save the matching `docker-compose.yml` in `/srv/stack/`. All five composes deploy Ryokan + Jellyfin alongside the chosen client; the three services share `/srv/media/anime` so files Ryokan imports show up in Jellyfin automatically.
 
 === "qBittorrent"
+
+    ```sh
+    sudo mkdir -p /srv/docker/{ryokan,jellyfin,qbittorrent}
+    sudo chown -R 1000:1000 /srv/docker
+    ```
 
     ```yaml
     services:
@@ -31,9 +37,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8978:8978"
         volumes:
-          - ryokan-data:/data
-          - ./downloads:/downloads
-          - ./media/anime:/media/anime
+          - /srv/docker/ryokan:/data
+          - /srv/media/downloads:/downloads
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -46,9 +52,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8096:8096"
         volumes:
-          - jellyfin-config:/config
-          - jellyfin-cache:/cache
-          - ./media/anime:/media/anime
+          - /srv/docker/jellyfin/config:/config
+          - /srv/docker/jellyfin/cache:/cache
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -63,23 +69,22 @@ Pick the download client you want to use and save the matching `docker-compose.y
           - "6881:6881"        # BT
           - "6881:6881/udp"
         volumes:
-          - qbittorrent-config:/config
-          - ./downloads:/downloads
+          - /srv/docker/qbittorrent:/config
+          - /srv/media/downloads:/downloads
         environment:
           - PUID=1000
           - PGID=1000
           - TZ=Etc/UTC
           - WEBUI_PORT=8080
         restart: unless-stopped
-
-    volumes:
-      ryokan-data:
-      jellyfin-config:
-      jellyfin-cache:
-      qbittorrent-config:
     ```
 
 === "Deluge"
+
+    ```sh
+    sudo mkdir -p /srv/docker/{ryokan,jellyfin,deluge}
+    sudo chown -R 1000:1000 /srv/docker
+    ```
 
     ```yaml
     services:
@@ -89,9 +94,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8978:8978"
         volumes:
-          - ryokan-data:/data
-          - ./downloads:/downloads
-          - ./media/anime:/media/anime
+          - /srv/docker/ryokan:/data
+          - /srv/media/downloads:/downloads
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -104,9 +109,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8096:8096"
         volumes:
-          - jellyfin-config:/config
-          - jellyfin-cache:/cache
-          - ./media/anime:/media/anime
+          - /srv/docker/jellyfin/config:/config
+          - /srv/docker/jellyfin/cache:/cache
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -121,22 +126,21 @@ Pick the download client you want to use and save the matching `docker-compose.y
           - "6881:6881"        # BT
           - "6881:6881/udp"
         volumes:
-          - deluge-config:/config
-          - ./downloads:/downloads
+          - /srv/docker/deluge:/config
+          - /srv/media/downloads:/downloads
         environment:
           - PUID=1000
           - PGID=1000
           - TZ=Etc/UTC
         restart: unless-stopped
-
-    volumes:
-      ryokan-data:
-      jellyfin-config:
-      jellyfin-cache:
-      deluge-config:
     ```
 
 === "Transmission"
+
+    ```sh
+    sudo mkdir -p /srv/docker/{ryokan,jellyfin,transmission}
+    sudo chown -R 1000:1000 /srv/docker
+    ```
 
     ```yaml
     services:
@@ -146,9 +150,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8978:8978"
         volumes:
-          - ryokan-data:/data
-          - ./downloads:/downloads
-          - ./media/anime:/media/anime
+          - /srv/docker/ryokan:/data
+          - /srv/media/downloads:/downloads
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -161,9 +165,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8096:8096"
         volumes:
-          - jellyfin-config:/config
-          - jellyfin-cache:/cache
-          - ./media/anime:/media/anime
+          - /srv/docker/jellyfin/config:/config
+          - /srv/docker/jellyfin/cache:/cache
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -178,8 +182,8 @@ Pick the download client you want to use and save the matching `docker-compose.y
           - "51413:51413"      # BT
           - "51413:51413/udp"
         volumes:
-          - transmission-config:/config
-          - ./downloads:/downloads
+          - /srv/docker/transmission:/config
+          - /srv/media/downloads:/downloads
         environment:
           - PUID=1000
           - PGID=1000
@@ -187,15 +191,14 @@ Pick the download client you want to use and save the matching `docker-compose.y
           - USER=admin
           - PASS=changeme      # change before first start
         restart: unless-stopped
-
-    volumes:
-      ryokan-data:
-      jellyfin-config:
-      jellyfin-cache:
-      transmission-config:
     ```
 
 === "rTorrent"
+
+    ```sh
+    sudo mkdir -p /srv/docker/{ryokan,jellyfin,rutorrent/passwd}
+    sudo chown -R 1000:1000 /srv/docker
+    ```
 
     ```yaml
     services:
@@ -205,9 +208,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8978:8978"
         volumes:
-          - ryokan-data:/data
-          - ./downloads:/downloads
-          - ./media/anime:/media/anime
+          - /srv/docker/ryokan:/data
+          - /srv/media/downloads:/downloads
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -220,9 +223,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8096:8096"
         volumes:
-          - jellyfin-config:/config
-          - jellyfin-cache:/cache
-          - ./media/anime:/media/anime
+          - /srv/docker/jellyfin/config:/config
+          - /srv/docker/jellyfin/cache:/cache
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -241,34 +244,33 @@ Pick the download client you want to use and save the matching `docker-compose.y
         # `http://rutorrent:8000/RPC2`. Add `- "8000:8000"` here only if
         # you want to hit it from the host with curl for debugging.
         volumes:
-          - rutorrent-data:/data
-          - ./downloads:/downloads     # contains /downloads/temp and /downloads/complete after first start
-          - ./passwd:/passwd           # htpasswd files for web UI + RPC auth
+          - /srv/docker/rutorrent:/data
+          - /srv/media/downloads:/downloads      # contains /downloads/temp and /downloads/complete after first start
+          - /srv/docker/rutorrent/passwd:/passwd  # htpasswd files for web UI + RPC auth
         environment:
           - PUID=1000
           - PGID=1000
           - TZ=Etc/UTC
         restart: unless-stopped
-
-    volumes:
-      ryokan-data:
-      jellyfin-config:
-      jellyfin-cache:
-      rutorrent-data:
     ```
 
     **Set up basic auth before bringing the stack up.** The crazy-max image looks for htpasswd files at `/passwd/rutorrent.htpasswd` (web UI) and `/passwd/rpc.htpasswd` (XML-RPC, the endpoint Ryokan uses). When the files exist, nginx enforces auth in front of both; when they don't, both are unauthenticated. Generate both with the same credentials in one shot:
 
     ```sh
-    mkdir -p ~/ryokan-stack/passwd
-    cd ~/ryokan-stack
     docker run --rm httpd:2.4-alpine htpasswd -Bbn admin "REPLACE-WITH-YOUR-PASSWORD" \
-      | tee passwd/rutorrent.htpasswd > passwd/rpc.htpasswd
+      | sudo tee /srv/docker/rutorrent/passwd/rutorrent.htpasswd > /dev/null
+    sudo cp /srv/docker/rutorrent/passwd/rutorrent.htpasswd /srv/docker/rutorrent/passwd/rpc.htpasswd
+    sudo chown -R 1000:1000 /srv/docker/rutorrent/passwd
     ```
 
     Replace `REPLACE-WITH-YOUR-PASSWORD` with whatever you want; same credentials work for ruTorrent's web UI and the connection Ryokan makes. Step 4 walks through plugging them into Ryokan.
 
 === "SABnzbd"
+
+    ```sh
+    sudo mkdir -p /srv/docker/{ryokan,jellyfin,sabnzbd/{config,incomplete}}
+    sudo chown -R 1000:1000 /srv/docker
+    ```
 
     ```yaml
     services:
@@ -278,9 +280,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8978:8978"
         volumes:
-          - ryokan-data:/data
-          - ./downloads:/downloads
-          - ./media/anime:/media/anime
+          - /srv/docker/ryokan:/data
+          - /srv/media/downloads:/downloads
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -293,9 +295,9 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8096:8096"
         volumes:
-          - jellyfin-config:/config
-          - jellyfin-cache:/cache
-          - ./media/anime:/media/anime
+          - /srv/docker/jellyfin/config:/config
+          - /srv/docker/jellyfin/cache:/cache
+          - /srv/media/anime:/media/anime
         environment:
           - PUID=1000
           - PGID=1000
@@ -308,25 +310,18 @@ Pick the download client you want to use and save the matching `docker-compose.y
         ports:
           - "8081:8080"          # host:container; SAB lives on 8080 internally
         volumes:
-          - sabnzbd-config:/config
-          - sabnzbd-incomplete:/incomplete-downloads   # in-progress (named volume; not on host filesystem)
-          - ./downloads:/downloads                     # completed (shared with Ryokan + Jellyfin)
+          - /srv/docker/sabnzbd/config:/config
+          - /srv/docker/sabnzbd/incomplete:/incomplete-downloads   # in-progress
+          - /srv/media/downloads:/downloads                        # completed (shared with Ryokan + Jellyfin)
         environment:
           - PUID=1000
           - PGID=1000
           - TZ=Etc/UTC
         restart: unless-stopped
-
-    volumes:
-      ryokan-data:
-      jellyfin-config:
-      jellyfin-cache:
-      sabnzbd-config:
-      sabnzbd-incomplete:
     ```
 
     !!! note "Why two folders?"
-        SAB splits in-progress (`/incomplete-downloads`) from completed (`/downloads`). The compose maps the in-progress side to a Docker named volume so it's tucked out of the way; only completed downloads land in your stack folder where Ryokan reads them.
+        SAB splits in-progress (`/incomplete-downloads`) from completed (`/downloads`). The compose puts the in-progress side under SAB's own config tree so it's tucked out of the way; only completed downloads land in `/srv/media/downloads` where Ryokan reads them.
 
 Bring it up:
 
@@ -334,18 +329,18 @@ Bring it up:
 docker compose up -d
 ```
 
-Ryokan is now on port 8978, Jellyfin on 8096, your download client on its default port. The named volumes (`ryokan-data`, `jellyfin-config`, etc.) are managed by Docker and live under `/var/lib/docker/volumes/`; only the bind mounts (`./downloads`, `./media/anime`) end up in your stack folder.
+Ryokan is now on port 8978, Jellyfin on 8096, your download client on its default port. Per-service config and state live at `/srv/docker/<service>/`; downloads land at `/srv/media/downloads`; the library lives at `/srv/media/anime`. Everything the stack writes is inspectable from the host (no Docker named volumes to dig through).
 
-??? info "How each client uses `/downloads`"
+??? info "How each client uses `/srv/media/downloads`"
     The five clients structure that folder differently. Ryokan only reads completed files, so all five layouts work transparently.
 
-    - **qBittorrent / Deluge**: write files directly to `/downloads/<category>/<file>` (or `/downloads/<file>` if no category is set). Single shared folder.
+    - **qBittorrent / Deluge**: write files directly to `/downloads/<category>/<file>` inside the container (or `/downloads/<file>` if no category is set). Single shared folder.
     - **Transmission**: writes everything to `/downloads/`, with a `.part` suffix on the filename while the torrent is in flight; renames on completion.
     - **rTorrent**: splits `/downloads/temp/` (in-progress) and `/downloads/complete/` (completed); files move from temp to complete when the torrent finishes.
-    - **SABnzbd**: uses a separate folder for in-progress (`/incomplete-downloads/`, mapped to a Docker named volume in the compose so it stays out of the way) and `/downloads/` for completed.
+    - **SABnzbd**: uses a separate folder for in-progress (`/incomplete-downloads/`, bind-mounted to `/srv/docker/sabnzbd/incomplete` on the host) and `/downloads/` for completed.
 
 !!! tip "Already running Jellyfin or your download client elsewhere?"
-    Drop the relevant service block (and its volume entry at the bottom) from the compose, and skip the corresponding setup step below. Make sure the existing instance can read `./media/anime` for Jellyfin or write to `./downloads` for the download client, or adjust paths accordingly.
+    Drop the relevant service block from the compose and skip the corresponding setup step below. Make sure the existing instance can read `/srv/media/anime` (Jellyfin) or write to `/srv/media/downloads` (download client), or adjust paths accordingly.
 
 ## 2. First login to Ryokan
 
@@ -362,7 +357,7 @@ Open <http://localhost:8096> in another tab. Walk through Jellyfin's first-run w
 3. **Add a media library**:
     - **Content type**: Shows
     - **Display name**: Anime (or whatever you like)
-    - **Folder**: click the `+` and add `/media/anime`. This is the path Jellyfin sees inside its container; it maps to `~/ryokan-stack/media/anime` on your host, the same folder Ryokan writes to.
+    - **Folder**: click the `+` and add `/media/anime`. This is the path Jellyfin sees inside its container; it maps to `/srv/media/anime` on your host, the same folder Ryokan writes to.
 4. Accept the metadata defaults; you can tweak per-library later.
 5. Finish the wizard.
 
@@ -449,7 +444,7 @@ Save the row.
 
 ## 5. Set the media root
 
-In Ryokan, go to **Settings → General → Media Root Path** and set it to `/media/anime`. That's the path inside Ryokan's container; it maps to `~/ryokan-stack/media/anime` on your host (the same folder Jellyfin reads from).
+In Ryokan, go to **Settings → General → Media Root Path** and set it to `/media/anime`. That's the path inside Ryokan's container; it maps to `/srv/media/anime` on your host (the same folder Jellyfin reads from).
 
 !!! warning "PUID and PGID matter for shared folders"
     The `1000:1000` defaults work for most homelabs but not all. If files Ryokan writes show up with the wrong owner and Jellyfin can't read them, run `id -u` and `id -g` on your media-owning user and update both services' `PUID` / `PGID`. [Installation → PUID and PGID](install.md#puid-and-pgid) explains why.
@@ -470,7 +465,7 @@ When the series page opens, click an episode you want, then **Search**. You'll s
 
 The grab fires off to your download client. When it finishes:
 
-1. Post-processing hardlinks the file into `~/ryokan-stack/media/anime/<show name>/Season 01/<episode>.mkv` on your host.
+1. Post-processing hardlinks the file into `/srv/media/anime/<show name>/Season 01/<episode>.mkv` on your host.
 2. Jellyfin picks it up on its next library scan (or immediately if you click **Scan All Libraries**).
 3. The episode is now playable from any Jellyfin client (web, mobile, TV).
 
