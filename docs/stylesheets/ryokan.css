@@ -48,12 +48,27 @@
     border-color: var(--md-accent-fg-color);
 }
 
-/* Right-side TOC: active section + hover */
-.md-nav__link--active,
-.md-nav__link--active > code {
+/* Sidebar nav (left page tree + right "On this page" TOC). Material's
+   default theme wins on specificity for the active-link color, so
+   target both nav variants explicitly and use !important on the
+   color tokens to flatten the cascade. Hover state doesn't need
+   !important because Material's hover doesn't override either. */
+.md-nav--primary .md-nav__link--active,
+.md-nav--primary .md-nav__link--active > code,
+.md-nav--secondary .md-nav__link--active,
+.md-nav--secondary .md-nav__link--active > code,
+.md-sidebar .md-nav__link--active,
+.md-sidebar .md-nav__link--active > code {
+    color: var(--md-accent-fg-color) !important;
+}
+.md-nav--primary .md-nav__link:hover,
+.md-nav--secondary .md-nav__link:hover,
+.md-sidebar .md-nav__link:hover {
     color: var(--md-accent-fg-color);
 }
-.md-nav__link:hover {
+
+/* The "On this page" header in the right sidebar */
+.md-nav--secondary > .md-nav__title {
     color: var(--md-accent-fg-color);
 }
 
