@@ -322,6 +322,12 @@ function enterBulkSelectMode() {
     bulkSelectMode = true;
     var grid = document.getElementById('library-grid');
     if (grid) grid.classList.add('selecting');
+    // Body class lets the mobile-tabbar hide itself via CSS while
+    // the bulk action bar takes its place at the bottom of the
+    // viewport. Desktop CSS doesn't touch the regular mobile-tabbar
+    // (which is already display:none above --bp-phone) so this is a
+    // no-op for desktop; mobile uses it.
+    document.body.classList.add('bulk-selecting');
     var toggle = document.getElementById('bulk-select-toggle');
     if (toggle) {
         toggle.classList.add('active');
@@ -335,6 +341,7 @@ function exitBulkSelectMode() {
     bulkSelectMode = false;
     var grid = document.getElementById('library-grid');
     if (grid) grid.classList.remove('selecting');
+    document.body.classList.remove('bulk-selecting');
     var toggle = document.getElementById('bulk-select-toggle');
     if (toggle) {
         toggle.classList.remove('active');
@@ -442,7 +449,16 @@ function renderBulkToolbar() {
     if (monitorBtn) monitorBtn.disabled = !hasSelection;
     if (deleteBtn) deleteBtn.disabled = !hasSelection;
     if (selectAllBtn) {
-        selectAllBtn.textContent = areAllVisibleSelected() ? 'Deselect all' : 'Select all';
+        // The button now contains an inline SVG icon plus a `.bulk-action-label`
+        // span; don't `textContent =` the whole button (that would wipe the
+        // icon). Update just the label span.
+        var selectAllLabel = selectAllBtn.querySelector('.bulk-action-label');
+        var label = areAllVisibleSelected() ? 'Deselect all' : 'Select all';
+        if (selectAllLabel) {
+            selectAllLabel.textContent = label;
+        } else {
+            selectAllBtn.textContent = label;
+        }
     }
 }
 
