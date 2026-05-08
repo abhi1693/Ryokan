@@ -16,18 +16,9 @@ If you've used Sonarr for TV, the shape is the same. Ryokan is just the anime-tu
 - **Land files in your library automatically.** Hardlink (default; keeps the torrent seeding), copy, or move.
 - **Plug into Seerr.** Ryokan exposes a Sonarr/Radarr-shaped API so Seerr can request anime through it just like it asks Sonarr for TV.
 
-## System requirements
-
-Ryokan runs as a single Docker container. If you're new to Docker, the [Docker overview](https://docs.docker.com/get-started/docker-overview/) is a 10-minute read that covers what containers, images, and volumes are; the rest of these docs assume you've got that mental model.
-
-Hardware-wise, requirements are modest:
-
-- **CPU**: anything from the last decade. ARM64 (Raspberry Pi, Apple Silicon under Docker Desktop) and x86_64 both supported.
-- **RAM**: about 150 MB at idle. Spikes briefly during library scans.
-- **Storage**: about 150 MB of disk for the Docker image once pulled. The SQLite database, artwork cache, and encryption key live under `/data` and stay under 100 MB for typical libraries. (Building from source instead? A release-build binary is around 100 MB; debug builds are around 350 MB.)
-- **Network**: outbound HTTPS to AniList, Nyaa, your indexers, and your download client. No inbound port-forwarding needed unless you're exposing the web UI to the internet.
-
 ## Get started
+
+Ryokan runs as a single Docker container; if anything else in your homelab does, this will too. New to Docker? [Docker's overview](https://docs.docker.com/get-started/docker-overview/) is a 10-minute read that covers containers, images, and volumes, which the rest of these docs assume you've got a feel for.
 
 !!! tip "Most users should start here"
     The **[Stack builder](stack-builder.md)** generates a complete `docker-compose.yml` for Ryokan **plus** your download client, Jellyfin, Seerr, and a reverse proxy if you want one. Click through a checkbox form, copy the result, run `docker compose up -d`. Paths line up so post-processing works without fiddling, and the matching Ryokan settings are printed alongside so you know what to paste in once Ryokan is up.
