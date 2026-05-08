@@ -595,6 +595,17 @@ services:
         );
         lines.push('');
       });
+
+      // Fallback for users whose Docker DNS doesn't resolve cross-
+      // service names (separate compose files, services on different
+      // hosts, custom network plugins, etc.). Host LAN IP plus the
+      // host-mapped port works wherever the service-name URL doesn't.
+      lines.push('If "Test connection" fails because the service-name URL above');
+      lines.push('does not resolve (separate compose files, different hosts, custom');
+      lines.push('Docker network plugins, etc.), use your host\'s LAN IP and the');
+      lines.push('host-mapped port instead. For example: http://192.168.1.100:8080');
+      lines.push('in place of http://qbittorrent:8080.');
+      lines.push('');
     }
 
     if (cfg.dlclients.includes('rtorrent')) {

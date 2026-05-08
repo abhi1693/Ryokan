@@ -440,6 +440,9 @@ In Ryokan, go to **Settings → Download Clients → Add download client**. Fill
 
 Click **Test connection** in Ryokan. You should see "Connected" with a version number. If not, the [Download clients page](download-clients.md) has per-client troubleshooting.
 
+!!! tip "If container DNS doesn't resolve"
+    The URLs above (`http://qbittorrent:8080`, `http://sabnzbd:8080`, etc.) rely on Docker's per-compose DNS so containers can reach each other by service name. If you've split Ryokan and your download client into separate compose files, run them on different hosts, or have a network plugin that interferes with Docker DNS, swap the service name for your **host's LAN IP and the host-mapped port**. For example: instead of `http://qbittorrent:8080`, use `http://192.168.1.100:8080` (or whatever your host's IP is). It works because every container in the bundled compose publishes its port to the host, so anything that can reach the host can also reach those ports.
+
 Save the row.
 
 ## 5. Set the media root
