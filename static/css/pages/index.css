@@ -350,10 +350,11 @@
     width: 100%;
 }
 
-.monitor-option-list {
+.monitor-option-list,
+.monitor-options {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
 
 .monitor-option-btn {
