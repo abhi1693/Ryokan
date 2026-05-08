@@ -126,18 +126,16 @@
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}" data-series-id="{{ s.id }}">
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
-           toggleBulkSelectMode). The inline onclick stops propagation
-           AND default — without preventDefault, the parent <a>'s
-           navigation can still fire because the click bubbled up
-           before our document-level delegation got to preventDefault
-           it on hx-boosted pages where the listener wasn't yet
-           re-attached. Inline-handling here makes chip clicks
-           always-do-the-right-thing regardless of listener state. #}
+           toggleBulkSelectMode). All click handling happens in a
+           document-level capture-phase listener in index.js — running
+           there guarantees we fire before HTMX's body-wide hx-boost
+           listener can react to the click, regardless of whether the
+           click landed on the chip or on the card body. The chip
+           itself is just a styled <input>; no inline onclick needed. #}
         <input type="checkbox"
                class="series-card-select"
                aria-label="Select for bulk action"
-               tabindex="-1"
-               onclick="bulkChipClick(event, {{ s.id }})">
+               tabindex="-1">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
             {# Decorative — the title renders as visible text in

@@ -419,18 +419,6 @@ function toggleSelectAllVisible() {
     renderBulkToolbar();
 }
 
-// Inline chip click handler. Stops propagation + preventDefault so
-// the parent <a>'s navigation doesn't fire even when the document-
-// level delegation hasn't been re-attached (hx-boost re-renders the
-// grid; document-level events survive but inline handlers are
-// replaced with the new DOM, so making the chip own its click
-// guarantees correct behavior regardless of listener state).
-function bulkChipClick(ev, seriesId) {
-    ev.stopPropagation();
-    ev.preventDefault();
-    if (!bulkSelectMode) return;
-    toggleSeriesSelectById(seriesId);
-}
 
 function renderBulkToolbar() {
     var bar = document.getElementById('bulk-action-toolbar');
@@ -478,7 +466,14 @@ function openBulkMonitorModal() {
     var confirmBtn = document.getElementById('bulk-monitor-confirm-btn');
     if (count) count.textContent = String(bulkSelectedIds.size);
     bulkPendingMode = null;
-    if (confirmBtn) confirmBtn.disabled = true;
+    // Reset both `disabled` AND `textContent` because a previous Apply
+    // that succeeded left textContent at "Applying…" and the modal
+    // close didn't reset it. Without this the second open shows the
+    // stale text.
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Apply';
+    }
     document.querySelectorAll('#bulk-monitor-options .monitor-option-btn').forEach(function (btn) {
         btn.classList.remove('active');
         btn.onclick = function () { selectBulkMonitorMode(btn); };
@@ -555,13 +550,22 @@ function confirmBulkMonitor() {
 function renderBulkOutcome(outcome, verb) {
     var ok = (outcome.succeeded || []).length;
     var bad = (outcome.failed || []).length;
-    if (!window.ryokanToast) return;
-    // Close any open bulk modal — different actions trigger from
-    // different modals but the outcome rendering is shared.
+    // Close any open bulk modal FIRST — the early-return below on
+    // missing toast helper would otherwise leave the modal open with
+    // a stuck "Applying…" button. Modal cleanup is independent of
+    // toast availability.
     ['bulk-monitor-modal', 'bulk-delete-modal'].forEach(function (id) {
         var m = document.getElementById(id);
         if (m) m.style.display = 'none';
     });
+    // Defensive: reset the bulk-monitor confirm button so a subsequent
+    // openBulkMonitorModal opens with "Apply", not stale "Applying…".
+    var confirmBtn = document.getElementById('bulk-monitor-confirm-btn');
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Apply';
+    }
+    if (!window.ryokanToast) return;
 
     if (bad === 0) {
         // All succeeded: toast + exit mode (which clears selection).
@@ -609,22 +613,26 @@ function renderBulkOutcome(outcome, verb) {
 // on every nav-back into /. Delegated click + keydown listeners are
 // attached to `document` rather than the library grid because the
 // grid element gets replaced on hx-boost navigation; document-level
-// listeners survive the swap. Inline `onclick` on the chip itself
-// belt-and-suspenders this for the chip-specific case.
+// listeners survive the swap.
 if (!window.__ryokanBulkSelectInit) {
     window.__ryokanBulkSelectInit = true;
 
-    // Document-level delegated click. In selecting mode, intercepts
-    // every card-body click, preventDefaults the parent <a>'s
-    // navigation, and toggles selection. Outside selecting mode it
-    // returns early. Skips clicks already handled inline by the chip
-    // itself (those have stopPropagation, but defense-in-depth).
+    // Document-level capture-phase click delegation. In selecting
+    // mode, intercepts every click that lands inside a .series-card
+    // (chip OR card body), preventDefaults the parent <a>'s
+    // navigation, and toggles selection.
+    //
+    // Capture phase (third arg `true`) is load-bearing: HTMX's body-
+    // wide hx-boost listener handles clicks in the bubble phase, so
+    // a bubble-phase listener here would race with HTMX. Capture
+    // fires outermost-in (document → body → ... → target), so our
+    // capture listener runs BEFORE any element-level listener,
+    // including HTMX's body-level one. preventDefault + stopPropagation
+    // here means the click never reaches HTMX or the <a>'s default
+    // navigation — the chip click works regardless of what happened
+    // before us.
     document.addEventListener('click', function (ev) {
         if (!bulkSelectMode) return;
-        // Inline chip handler already handled this; don't double-toggle.
-        if (ev.target.classList && ev.target.classList.contains('series-card-select')) {
-            return;
-        }
         var card = ev.target.closest && ev.target.closest('.series-card');
         if (!card) return;
         ev.preventDefault();
@@ -632,7 +640,7 @@ if (!window.__ryokanBulkSelectInit) {
         var id = parseInt(card.dataset.seriesId, 10);
         if (!id) return;
         toggleSeriesSelectById(id);
-    });
+    }, true);
 
     // Esc: exits the bulk delete modal first if open, then bulk
     // monitor modal, then selecting mode (clears selection on the
