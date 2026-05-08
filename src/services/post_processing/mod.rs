@@ -866,15 +866,23 @@ async fn import_torrent(
         // in a routed batch the routes rows already carry per-sibling
         // episode numbers and the parent grab's list doesn't apply to
         // sibling files.
-        let ep_num = media::parse_episode_number(&filename_only.to_lowercase())
-            .map(|(_, ep)| ep)
-            .or_else(|| {
-                if routes_by_file.is_empty() {
-                    grab.episode_numbers.first().copied()
-                } else {
-                    None
-                }
-            });
+        //
+        // Captures the season alongside the episode so the offset path
+        // below can skip the absolute-numbering compensation when the
+        // filename used explicit `SxxEyy`. A file like
+        // `Mob.Psycho.100.S02E13.mkv` parses as `(Some(2), 13)` — the
+        // S02 marker says "this is episode 13 *within season 2*", so
+        // applying `cumulative_prior_episodes=12` would re-rewrite it
+        // to E1 of the season and import it under the wrong episode.
+        let parsed = media::parse_episode_number(&filename_only.to_lowercase());
+        let parsed_season = parsed.and_then(|(s, _)| s);
+        let ep_num = parsed.map(|(_, ep)| ep).or_else(|| {
+            if routes_by_file.is_empty() {
+                grab.episode_numbers.first().copied()
+            } else {
+                None
+            }
+        });
 
         let Some(raw_ep_num) = ep_num else {
             logger::warn(
@@ -893,15 +901,23 @@ async fn import_torrent(
         //      at grab time — e.g. smol Monogatari S07E14 → Owari S2 E01
         //      with offset 13, NoobSubs JoJo E25 → Egypt-hen E01 with
         //      offset 24.
-        //   2. Otherwise (single-series legacy fallback) use the
-        //      series's cumulative prior-cour episode count (#30) when
-        //      the parsed number is clearly in the absolute-numbering
-        //      range (greater than the prior-cour total). Example:
-        //      `[SubsPlease] Jujutsu Kaisen - 56` → raw_ep_num=56,
-        //      cumulative=47, 56 > 47 → offset=47, 56 - 47 = E9 of S3.
-        //      A relative-numbered release from the same series
-        //      ("Jujutsu Kaisen - 09", raw=9) correctly falls through
-        //      to offset=0 because 9 is not greater than 47.
+        //   2. Otherwise, if the filename used explicit `SxxEyy`, skip
+        //      the absolute-numbering compensation entirely. A
+        //      seasonal marker pins the episode number to its season,
+        //      so a file like `Mob.Psycho.100.S02E13` is genuinely E13
+        //      of S02 — applying `cumulative_prior_episodes=12` would
+        //      mis-rewrite it to E1 and the original E13 row in
+        //      `episode_quality_tags` would stay in `grabbed` forever.
+        //   3. Otherwise (bare-number absolute-numbering fallback) use
+        //      the series's cumulative prior-cour episode count (#30)
+        //      when the parsed number is clearly in the absolute-
+        //      numbering range (greater than the prior-cour total).
+        //      Example: `[SubsPlease] Jujutsu Kaisen - 56` →
+        //      raw_ep_num=56, cumulative=47, 56 > 47 → offset=47, 56 -
+        //      47 = E9 of S3. A relative-numbered release from the
+        //      same series ("Jujutsu Kaisen - 09", raw=9) correctly
+        //      falls through to offset=0 because 9 is not greater than
+        //      47.
         //
         // A non-positive result after subtraction means the file
         // landed on a sibling whose offset is larger than the file's
@@ -911,7 +927,11 @@ async fn import_torrent(
             .get(file_idx)
             .map(|(_, off)| *off)
             .unwrap_or_else(|| {
-                fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+                if parsed_season.is_some() {
+                    0
+                } else {
+                    fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+                }
             });
         let ep_num = raw_ep_num - ep_offset;
         if ep_num <= 0 {
