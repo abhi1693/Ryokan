@@ -207,7 +207,13 @@ scraper = "0.26"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `preserve_order` switches the backing type of `serde_json::Map`
+# from `BTreeMap` (alphabetical) to `indexmap::IndexMap` (insertion-
+# ordered). Webhook custom-headers persistence depends on this so
+# `Authorization: Bearer ...` doesn't get shuffled past convention-
+# prefix headers on every save. Indexmap is already a transitive
+# dep, so this is a flag flip rather than a new crate.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # Auth
 bcrypt = "0.19"

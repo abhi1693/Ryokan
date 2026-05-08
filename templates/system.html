@@ -43,11 +43,19 @@
     </a>
 </div>
 
+{# Save / delete redirects from any tab that returns a flash message
+   (currently Debug + Notifications) read the same `?message=` /
+   `?error=` keys via SystemQuery. The toast title is per-tab so the
+   user gets context-appropriate copy; the body is the message itself.
+   New tabs that need flash messages should add a `tab == "..."`
+   branch here. #}
 {% if let Some(msg) = debug_message %}
     {% if tab == "debug" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Debug action complete">{{ msg }}</div>{% endif %}
+    {% if tab == "notifications" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Notification provider">{{ msg }}</div>{% endif %}
 {% endif %}
 {% if let Some(err) = debug_error %}
     {% if tab == "debug" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Debug action failed">{{ err }}</div>{% endif %}
+    {% if tab == "notifications" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Notification provider error">{{ err }}</div>{% endif %}
 {% endif %}
 
 {% if tab == "logs" %}

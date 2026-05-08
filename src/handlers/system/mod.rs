@@ -353,6 +353,9 @@ pub async fn system_page(
         ("system", LogCategory::System.label()),
         ("post_process", LogCategory::PostProcess.label()),
         ("scoring", LogCategory::Scoring.label()),
+        ("quality", LogCategory::Quality.label()),
+        ("external_sync", LogCategory::ExternalSync.label()),
+        ("notifications", LogCategory::Notifications.label()),
     ];
 
     let title_language = cfg
@@ -498,6 +501,9 @@ pub async fn debug_settings_submit(
             ("system", LogCategory::System.label()),
             ("post_process", LogCategory::PostProcess.label()),
             ("scoring", LogCategory::Scoring.label()),
+            ("quality", LogCategory::Quality.label()),
+            ("external_sync", LogCategory::ExternalSync.label()),
+            ("notifications", LogCategory::Notifications.label()),
         ],
         rss_enabled: cfg.rss_enabled,
         rss_interval_minutes: cfg.rss_interval_minutes,

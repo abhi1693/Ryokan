@@ -299,6 +299,33 @@ pub async fn resolve_indexer_name(
         .map(|i| i.name().to_string())
 }
 
+/// Resolve `series_id` to a non-empty display title via the standard
+/// romaji → english → native → bare-title fallback chain. Returns
+/// `None` when the series row is missing OR every title column is
+/// empty (a partial-fetch path may insert a row before any title
+/// source resolved). Centralized so every `emit_*` helper that needs
+/// a series title flows through one SQL shape — drift between four
+/// hand-maintained copies surfaces as the wire-event title drifting
+/// across event kinds, which would break downstream receivers
+/// matching on the value.
+async fn resolve_series_title(db: &SqlitePool, series_id: i64) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT CASE
+                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
+                  WHEN COALESCE(title_english, '') <> '' THEN title_english
+                  WHEN COALESCE(title_native, '') <> '' THEN title_native
+                  ELSE title
+                END
+         FROM series WHERE id = ?",
+    )
+    .bind(series_id)
+    .fetch_optional(db)
+    .await
+    .ok()
+    .flatten()
+    .filter(|s: &String| !s.is_empty())
+}
+
 /// Convenience: build a `Grabbed` event from the call-site context
 /// and dispatch it through the cache. Centralizes the field shape so
 /// every call site builds the same struct — adding a field on the
@@ -329,32 +356,7 @@ pub async fn emit_grabbed(
     if providers.is_empty() {
         return;
     }
-    // The CASE expression always returns SOME string for an existing
-    // row (falling through to the bare `title` column), but every
-    // column can be the empty string for a row that was added through
-    // a partial-fetch path before any title source resolved. The
-    // outer `.filter(|s| !s.is_empty())` collapses that case to None
-    // so the dispatch short-circuits rather than emitting with an
-    // empty title — same shape `discord::resolve_cover_url` uses for
-    // `cover_url`. Without the filter, query_scalar returns
-    // `Some("")` and the `let Some(...)` arm proceeds with an empty
-    // title.
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT CASE
-                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
-                  WHEN COALESCE(title_english, '') <> '' THEN title_english
-                  WHEN COALESCE(title_native, '') <> '' THEN title_native
-                  ELSE title
-                END
-         FROM series WHERE id = ?",
-    )
-    .bind(series_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s: &String| !s.is_empty());
-    let Some(series_title) = title else {
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
         tracing::debug!(
             "notifications::emit_grabbed: series #{series_id} not found, skipping dispatch"
         );
@@ -393,22 +395,7 @@ pub async fn emit_imported(
     if providers.is_empty() {
         return;
     }
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT CASE
-                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
-                  WHEN COALESCE(title_english, '') <> '' THEN title_english
-                  WHEN COALESCE(title_native, '') <> '' THEN title_native
-                  ELSE title
-                END
-         FROM series WHERE id = ?",
-    )
-    .bind(series_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s: &String| !s.is_empty());
-    let Some(series_title) = title else {
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
         tracing::debug!(
             "notifications::emit_imported: series #{series_id} not found, skipping dispatch"
         );
@@ -457,22 +444,7 @@ pub async fn emit_import_failed(
     if providers.is_empty() {
         return;
     }
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT CASE
-                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
-                  WHEN COALESCE(title_english, '') <> '' THEN title_english
-                  WHEN COALESCE(title_native, '') <> '' THEN title_native
-                  ELSE title
-                END
-         FROM series WHERE id = ?",
-    )
-    .bind(series_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s: &String| !s.is_empty());
-    let Some(series_title) = title else {
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
         tracing::debug!(
             "notifications::emit_import_failed: series #{series_id} not found, skipping dispatch"
         );
@@ -508,22 +480,7 @@ pub async fn emit_classifier_needs_review(
     if providers.is_empty() {
         return;
     }
-    let title: Option<String> = sqlx::query_scalar(
-        "SELECT CASE
-                  WHEN COALESCE(title_romaji, '') <> '' THEN title_romaji
-                  WHEN COALESCE(title_english, '') <> '' THEN title_english
-                  WHEN COALESCE(title_native, '') <> '' THEN title_native
-                  ELSE title
-                END
-         FROM series WHERE id = ?",
-    )
-    .bind(series_id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .filter(|s: &String| !s.is_empty());
-    let Some(series_title) = title else {
+    let Some(series_title) = resolve_series_title(&state.db, series_id).await else {
         tracing::debug!(
             "notifications::emit_classifier_needs_review: series #{series_id} not found, skipping dispatch"
         );

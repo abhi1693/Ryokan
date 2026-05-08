@@ -393,7 +393,7 @@ pub async fn notifications_upsert(
         }
         .into_html_ok();
     }
-    htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+saved").into_response()
+    htmx_aware_redirect(is_htmx, "/system?tab=notifications&message=Provider+saved").into_response()
 }
 
 /// `POST /system/notifications/delete` — drop the provider row.
@@ -430,7 +430,11 @@ pub async fn notifications_delete(
         }
         .into_html_ok();
     }
-    htmx_aware_redirect(is_htmx, "/system?tab=notifications&msg=Provider+deleted").into_response()
+    htmx_aware_redirect(
+        is_htmx,
+        "/system?tab=notifications&message=Provider+deleted",
+    )
+    .into_response()
 }
 
 /// Build the webhook `config_json` blob from the form. Handles the
@@ -458,13 +462,20 @@ fn build_webhook_config(
         v => Some(v.to_string()),
     };
 
+    // Use `serde_json::Map` (insertion-ordered when the `preserve_order`
+    // feature is on, which serde_json 1.x has by default for string
+    // keys) so the user's header order round-trips through save → DB →
+    // edit-form re-render. `BTreeMap` would alphabetize, which silently
+    // shuffles `Authorization: Bearer ...` past convention-prefix
+    // headers and surprises the user when they reopen the modal.
+    let mut headers_obj = serde_json::Map::with_capacity(headers.len());
+    for (k, v) in &headers {
+        headers_obj.insert(k.clone(), serde_json::Value::String(v.clone()));
+    }
     let cfg = serde_json::json!({
         "url": url,
         "secret": secret,
-        "headers": headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect::<std::collections::BTreeMap<_, _>>(),
+        "headers": serde_json::Value::Object(headers_obj),
     });
     Ok(cfg.to_string())
 }
@@ -637,8 +648,11 @@ pub async fn notifications_edit_form(
 
 fn redirect_with_err(is_htmx: bool, err: &str) -> Response {
     let encoded = urlencoding_encode(err);
-    htmx_aware_redirect(is_htmx, &format!("/system?tab=notifications&err={encoded}"))
-        .into_response()
+    htmx_aware_redirect(
+        is_htmx,
+        &format!("/system?tab=notifications&error={encoded}"),
+    )
+    .into_response()
 }
 
 /// Tiny in-line URL encoder for the redirect-with-err path. Avoids
@@ -769,6 +783,41 @@ mod tests {
         let json = build_webhook_config(&form, Some(&existing)).unwrap();
         let cfg: webhook::WebhookConfig = serde_json::from_str(&json).unwrap();
         assert!(cfg.secret.is_none());
+    }
+
+    #[test]
+    fn build_webhook_config_preserves_user_authored_header_order() {
+        // Regression guard for the BTreeMap-shuffles-headers bug:
+        // the user-typed sequence (Authorization first, X-Foo second)
+        // must round-trip through save → DB → re-read in the same
+        // order. Pre-fix, BTreeMap collect alphabetized to
+        // (Authorization, X-Foo) — which happens to match here, so
+        // the second case (X-A, A-Authorization) is the real test.
+        let form = UpsertForm {
+            id: None,
+            name: "p".into(),
+            kind: "webhook".into(),
+            enabled: Some("on".into()),
+            webhook_url: "https://example.com/x".into(),
+            webhook_secret: "".into(),
+            // X-Aaa is user-typed first; alphabetically it would sort
+            // BEFORE B-Authorization, but the user-typed order has
+            // Authorization first. The wire JSON must preserve user
+            // order.
+            webhook_headers: "B-Authorization: Bearer xyz\nX-Aaa: 1".into(),
+            discord_webhook_url: "".into(),
+            events: Default::default(),
+        };
+        let json = build_webhook_config(&form, None).unwrap();
+        let cfg: webhook::WebhookConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            cfg.headers
+                .iter()
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>(),
+            vec!["B-Authorization", "X-Aaa"],
+            "header order must match user-authored input"
+        );
     }
 
     #[test]

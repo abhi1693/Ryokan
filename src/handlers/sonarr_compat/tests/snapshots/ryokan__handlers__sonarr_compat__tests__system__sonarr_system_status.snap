@@ -1,33 +1,34 @@
 ---
 source: src/handlers/sonarr_compat/tests/system.rs
+assertion_line: 48
 expression: body
 ---
 {
-  "appData": "",
-  "appName": "Ryokan",
-  "authentication": "none",
-  "branch": "main",
+  "version": "4.0.17.2952",
   "buildTime": "2024-01-01T00:00:00Z",
-  "isAdmin": false,
   "isDebug": false,
-  "isDocker": false,
-  "isLinux": true,
-  "isMono": false,
-  "isNetCore": true,
-  "isOsx": false,
   "isProduction": true,
+  "isAdmin": false,
   "isUserInteractive": false,
-  "isWindows": false,
-  "migrationVersion": 0,
-  "mode": "default",
+  "startupPath": "",
+  "appData": "",
   "osName": "linux",
   "osVersion": "",
-  "packageUpdateMechanism": "builtIn",
-  "runtimeName": "",
-  "runtimeVersion": "",
+  "isNetCore": true,
+  "isMono": false,
+  "isLinux": true,
+  "isOsx": false,
+  "isWindows": false,
+  "isDocker": false,
+  "mode": "default",
+  "branch": "main",
+  "authentication": "none",
   "sqliteVersion": "",
-  "startTime": "2024-01-01T00:00:00Z",
-  "startupPath": "",
+  "migrationVersion": 0,
   "urlBase": "",
-  "version": "4.0.17.2952"
+  "runtimeVersion": "",
+  "runtimeName": "",
+  "startTime": "2024-01-01T00:00:00Z",
+  "packageUpdateMechanism": "builtIn",
+  "appName": "Ryokan"
 }
