@@ -23,8 +23,8 @@ Ryokan runs as a single Docker container. If you're new to Docker, the [Docker o
 Hardware-wise, requirements are modest:
 
 - **CPU**: anything from the last decade. ARM64 (Raspberry Pi, Apple Silicon under Docker Desktop) and x86_64 both supported.
-- **RAM**: ~150 MB at idle. Spikes briefly during library scans.
-- **Storage**: the binary itself is small (~50 MB). The SQLite database, artwork cache, and OAuth key live under `/data` and stay under 100 MB for typical libraries.
+- **RAM**: about 150 MB at idle. Spikes briefly during library scans.
+- **Storage**: about 150 MB of disk for the Docker image once pulled. The SQLite database, artwork cache, and encryption key live under `/data` and stay under 100 MB for typical libraries. (Building from source instead? A release-build binary is around 100 MB; debug builds are around 350 MB.)
 - **Network**: outbound HTTPS to AniList, Nyaa, your indexers, and your download client. No inbound port-forwarding needed unless you're exposing the web UI to the internet.
 
 ## Get started
@@ -44,10 +44,6 @@ If you'd rather build the stack yourself, work through these in order:
 
 - **[Troubleshooting](troubleshooting.md)**: concrete diagnostic steps for the most common "why didn't this work" cases.
 - **[FAQ](faq.md)**: how Ryokan compares to Sonarr, multi-user, manga support, API access, backup.
-
-## Demo
-
-There isn't a hosted demo (Ryokan is an admin-tool that talks to your private library and download clients; nothing to safely show off without signing visitors into a real account). The fastest way to see the UI is to run the Docker container locally; it works offline against the bundled defaults so you can poke around before configuring anything real.
 
 ---
 
