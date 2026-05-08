@@ -91,14 +91,16 @@
 
 @media (max-width: 640px) {
     /* Keep .nav-links flexed on mobile but hide every child except
-       the mobile logout icon, which becomes the only thing visible
-       in the topbar's right slot. The bottom mobile-tabbar handles
-       primary nav. */
+       (a) the mobile logout icon and (b) the bulk-select toggle on
+       the library page. Primary nav lives in the bottom
+       mobile-tabbar; the topbar's right slot is reserved for
+       page-mode actions (Select) and account actions (Logout). */
     .nav-links {
         display: flex;
-        gap: 0;
+        gap: 6px;
+        align-items: center;
     }
-    .nav-links > *:not(.nav-logout-mobile) {
+    .nav-links > *:not(.nav-logout-mobile):not(.bulk-select-toggle) {
         display: none;
     }
     .nav-logout-mobile {
