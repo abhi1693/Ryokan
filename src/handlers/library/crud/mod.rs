@@ -289,141 +289,62 @@ pub async fn remove_series(
         Err(e) => return Err(fail_with(&state.db, series_id, "lookup", e.to_string()).await),
     };
 
-    let mut torrents_removed: u64 = 0;
-    let mut torrent_failures: Vec<String> = Vec::new();
-    let mut folder_status: &'static str = "skipped";
-    let mut folder_detail: String = String::new();
-
-    if delete_files && let Some(ref tracked) = tracked {
-        // 1. Tell qBittorrent to drop every torrent (with files) we ever
-        //    grabbed for this series.
-        let hashes = match grabbed_torrents::get_all_for_series(&state.db, series_id).await {
-            Ok(h) => h,
-            Err(e) => {
-                return Err(fail_with(
-                    &state.db,
-                    series_id,
-                    "list_grabbed_torrents",
-                    e.to_string(),
-                )
-                .await);
-            }
-        };
-
-        if !hashes.is_empty() {
-            // Per-grab client routing via `resolve_grab_client`. A
-            // series can have grabs across multiple clients (e.g.
-            // early SAB Usenet rip plus later qBit BD upgrade) AND
-            // legacy SAB grabs may have a NULL stamp; the helper's
-            // nzo_id-shape heuristic rescues those.
-            for &(id, ref hash, dc_id) in &hashes {
-                if hash.is_empty() {
-                    continue;
-                }
-                // Issue #28 PR C — preserve PT seed rules across
-                // series removal. A user wiping a series from the
-                // library typically wants ratio policies honored
-                // (their PT account's ratio is downstream of
-                // every grab). The grabbed_torrents row gets
-                // deleted below regardless via
-                // delete_all_for_series, so the upgrade sweep
-                // can't re-grab the same hash.
-                if grabbed_torrents::respects_seed_rules(&state.db, hash).await {
-                    torrents_removed += 1; // counted as "handled"
-                    continue;
-                }
-                let Some(client) = state.resolve_grab_client(dc_id, hash).await else {
-                    torrent_failures.push("Download client not configured".to_string());
-                    continue;
-                };
-                match client.delete(hash, true).await {
-                    Ok(()) => torrents_removed += 1,
-                    Err(err) => torrent_failures.push(format!("{}: {}", hash, err)),
-                }
-
-                // Source-side cleanup using import-time-stamped paths.
-                // Same rationale as `delete_episode_file`: the client's
-                // delete is unreliable for SAB jobs whose history
-                // `storage` field is the parent complete dir. Stamped
-                // paths are precise and mode-agnostic.
-                let stamped = grabbed_torrents::get_imported_source_paths(&state.db, id).await;
-                if !stamped.is_empty() {
-                    super::episodes::remove_stamped_source_paths(&stamped).await;
-                }
-            }
-        }
-
-        // 2. Drop the grabbed_torrents rows for this series so the table
-        //    doesn't accumulate stale references to hashes qBit just
-        //    forgot about.
-        if let Err(err) = grabbed_torrents::delete_all_for_series(&state.db, series_id).await {
-            torrent_failures.push(format!("clear grabbed_torrents: {}", err));
-        }
-
-        // 3. Delete the series media folder. Canonicalize + assert under
-        //    the configured media root before recursing.
-        let cfg_opt = config::get_config(&state.db).await.ok().flatten();
-        if let Some(cfg) = cfg_opt
-            && !tracked.folder_name.trim().is_empty()
-            && !cfg.media_root.trim().is_empty()
+    // Filesystem + torrent cleanup is shared with `bulk::delete_one_series`
+    // via the `cleanup_series_files` helper. Both paths went out of sync
+    // before — bulk silently bypassed the canonicalize+starts_with
+    // traversal guard and the issue-#28 PT seed-rule check (PR #164
+    // review). Single-helper keeps them in lockstep.
+    let cleanup_report: Option<super::cleanup::SeriesCleanupReport> = if delete_files
+        && let Some(ref tracked) = tracked
+    {
+        let media_root: Option<String> = config::get_config(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.media_root);
+        match super::cleanup::cleanup_series_files(
+            &state,
+            series_id,
+            &tracked.folder_name,
+            media_root.as_deref(),
+        )
+        .await
         {
-            let series_dir = std::path::Path::new(&cfg.media_root).join(&tracked.folder_name);
-            match tokio::fs::canonicalize(&cfg.media_root).await {
-                Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
-                    Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
-                        match tokio::fs::remove_dir_all(&series_canon).await {
-                            Ok(()) => {
-                                folder_status = "removed";
-                                folder_detail = series_canon.display().to_string();
-                            }
-                            Err(err) => {
-                                folder_status = "error";
-                                folder_detail = format!("{}: {}", series_canon.display(), err);
-                            }
-                        }
-                    }
-                    Ok(other) => {
-                        folder_status = "refused";
-                        folder_detail = format!(
-                            "resolves outside media root: {} -> {}",
-                            series_dir.display(),
-                            other.display()
-                        );
-                    }
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                        folder_status = "missing";
-                        folder_detail = series_dir.display().to_string();
-                    }
-                    Err(err) => {
-                        folder_status = "error";
-                        folder_detail = format!("{}: {}", series_dir.display(), err);
-                    }
-                },
-                Err(err) => {
-                    folder_status = "error";
-                    folder_detail = format!("media_root canonicalize: {}", err);
-                }
-            }
+            Ok(r) => Some(r),
+            Err(e) => return Err(fail_with(&state.db, series_id, "list_grabbed_torrents", e).await),
         }
-    }
+    } else {
+        None
+    };
 
-    // 4. Remove the DB tracking rows. This is the irreversible step, so
-    //    do it last — if filesystem cleanup blew up the operator can
-    //    still inspect the half-cleaned state via the Library page.
+    // Pull report fields back out for the response/log shape; using
+    // defaults when delete_files=false or `tracked` was None.
+    let torrents_removed = cleanup_report
+        .as_ref()
+        .map(|r| r.torrents_removed)
+        .unwrap_or(0);
+    let torrent_failures = cleanup_report
+        .as_ref()
+        .map(|r| r.torrent_failures.clone())
+        .unwrap_or_default();
+    let folder_status = cleanup_report
+        .as_ref()
+        .map(|r| r.folder_status)
+        .unwrap_or("skipped");
+    let folder_detail = cleanup_report
+        .as_ref()
+        .map(|r| r.folder_detail.clone())
+        .unwrap_or_default();
+    let jellyfin_status = cleanup_report
+        .as_ref()
+        .map(|r| r.jellyfin_status)
+        .unwrap_or("skipped");
+
+    // Remove the DB tracking rows. This is the irreversible step, so
+    // do it last — if filesystem cleanup blew up the operator can
+    // still inspect the half-cleaned state via the Library page.
     if let Err(e) = series::remove(&state.db, series_id).await {
         return Err(fail_with(&state.db, series_id, "delete_series", e.to_string()).await);
-    }
-
-    // 5. Nudge Jellyfin to rescan.
-    let mut jellyfin_status: &'static str = "skipped";
-    if delete_files {
-        let jellyfin_opt = state.jellyfin.read().await.clone();
-        if let Some(jelly) = jellyfin_opt {
-            jellyfin_status = match jelly.refresh_library().await {
-                Ok(()) => "refreshed",
-                Err(_) => "error",
-            };
-        }
     }
 
     // Scrub user-controlled strings for the log line.
@@ -510,6 +431,54 @@ pub async fn set_folder(
 /// visible while we wait for the network fetch; the dropdown UI
 /// tells the user "Will follow your AL/MAL list" until that happens.
 pub(crate) const MONITOR_MODE_SYNC_SENTINEL: &str = "sync";
+
+/// Apply a monitor-mode change to one series + recompute the per-episode
+/// monitoring rows that depend on it. Extracted from `set_monitoring`
+/// (the per-series handler) so `handlers::library::bulk` can reuse the
+/// same write path without duplicating the sentinel-vs-explicit branch.
+///
+/// Returns `Result<(), String>` to fit the bulk-handler aggregation
+/// shape (per-series failures collected into `BulkOutcome.failed`
+/// rather than aborting the batch). The string is user-displayable;
+/// callers may surface it directly in toasts / failure modals.
+pub(crate) async fn apply_monitor_mode(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+    mode_str: &str,
+) -> Result<(), String> {
+    // Preflight existence check. Without this, both the sentinel-
+    // clear and explicit-pin SQL UPDATE paths return Ok(()) for a
+    // non-existent id (sqlite UPDATE-affects-0-rows is not an
+    // error). A stale-tab id from a slow-tab race would silently
+    // land in `BulkOutcome.succeeded` and the user would never see
+    // anything went wrong. Reported by PR #164 review.
+    let exists = series::get_by_id(db, series_id)
+        .await
+        .map_err(|e| format!("Lookup failed: {e}"))?
+        .is_some();
+    if !exists {
+        return Err(format!("Series {series_id} no longer exists"));
+    }
+
+    if mode_str == MONITOR_MODE_SYNC_SENTINEL {
+        series::update_monitor_mode_manual_override(db, series_id, false)
+            .await
+            .map_err(|e| format!("Failed to clear monitor override: {e}"))?;
+    } else {
+        let mode = monitoring::MonitorMode::from_str(mode_str);
+        series::update_monitor_mode_with_override(db, series_id, mode.as_str(), true)
+            .await
+            .map_err(|e| format!("Failed to set monitor mode: {e}"))?;
+    }
+    // Best-effort recompute. A failure here means the per-episode
+    // monitor flags are stale until the next sync tick, but the
+    // primary write succeeded; report success to the caller and
+    // let the supervised loop fix the per-episode rows on its
+    // next pass. Same posture as the existing `set_monitoring`
+    // handler, which logs the recompute error and returns 200.
+    let _ = monitoring_service::recompute_series_monitoring(db, series_id).await;
+    Ok(())
+}
 
 #[utoipa::path(
     post,

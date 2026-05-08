@@ -350,10 +350,11 @@
     width: 100%;
 }
 
-.monitor-option-list {
+.monitor-option-list,
+.monitor-options {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
 }
 
 .monitor-option-btn {
@@ -374,6 +375,8 @@
 .monitor-option-btn.active {
     border-color: var(--accent);
     background: rgba(203, 166, 247, 0.08);
+    box-shadow: inset 3px 0 0 var(--accent);
+    padding-left: 17px;
 }
 
 .monitor-option-btn:hover:not(.active) {
@@ -392,3 +395,498 @@
     color: var(--text-dim);
 }
 
+/* ── Bulk select (issue #125) ───────────────────────────────────────
+   Custom-styled selection indicator that hides until hover (or until
+   the card is selected), with a mauve fill and SVG check mark on the
+   selected state. The native checkbox styling clashed against the
+   cover art and read as a system-form element bolted onto the UI;
+   this version stays out of the way until invoked. */
+
+.series-card {
+    position: relative;
+}
+
+/* The checkbox is a real <input type="checkbox">, kept for screen-
+   reader semantics and so the :checked CSS state drives the visual.
+   We strip its native appearance and re-skin from scratch. Hidden
+   entirely outside selecting mode (display: none); the parent grid
+   gets the .selecting class which reveals it. */
+.series-card-select {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 2;
+    width: 24px;
+    height: 24px;
+    margin: 0;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    display: none;
+
+    /* Glassy dark backdrop so the indicator stays visible regardless
+       of cover-art brightness. backdrop-filter blurs the bit of cover
+       behind the indicator, giving it a frosted-glass quality that
+       matches the rest of the dark UI. */
+    background: rgba(15, 15, 19, 0.55);
+    backdrop-filter: blur(8px) saturate(120%);
+    -webkit-backdrop-filter: blur(8px) saturate(120%);
+    border: 1.5px solid rgba(232, 232, 240, 0.35);
+    border-radius: 7px;
+
+    transition:
+        background 0.18s ease-out,
+        border-color 0.18s ease-out,
+        box-shadow 0.18s ease-out,
+        transform 0.12s ease-out;
+}
+
+/* In selecting mode, every card's chip is visible. The reveal is a
+   spring-scale + fade-in via a one-shot @keyframes so entering the
+   mode feels like a deliberate state change rather than an instant
+   pop. */
+.library-grid.selecting .series-card-select {
+    display: block;
+    animation: bulk-select-chip-in 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+
+@keyframes bulk-select-chip-in {
+    from {
+        opacity: 0;
+        transform: scale(0.6) translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+/* Hover-over-unselected: brighten the border so the chip reads as
+   "ready to click" without committing to mauve yet. The
+   `:not(.selected)` on the card is load-bearing: without it, this
+   rule's higher specificity (4,1 over the checked rule's 2,1)
+   overrode `.selected > .series-card-select`, so hovering a
+   selected chip would briefly flip the mauve back to dark — looked
+   like the checkmark was disappearing on hover. Excluding selected
+   cards from this rule keeps the mauve visual stable.
+   `:not(:checked)` is kept too as belt-and-suspenders for paths
+   where `:checked` latches but `.selected` somehow didn't. */
+.library-grid.selecting .series-card:not(.selected):hover .series-card-select:not(:checked) {
+    border-color: rgba(232, 232, 240, 0.75);
+    background: rgba(15, 15, 19, 0.75);
+}
+
+.series-card-select:focus-visible {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.35);
+}
+
+/* Checked visual. Driven by BOTH `:checked` (the form-element state)
+   AND `.series-card.selected .series-card-select` (the JS-managed
+   class on the parent card). Belt-and-suspenders: we set both in JS
+   so either path succeeding keeps the visual in sync — important
+   because some hx-boost re-render cases were leaving `:checked`
+   out of step with our authoritative selection set.
+   Mauve fill, white check mark via inline SVG; dark outer halo
+   lifts the chip off bright cover art. */
+.series-card-select:checked,
+.series-card.selected > .series-card-select {
+    background: var(--accent);
+    border-color: var(--accent);
+    box-shadow:
+        0 0 0 2px rgba(15, 15, 19, 0.6),
+        0 2px 8px rgba(203, 166, 247, 0.4);
+    /* Inline SVG check mark — using #0f0f13 (page bg) as the stroke
+       color so the check reads as "carved out" rather than "drawn on
+       top of." */
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%230f0f13' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='5,12 10,17 19,8'/></svg>");
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: 16px 16px;
+}
+
+/* In selecting mode, the card-hover lift turns into a "selectable"
+   cue (slightly different curve from default-mode hover so the user
+   senses the mode shift). The body click toggles selection rather
+   than navigating; cursor stays pointer. */
+.library-grid.selecting .series-card:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-accent);
+}
+
+/* Selected card: thicker mauve border + soft mauve glow + a tiny lift
+   so the selected state reads at-a-glance even when the user is
+   scrolled past the checkbox. The transform is scoped to the card
+   itself so the card grid reflows minimally. */
+.series-card.selected {
+    border-color: var(--accent);
+    box-shadow:
+        0 0 0 1px var(--accent),
+        0 8px 24px -4px rgba(203, 166, 247, 0.35),
+        0 2px 8px rgba(203, 166, 247, 0.18);
+    transform: translateY(-2px);
+}
+.series-card.selected:hover {
+    /* Override the existing card-hover transform so selected state
+       wins on hover instead of competing transforms double-stacking. */
+    transform: translateY(-3px);
+    border-color: var(--accent);
+}
+
+/* "Select" toggle button in the topbar (base.html nav-links). Lives
+   here rather than in the page filter row so it sits in the
+   persistent topbar — the same place Sonarr surfaces its "Select
+   Series" page-mode toggle. Conditionally rendered only when
+   `page == "library"`; on other pages the button is not in the
+   DOM at all (so toggleBulkSelectMode() can't be invoked from
+   pages that don't load index.js).
+   Sizing matches `.nav-links a` exactly (same padding, same
+   font-size, no border) so the button height aligns with the
+   surrounding nav-link anchors. The active state (mode on) inverts
+   to a mauve fill for constant visual confirmation that mode is on. */
+.nav-action.bulk-select-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    color: var(--text-dim);
+    padding: 6px 14px;
+    border: none;
+    border-radius: var(--radius);
+    /* Match `.nav-links a` exactly: 14px font, body-inherited line-
+       height (1.6 from base.css's `body`). The default UA stylesheet
+       on <button> sets `line-height: normal` which renders shorter
+       than the surrounding anchors, so we restate explicitly. */
+    font-size: 14px;
+    font-weight: 500;
+    font-family: inherit;
+    line-height: 1.6;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s, transform 0.1s;
+}
+.nav-action.bulk-select-toggle:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+}
+.nav-action.bulk-select-toggle.active {
+    background: var(--accent);
+    color: var(--bg);
+}
+.nav-action.bulk-select-toggle.active:hover {
+    background: var(--accent-hover);
+}
+.nav-action.bulk-select-toggle:active {
+    transform: scale(0.97);
+}
+.bulk-select-toggle-icon {
+    flex-shrink: 0;
+}
+
+/* Visual divider in the toolbar between groups (count | actions | done). */
+.bulk-action-divider {
+    width: 1px;
+    height: 18px;
+    background: rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+/* Library header on mobile: stack vertically. The default
+   page-header-row is a flex row with the title on the left and
+   filter controls + Add Series on the right; below --bp-phone the
+   right side wraps awkwardly (title squeezed onto two lines, +Add
+   Series orphaned in the middle of the row). Stacking gives each
+   slot its own row so the layout reads top-to-bottom: title,
+   search + filters, Add Series. */
+@media (max-width: 640px) {
+    .library-header-row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 12px;
+    }
+    .library-header-row h2 {
+        margin: 0;
+    }
+    /* Right-side wrapper: the filter form + Add Series share a
+       container <div> in the template. Let it flex-wrap so its
+       children stack cleanly. */
+    .library-header-row > div:last-child {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        align-items: stretch;
+    }
+    .library-filter-form {
+        flex-wrap: wrap;
+        width: 100%;
+        gap: 8px;
+    }
+    /* Search input goes full-width. The wide variant (no list
+       dropdown) was already 100% via the `width: 406px` rule
+       hitting the viewport cap; standardize. */
+    .library-filter-form .library-search-input,
+    .library-filter-form .library-search-input.library-search-input-wide {
+        width: 100%;
+        min-width: 0;
+    }
+    /* Each form control gets its own full-width row on mobile:
+       custom-list filter, search box, sort dropdown, Clear pill all
+       stack vertically. Sharing rows looked uneven (50/50 selects
+       collapsed unequally based on content width). Full-width is
+       cleaner and matches the +Add Series button's full-width row
+       below them. */
+    .library-filter-form .folder-select {
+        flex: 1 1 100%;
+        width: 100%;
+        min-width: 0;
+    }
+    /* Add Series button breaks to full-width with no left margin
+       (the original 32px sat next to the filters; on mobile it
+       just creates a misalignment). */
+    .library-header-row .btn-primary {
+        margin-left: 0 !important;
+        width: 100%;
+    }
+}
+
+/* Sticky bottom toolbar. Soft-rounded rectangle (was pill in earlier
+   pass; squarer reads as "tool" rather than "toast") centered at the
+   bottom, slides up when in selecting mode. The mauve glow ring
+   matches the selected-card glow so the two surfaces feel paired. */
+.bulk-action-toolbar {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(140%);
+    background: rgba(22, 22, 29, 0.92);
+    backdrop-filter: blur(16px) saturate(140%);
+    -webkit-backdrop-filter: blur(16px) saturate(140%);
+    border: 1px solid rgba(203, 166, 247, 0.3);
+    border-radius: 12px;
+    padding: 8px 12px;
+    box-shadow:
+        0 12px 32px -8px rgba(0, 0, 0, 0.6),
+        0 0 0 1px rgba(203, 166, 247, 0.12),
+        0 0 24px -4px rgba(203, 166, 247, 0.25);
+    z-index: 50;
+    transition:
+        transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1),
+        opacity 0.22s ease-out;
+    opacity: 0;
+    pointer-events: none;
+}
+.bulk-action-toolbar.visible {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+.bulk-action-toolbar-inner {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: nowrap;
+}
+
+/* Count badge: mauve text, bold, with a thin separator pipe. The
+   number gets the display-font treatment so it pulls focus naturally. */
+.bulk-action-count {
+    font-family: 'Murecho', system-ui, sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-bright);
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    padding-right: 6px;
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    margin-right: 4px;
+}
+.bulk-action-count #bulk-action-count-num {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+}
+
+/* Desktop bulk action buttons. Pill-internal buttons that ride next
+   to the count + dividers. The icon sits inline before the label;
+   on mobile the same markup gets restyled into stacked icon-on-top
+   tab slots via the @media block below. */
+.bulk-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    font-family: inherit;
+    line-height: 1.2;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    cursor: pointer;
+    transition: background 0.15s ease-out, transform 0.1s ease-out, border-color 0.15s ease-out, color 0.15s ease-out;
+}
+.bulk-action-btn:active {
+    transform: scale(0.96);
+}
+.bulk-action-btn .bulk-action-icon {
+    flex-shrink: 0;
+}
+.bulk-action-btn-ghost {
+    background: transparent;
+    color: var(--text-dim);
+    border-color: transparent;
+}
+.bulk-action-btn-ghost:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+}
+.bulk-action-btn-secondary {
+    background: var(--bg-elevated);
+    color: var(--text);
+    border-color: var(--border);
+}
+.bulk-action-btn-secondary:hover {
+    border-color: var(--border-accent);
+    background: var(--bg-card);
+}
+.bulk-action-btn-danger {
+    background: rgba(211, 125, 125, 0.15);
+    color: var(--red);
+    border-color: rgba(211, 125, 125, 0.3);
+}
+.bulk-action-btn-danger:hover {
+    background: rgba(211, 125, 125, 0.25);
+    border-color: var(--red);
+}
+.bulk-action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Count icon — hidden on desktop (just the text reads the badge),
+   shown on mobile as the visual cue for the "selected" slot. */
+.bulk-action-count-icon {
+    display: none;
+}
+
+/* Mobile bulk-action toolbar: replaces the bottom mobile-tabbar
+   while in selection mode rather than stacking on top of it.
+   Same markup as desktop; @media flips it from a centered pill
+   into a full-width tabbar-shaped slot row with icon-on-top
+   labels — visually parallels the .mobile-tabbar it replaces so
+   the page's bottom-row anchor doesn't shift mid-task. */
+@media (max-width: 640px) {
+    /* Hide the regular bottom mobile-tabbar while bulk-selecting so
+       the bulk action bar can take its viewport slot. JS toggles
+       body.bulk-selecting on enter/exit. */
+    body.bulk-selecting .mobile-tabbar {
+        display: none;
+    }
+
+    .bulk-action-toolbar {
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        max-width: none;
+        transform: translateY(100%);
+        background: rgba(15, 15, 19, 0.96);
+        backdrop-filter: blur(12px) saturate(140%);
+        -webkit-backdrop-filter: blur(12px) saturate(140%);
+        border: none;
+        border-top: 1px solid var(--border);
+        border-radius: 0;
+        padding: 0;
+        box-shadow: 0 -8px 24px -8px rgba(0, 0, 0, 0.5);
+        transition: transform 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+        opacity: 1;
+    }
+    .bulk-action-toolbar.visible {
+        transform: translateY(0);
+    }
+    .bulk-action-toolbar-inner {
+        display: flex;
+        flex-direction: row;
+        align-items: stretch;
+        justify-content: space-around;
+        gap: 0;
+        flex-wrap: nowrap;
+        min-height: 56px;
+    }
+    .bulk-action-divider {
+        display: none;
+    }
+
+    /* Equal-width tab slots: each child of the inner row gets
+       flex: 1 1 0 so they distribute evenly across the viewport
+       width. Override the desktop pill button styles to icon-on-top,
+       label-below — the same shape as .mobile-tab. */
+    .bulk-action-toolbar-inner > .bulk-action-count,
+    .bulk-action-toolbar-inner > .bulk-action-btn {
+        flex: 1 1 0;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 2px;
+        padding: 8px 4px 6px;
+        min-width: 0;
+        min-height: 56px;
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+        border: none;
+        border-radius: 0;
+        margin: 0;
+        background: transparent;
+        white-space: normal;
+        text-align: center;
+    }
+
+    /* Hide the count slot entirely on mobile — the slot is too
+       narrow for "N selected" to read cleanly, and the empty
+       checkbox icon alone looks like a stray UI element. The
+       Select all button right beside it already shows the user
+       which slot drives selection. */
+    .bulk-action-toolbar-inner > .bulk-action-count {
+        display: none;
+    }
+
+    /* Stacked label below the icon. Match .mobile-tab-label. */
+    .bulk-action-btn .bulk-action-label {
+        font-size: 11px;
+        font-weight: 500;
+        letter-spacing: 0.2px;
+        line-height: 1.2;
+    }
+
+    /* Reset the variant background/border treatments so all slots
+       read as flat tab buttons; only the icon + label colors carry
+       the variant signal. */
+    .bulk-action-btn-ghost,
+    .bulk-action-btn-secondary,
+    .bulk-action-btn-danger {
+        background: transparent;
+        border-color: transparent;
+    }
+    .bulk-action-btn-ghost {
+        color: var(--text-dim);
+    }
+    .bulk-action-btn-secondary {
+        color: var(--text);
+    }
+    .bulk-action-btn-danger {
+        color: var(--red);
+    }
+    .bulk-action-btn-ghost:hover,
+    .bulk-action-btn-secondary:hover {
+        background: var(--bg-elevated);
+        color: var(--text-bright);
+    }
+    .bulk-action-btn-danger:hover {
+        background: rgba(211, 125, 125, 0.12);
+        color: var(--red);
+    }
+    .bulk-action-btn:active {
+        transform: none;
+        background: var(--bg-elevated);
+    }
+}

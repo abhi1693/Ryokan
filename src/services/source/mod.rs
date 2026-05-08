@@ -161,6 +161,49 @@ pub fn aggregate(evidence: &[SourceEvidence]) -> ClassificationResult {
         return ClassificationResult::unknown();
     }
 
+    // Pre-aggregation: AAC-as-Web suppression when filename declares BD.
+    //
+    // Some BD-encoder groups (Anime Time, MTBB, smol, Beatrice-Raws,
+    // VCB-Studio's lighter variants, etc.) re-encode BluRay sources
+    // with AAC audio for size. The naive AAC=Web rules at the filename
+    // and ffprobe layers misfire on those releases: the filename
+    // already says `[BD]` at 0.95, but two AAC-Web pieces of evidence
+    // (filename "web audio (aac)" at 0.75 + ffprobe "AAC audio without
+    // lossless track" at 0.85) sum to 1.60, exactly tying the BD
+    // signal (0.95 BD-keyword + 0.65 temporal). Result: rule 4 fires,
+    // confidence drops to 0.50, the row needs review when in fact it's
+    // a clean BluRay encode.
+    //
+    // When filename has a high-confidence (≥0.90) BD-keyword evidence,
+    // AAC is a codec choice, not a source signal. Drop the AAC-Web
+    // evidence pieces (matched by detail prefix) before aggregation
+    // runs. If the user genuinely wants AAC to indicate Web, they need
+    // a release that doesn't also self-label as BD — that's the case
+    // where the rule still fires.
+    let has_strong_bd_filename_keyword = evidence.iter().any(|e| {
+        e.source == Source::BluRay
+            && e.origin == Origin::Filename
+            && e.confidence >= 0.90
+            && (e.detail.contains("BD keyword")
+                || e.detail.contains("Remux keyword")
+                || e.detail.contains("BluRay keyword"))
+    });
+    let evidence: Vec<SourceEvidence> = if has_strong_bd_filename_keyword {
+        evidence
+            .iter()
+            .filter(|e| {
+                let is_aac_web = e.source == Source::Web
+                    && (e.detail.starts_with("web audio (")
+                        || e.detail == "AAC audio without lossless track");
+                !is_aac_web
+            })
+            .cloned()
+            .collect()
+    } else {
+        evidence.to_vec()
+    };
+    let evidence = evidence.as_slice();
+
     // Rule 2's per-source sum is computed *first* so rule 1 can
     // cross-check its strong-signal decision against it. We build a
     // `(source, origin) -> sum` map, clamp each bucket at ORIGIN_MAX,
@@ -2090,5 +2133,74 @@ mod tests {
         // Without this guard, the while-loop would do hb.len() comparisons
         // against zero-length matches at every position and return true.
         assert!(!contains_word("anything goes here", ""));
+    }
+
+    #[test]
+    fn aggregate_suppresses_aac_web_when_filename_says_bd() {
+        // Regression: Solo Leveling S2 BD-AAC release (Anime Time)
+        // tied 1.60 vs 1.60 (filename BD 0.95 + temporal BD 0.65 vs
+        // filename "web audio (aac)" 0.75 + ffprobe AAC 0.85),
+        // tripping rule 4 and writing the row as needs-review WEB-1080p.
+        // With AAC-Web suppression in place when filename has strong BD
+        // keyword, the AAC pieces drop and BluRay wins cleanly.
+        let evidence = vec![
+            SourceEvidence::new(Source::BluRay, 0.95, Origin::Filename, "BD keyword"),
+            SourceEvidence::new(Source::Web, 0.75, Origin::Filename, "web audio (aac)"),
+            SourceEvidence::new(
+                Source::BluRay,
+                0.65,
+                Origin::Temporal,
+                "finished 1+ year ago + batch",
+            ),
+            SourceEvidence::new(
+                Source::Web,
+                0.85,
+                Origin::Ffprobe,
+                "AAC audio without lossless track",
+            ),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::BluRay);
+        assert!(
+            !result.needs_review,
+            "BD-with-AAC release should classify cleanly, not need review"
+        );
+        // After AAC-Web suppression, BluRay 0.95 is the only strong
+        // signal and rule 2 agrees, so rule 1's strong-shortcut fires.
+        // Either Rule1Strong or Rule2Sum is fine; the regression is
+        // about NOT landing in a conflict path.
+        assert!(
+            !matches!(
+                result.decision_rule,
+                DecisionRule::Rule4Conflict | DecisionRule::Rule5GroundTruthVeto
+            ),
+            "should land in a clean-win path, not a conflict path; got {:?}",
+            result.decision_rule
+        );
+        // Filtered evidence should not include the dropped AAC-Web pieces.
+        assert!(
+            result.evidence.iter().all(|e| !(e.source == Source::Web
+                && (e.detail.starts_with("web audio (")
+                    || e.detail == "AAC audio without lossless track"))),
+            "AAC-Web evidence should be filtered out when BD keyword is present"
+        );
+    }
+
+    #[test]
+    fn aggregate_keeps_aac_web_when_filename_lacks_bd() {
+        // Counter-case: AAC-Web evidence should still fire when there's
+        // no strong BD keyword in the filename. Releases with only AAC
+        // and no BD label legitimately come from streaming.
+        let evidence = vec![
+            SourceEvidence::new(Source::Web, 0.75, Origin::Filename, "web audio (aac)"),
+            SourceEvidence::new(
+                Source::Web,
+                0.85,
+                Origin::Ffprobe,
+                "AAC audio without lossless track",
+            ),
+        ];
+        let result = aggregate(&evidence);
+        assert_eq!(result.source, Source::Web);
     }
 }

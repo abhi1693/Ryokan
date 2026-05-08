@@ -124,6 +124,18 @@
 <div class="library-grid" id="library-grid">
     {% for s in library %}
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
+        {# Bulk-select checkbox overlay (issue #125). Hidden until the
+           library grid enters .selecting mode (see static/js/index.js
+           toggleBulkSelectMode). All click handling happens in a
+           document-level capture-phase listener in index.js — running
+           there guarantees we fire before HTMX's body-wide hx-boost
+           listener can react to the click, regardless of whether the
+           click landed on the chip or on the card body. The chip
+           itself is just a styled <input>; no inline onclick needed. #}
+        <input type="checkbox"
+               class="series-card-select"
+               aria-label="Select for bulk action"
+               tabindex="-1">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
             {# Decorative — the title renders as visible text in
@@ -159,6 +171,105 @@
     {% endfor %}
 </div>
 {% endif %}
+
+{# Bulk action toolbar (issue #125). Mounted as soon as the user
+   enters bulk-select mode (see toggleBulkSelectMode in index.js).
+   Two layouts share the same markup:
+   - Desktop: pill at the bottom of the viewport (default styling).
+   - Mobile: replaces the bottom mobile-tabbar with tab-shaped slots
+     (icon-on-top, label-below), driven by the @media block in
+     index.css. JS toggles `body.bulk-selecting` so the regular
+     mobile-tabbar can hide itself out of the way.
+   Each button carries an SVG icon — visible always, but on desktop
+   it sits inline next to the label and on mobile it stacks above. #}
+<div id="bulk-action-toolbar" class="bulk-action-toolbar" aria-live="polite" hidden>
+    <div class="bulk-action-toolbar-inner">
+        <span class="bulk-action-count">
+            <span class="bulk-action-count-icon" aria-hidden="true">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            </span>
+            <span class="bulk-action-count-text"><span id="bulk-action-count-num">0</span> selected</span>
+        </span>
+        <button type="button" class="bulk-action-btn bulk-action-btn-ghost" onclick="toggleSelectAllVisible()" id="bulk-action-select-all-btn">
+            <svg class="bulk-action-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+            <span class="bulk-action-label">Select all</span>
+        </button>
+        <span class="bulk-action-divider" aria-hidden="true"></span>
+        <button type="button" class="bulk-action-btn bulk-action-btn-secondary" onclick="openBulkMonitorModal()" id="bulk-action-monitor-btn" disabled>
+            <svg class="bulk-action-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <span class="bulk-action-label">Set monitor mode</span>
+        </button>
+        <button type="button" class="bulk-action-btn bulk-action-btn-danger" onclick="openBulkDeleteModal()" id="bulk-action-delete-btn" disabled>
+            <svg class="bulk-action-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg>
+            <span class="bulk-action-label">Delete</span>
+        </button>
+        <span class="bulk-action-divider" aria-hidden="true"></span>
+        <button type="button" class="bulk-action-btn bulk-action-btn-ghost" onclick="exitBulkSelectMode()">
+            <svg class="bulk-action-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <span class="bulk-action-label">Done</span>
+        </button>
+    </div>
+</div>
+
+{# Bulk delete confirmation modal. Distinct from the per-row
+   data-ryokan-confirm-* pattern because we collect a delete-files
+   checkbox alongside the confirmation. Recycle bin (#123) hasn't
+   shipped yet, so file removal is a permanent unlink — confirmation
+   copy emphasises "cannot be undone." #}
+<div class="modal-backdrop" id="bulk-delete-modal" style="display:none" onclick="closeBulkDeleteModal(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px">
+        <div class="modal-header">
+            <h3>Remove from library</h3>
+            <button type="button" class="btn-icon" onclick="closeBulkDeleteModal(event)" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p style="margin: 0 0 12px;">Remove <strong><span id="bulk-delete-count">0</span> series</strong> from your library.</p>
+            <label class="checkbox-row" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius: var(--radius); background: var(--bg-elevated);">
+                <input type="checkbox" id="bulk-delete-files-toggle" style="margin-top: 3px;">
+                <span>
+                    <strong style="display:block; color: var(--text-bright); font-size: 14px;">Also delete files from disk</strong>
+                    <span class="form-hint" style="display:block; margin-top: 2px;">Permanently remove the on-disk media folders and tell every download client to drop the active torrents. <strong style="color: var(--red);">Cannot be undone.</strong></span>
+                </span>
+            </label>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeBulkDeleteModal(event)">Cancel</button>
+            <span class="modal-footer-spacer"></span>
+            <button type="button" id="bulk-delete-confirm-btn" class="btn btn-danger" onclick="confirmBulkDelete()">Remove from library</button>
+        </div>
+    </div>
+</div>
+
+{# Bulk monitor mode picker. Reuses the .modal primitives. Distinct
+   from the per-series #monitor-modal because the bulk flow needs to
+   collect a single mode choice for many series rather than one. #}
+<div class="modal-backdrop" id="bulk-monitor-modal" style="display:none" onclick="closeBulkMonitorModal(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px">
+        <div class="modal-header">
+            <h3>Set monitor mode</h3>
+            <button type="button" class="btn-icon" onclick="closeBulkMonitorModal(event)" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" style="margin: 0 0 16px;">Apply the same monitor mode to <span id="bulk-monitor-count">0</span> selected series.</p>
+            <div class="monitor-options" id="bulk-monitor-options">
+                <button type="button" class="monitor-option-btn" data-mode="all">All episodes</button>
+                <button type="button" class="monitor-option-btn" data-mode="future">Future only</button>
+                <button type="button" class="monitor-option-btn" data-mode="missing">Missing</button>
+                <button type="button" class="monitor-option-btn" data-mode="existing">Existing</button>
+                <button type="button" class="monitor-option-btn" data-mode="none">None</button>
+                <button type="button" class="monitor-option-btn" data-mode="sync">Sync from AL/MAL</button>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeBulkMonitorModal(event)">Cancel</button>
+            <button type="button" id="bulk-monitor-confirm-btn" class="btn btn-primary" onclick="confirmBulkMonitor()" disabled>Apply</button>
+        </div>
+    </div>
+</div>
 
 <div class="modal-backdrop" id="add-modal" style="display:none" onclick="closeAddModal(event)">
     <div class="modal" onclick="event.stopPropagation()">

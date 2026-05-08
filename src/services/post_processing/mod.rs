@@ -1302,11 +1302,19 @@ async fn import_torrent(
                 // helper below would have to re-read.
                 if post.needs_review {
                     let verdict = post.label();
+                    // The event field is i32 representing the
+                    // percent (0..=100). `post.confidence` is f32 in
+                    // [0.0, 1.0], so cast directly truncates 0.50
+                    // to 0 — Discord then renders "0%" for any
+                    // sub-1.0 verdict, which is every needs-review
+                    // case. Multiply by 100 first so the value sent
+                    // matches the percent the user expects.
+                    let confidence_pct = (post.confidence * 100.0).round() as i32;
                     crate::services::notifications::emit_classifier_needs_review(
                         state,
                         target_series_id,
                         ep_num,
-                        post.confidence as i32,
+                        confidence_pct,
                         &verdict,
                     )
                     .await;
