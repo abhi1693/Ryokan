@@ -123,7 +123,7 @@
 {% else %}
 <div class="library-grid" id="library-grid">
     {% for s in library %}
-    <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}" data-series-id="{{ s.id }}">
+    <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
            toggleBulkSelectMode). All click handling happens in a

@@ -376,7 +376,7 @@ function selectAllVisibleSeries() {
     document.querySelectorAll('.series-card').forEach(function (card) {
         // Skip cards filtered out by liveLibrarySearch (display: none).
         if (card.style.display === 'none') return;
-        var id = parseInt(card.dataset.seriesId, 10);
+        var id = parseInt(card.id.slice(7), 10);
         if (!id || bulkSelectedIds.has(id)) return;
         bulkSelectedIds.add(id);
         card.classList.add('selected');
@@ -396,7 +396,7 @@ function areAllVisibleSelected() {
         var card = cards[i];
         if (card.style.display === 'none') continue;
         anyVisible = true;
-        var id = parseInt(card.dataset.seriesId, 10);
+        var id = parseInt(card.id.slice(7), 10);
         if (!id || !bulkSelectedIds.has(id)) {
             allSelected = false;
             break;
@@ -413,7 +413,7 @@ function toggleSelectAllVisible() {
     if (areAllVisibleSelected()) {
         document.querySelectorAll('.series-card').forEach(function (card) {
             if (card.style.display === 'none') return;
-            var id = parseInt(card.dataset.seriesId, 10);
+            var id = parseInt(card.id.slice(7), 10);
             if (!id || !bulkSelectedIds.has(id)) return;
             bulkSelectedIds.delete(id);
             card.classList.remove('selected');
@@ -653,7 +653,7 @@ if (!window.__ryokanBulkSelectInit) {
         if (!card) return;
         ev.preventDefault();
         ev.stopPropagation();
-        var id = parseInt(card.dataset.seriesId, 10);
+        var id = parseInt(card.id.slice(7), 10);
         if (!id) return;
         toggleSeriesSelectById(id);
     }, true);

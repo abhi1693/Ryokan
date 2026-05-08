@@ -5,6 +5,7 @@ use crate::models::series;
 use crate::services::anilist;
 
 pub mod bulk;
+pub mod cleanup;
 pub mod crud;
 pub mod episodes;
 pub mod pages;

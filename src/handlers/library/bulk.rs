@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::models::log::LogCategory;
-use crate::models::{config, grabbed_torrents, series};
+use crate::models::{config, series};
 use crate::services::logger;
 
 /// Per-series outcome envelope returned from synchronous bulk endpoints.
@@ -113,6 +113,10 @@ pub async fn bulk_monitor(
     }
 
     let failed_ids: Vec<i64> = failed.iter().map(|f| f.series_id).collect();
+    // `mode` is user-supplied; sanitize before it lands in the log
+    // detail. Per-row's `remove_series` does the same for its log
+    // line. failed_ids is i64-only so safe to format directly.
+    let safe_mode = crate::handlers::auth::sanitize_for_log(&req.mode);
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -123,7 +127,7 @@ pub async fn bulk_monitor(
         ),
         &format!(
             "action=monitor_set mode={} failed_ids={:?}",
-            req.mode, failed_ids
+            safe_mode, failed_ids
         ),
     )
     .await;
@@ -223,12 +227,17 @@ pub async fn bulk_delete(
 /// String>` so the loop can collect failures into `BulkOutcome.failed`
 /// without aborting the batch.
 ///
-/// Order of operations matters: torrent-client cleanup first (failures
-/// are best-effort; logged but not fatal), then on-disk folder removal,
-/// then `series::remove` for the DB cascade. If we DB-removed first,
-/// a subsequent `grabbed_torrents` lookup for the file/torrent
-/// cleanup would return nothing (FK cascade dropped the rows) and
-/// active torrents would orphan in their clients.
+/// Order of operations: torrent-client + folder cleanup via the
+/// shared [`super::cleanup::cleanup_series_files`] helper (which the
+/// per-row [`super::crud::remove_series`] handler also uses), then
+/// `series::remove` for the DB cascade. If the DB cascade ran first,
+/// the helper's `grabbed_torrents` lookup would return nothing (FK
+/// cascade dropped the rows) and active torrents would orphan.
+///
+/// Partial cleanup failures (folder refused / error, per-grab client
+/// errors) are surfaced as a `BulkFailure.reason` rather than counted
+/// as success — user needs to know when their `delete_files=true`
+/// request didn't actually remove the files.
 async fn delete_one_series(
     state: &AppState,
     series_id: i64,
@@ -236,47 +245,36 @@ async fn delete_one_series(
     media_root: Option<&str>,
 ) -> Result<(), String> {
     if delete_files {
-        // 1. Tell each grab's download client to drop the torrent +
-        //    its files. Best-effort: per-client failures log but don't
-        //    fail the series. The user explicitly asked for files-
-        //    out-too; a transient client outage shouldn't pin the
-        //    series in their library forever.
-        let hashes = grabbed_torrents::get_all_for_series(&state.db, series_id)
+        // Look up the series row for `folder_name` (and to detect
+        // stale-tab IDs where the row no longer exists). Per-row's
+        // handler does the same lookup; bulk has to do it too
+        // because the helper takes `folder_name: &str`.
+        let tracked = series::get_by_id(&state.db, series_id)
             .await
-            .map_err(|e| format!("list grabs: {e}"))?;
-        for &(_grab_id, ref hash, dc_id) in &hashes {
-            if hash.is_empty() {
-                continue;
-            }
-            if let Some(client) = state.resolve_grab_client(dc_id, hash).await {
-                let _ = client.delete(hash, true).await;
-            }
-        }
+            .map_err(|e| format!("lookup: {e}"))?;
+        let folder_name = tracked
+            .as_ref()
+            .map(|t| t.folder_name.as_str())
+            .unwrap_or("");
 
-        // 2. Remove the on-disk folder. spawn_blocking because
-        //    remove_dir_all walks every file and a deep BD library
-        //    folder can take a few seconds. media_root is None when
-        //    config wasn't loadable; in that case we skip file
-        //    removal but still proceed to the DB delete (the user
-        //    pressed Delete, the entry should disappear from their
-        //    library — orphaned files are recoverable).
-        if let Some(root) = media_root
-            && let Ok(Some(s)) = series::get_by_id(&state.db, series_id).await
-            && !s.folder_name.is_empty()
-        {
-            let folder = std::path::PathBuf::from(root).join(&s.folder_name);
-            if folder.exists() {
-                let folder_for_blocking = folder.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    std::fs::remove_dir_all(folder_for_blocking)
-                })
-                .await;
-            }
+        let report =
+            super::cleanup::cleanup_series_files(state, series_id, folder_name, media_root).await?;
+        if !report.is_clean() {
+            // Don't `?` — DB cascade still runs even on partial
+            // cleanup so the library entry disappears (matches
+            // per-row behavior; user asked for delete and we
+            // honor that). Surface the partial-failure detail so
+            // the user sees what didn't get cleaned.
+            let reason = report.partial_failure_reason();
+            series::remove(&state.db, series_id)
+                .await
+                .map_err(|e| format!("db remove after partial cleanup: {e}"))?;
+            return Err(reason);
         }
     }
 
-    // 3. DB cascade. `series::remove` is the canonical path; it does
-    //    the rss_seen NULL-out + every other FK-cascading delete.
+    // DB cascade. `series::remove` is the canonical path; it does
+    // the rss_seen NULL-out + every other FK-cascading delete.
     series::remove(&state.db, series_id)
         .await
         .map_err(|e| format!("db remove: {e}"))
@@ -376,14 +374,12 @@ mod tests {
 
     #[tokio::test]
     async fn bulk_monitor_isolates_per_series_failures() {
-        // Mix a real id with a non-existent one. The non-existent
-        // one's UPDATE affects 0 rows in SQLite, which sqlx returns
-        // as Ok(()), so we won't actually see a failure for it via
-        // the model's update path. This test is therefore the
-        // happy-path case for the real id + a "no rows updated"
-        // case for the missing id, both succeed at the SQL layer.
-        // The test still pins the loop-continues-on-error contract
-        // by asserting the real id ends up in `succeeded`.
+        // Mix a real id with a non-existent one. After PR #164's
+        // preflight existence check, the missing id lands in
+        // `failed` (not silently swallowed), so the real id still
+        // writes successfully and the loop-continues-on-error
+        // contract is pinned in BOTH directions: real id in
+        // succeeded, missing id in failed.
         let pool = in_memory_pool().await;
         let a = insert_series(&pool, 1, "A").await;
         let req = BulkMonitorRequest {
@@ -393,6 +389,13 @@ mod tests {
         let state = crate::test_support::build_test_app_state(pool.clone(), None);
         let Json(outcome) = bulk_monitor(axum::extract::State(state), Json(req)).await;
         assert!(outcome.succeeded.contains(&a));
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(outcome.failed[0].series_id, 99999);
+        assert!(
+            outcome.failed[0].reason.contains("no longer exists"),
+            "expected stale-id failure reason, got: {}",
+            outcome.failed[0].reason
+        );
         // Real id wrote successfully.
         let (mode, _) = read_monitor_state(&pool, a).await;
         assert_eq!(mode, "missing");
@@ -452,5 +455,212 @@ mod tests {
         let Json(outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
         assert!(outcome.succeeded.is_empty());
         assert!(outcome.failed.is_empty());
+    }
+
+    /// Persist a `Config` row with the given media_root for the
+    /// path-traversal test. The bulk handler reads `cfg.media_root`
+    /// once up front when `delete_files=true` and feeds it into
+    /// `cleanup_series_files` for the canonicalize+starts_with guard.
+    async fn save_media_root(db: &SqlitePool, media_root: &str) {
+        let cfg = crate::models::config::Config {
+            media_root: media_root.to_string(),
+            ..Default::default()
+        };
+        crate::models::config::save_config(db, &cfg)
+            .await
+            .expect("save config");
+    }
+
+    /// CVE-shape: pin the `series_canon.starts_with(&media_root_canon)`
+    /// guard for the bulk-delete path. PR #164 review flagged that the
+    /// previous `bulk::delete_one_series` skipped canonicalization
+    /// entirely — a corrupted `folder_name = "../escape"` would have
+    /// `remove_dir_all`'d an arbitrary directory. The shared
+    /// `cleanup_series_files` helper restores the guard; this test
+    /// pins it for bulk so a future regression on either the helper
+    /// or the bulk caller surfaces immediately.
+    #[tokio::test]
+    async fn bulk_delete_refuses_traversal_when_resolved_path_escapes_media_root() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let media_root = tmp.path().join("media");
+        let escape = tmp.path().join("escape");
+        std::fs::create_dir(&media_root).unwrap();
+        std::fs::create_dir(&escape).unwrap();
+        let sentinel = escape.join("sentinel.txt");
+        std::fs::write(&sentinel, b"do not delete").unwrap();
+
+        let pool = in_memory_pool().await;
+        let series_id = insert_series(&pool, 1001, "Show").await;
+        // Override folder_name to the traversal payload — bypassing
+        // `set_folder`'s `sanitize_folder_name` validator that would
+        // normally reject this. Models a row predating the validator
+        // or one written by a manual SQL edit.
+        sqlx::query("UPDATE series SET folder_name = ? WHERE id = ?")
+            .bind("../escape")
+            .bind(series_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        save_media_root(&pool, media_root.to_str().unwrap()).await;
+        let state = crate::test_support::build_test_app_state(pool.clone(), None);
+
+        let req = BulkDeleteRequest {
+            series_ids: vec![series_id],
+            delete_files: true,
+        };
+        let Json(outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
+
+        // Series is still removed from the library DB (user asked to
+        // delete; we honor that), but the partial-cleanup signal
+        // surfaces as a BulkFailure so the user knows files weren't
+        // touched.
+        assert_eq!(outcome.succeeded.len(), 0);
+        assert_eq!(outcome.failed.len(), 1);
+        let failure = &outcome.failed[0];
+        assert_eq!(failure.series_id, series_id);
+        assert!(
+            failure.reason.contains("refused") || failure.reason.contains("outside media root"),
+            "expected traversal-refused reason, got: {}",
+            failure.reason
+        );
+
+        // Critical: the escape target survived. If the traversal guard
+        // ever flips, this assertion catches it.
+        assert!(sentinel.exists(), "escape target sentinel must survive");
+        assert!(escape.exists(), "escape dir must survive");
+        assert!(media_root.exists(), "media_root must survive");
+
+        // DB row is gone (delete still proceeds despite the partial
+        // cleanup; matches per-row's behavior of going through with
+        // the irreversible step).
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM series WHERE id = ?")
+            .bind(series_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    /// Issue #28 PR C — pin the `respects_seed_rules` skip-client-delete
+    /// branch for the bulk path. Previously `bulk::delete_one_series`
+    /// unconditionally called `client.delete(hash, true)`, which would
+    /// silently violate PT ratio policy for every grab on a 50-series
+    /// bulk delete. The shared helper now honors the flag; this test
+    /// pins it.
+    #[tokio::test]
+    async fn bulk_delete_honors_seed_rules() {
+        use crate::services::download_client::{
+            AddOutcome, DownloadClient, DownloadFile, DownloadItem, SelectiveOutcome,
+        };
+        use async_trait::async_trait;
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Default)]
+        struct RecordingClient {
+            deletes: Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl DownloadClient for RecordingClient {
+            async fn test(&self) -> Result<String, String> {
+                Ok("mock".into())
+            }
+            async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+                Ok(AddOutcome::Added)
+            }
+            async fn add_torrent_with_file_filter(
+                &self,
+                _url: &str,
+                _hash: &str,
+                _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+            ) -> Result<SelectiveOutcome, String> {
+                Ok(SelectiveOutcome::FullDownload)
+            }
+            async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+                Ok(vec![])
+            }
+            async fn get_files(&self, _hash: &str) -> Result<Vec<DownloadFile>, String> {
+                Ok(vec![])
+            }
+            async fn pause(&self, _hash: &str) -> Result<(), String> {
+                Ok(())
+            }
+            async fn resume(&self, _hash: &str) -> Result<(), String> {
+                Ok(())
+            }
+            async fn delete(&self, hash: &str, _delete_files: bool) -> Result<(), String> {
+                self.deletes.lock().unwrap().push(hash.to_string());
+                Ok(())
+            }
+            async fn set_file_wanted(
+                &self,
+                _hash: &str,
+                _files: &[usize],
+                _wanted: bool,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn sonarr_impl_name(&self) -> &'static str {
+                "QBittorrent"
+            }
+            fn protocol(&self) -> &'static str {
+                "torrent"
+            }
+        }
+
+        let pool = in_memory_pool().await;
+        let series_id = insert_series(&pool, 2001, "Show").await;
+        // Two grabs: one with the seed-rule flag set, one without. The
+        // flagged hash must NOT reach client.delete; the unflagged
+        // hash must.
+        let kept_hash = "kept-hash-aaa";
+        let removed_hash = "removed-hash-bbb";
+        crate::test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            kept_hash,
+            "kept.torrent",
+            &[1],
+        )
+        .await;
+        crate::test_support::seed_grabbed_torrent(
+            &pool,
+            series_id,
+            removed_hash,
+            "removed.torrent",
+            &[2],
+        )
+        .await;
+        sqlx::query("UPDATE grabbed_torrents SET respect_seed_rules = 1 WHERE hash = ?")
+            .bind(kept_hash)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let recorder = Arc::new(RecordingClient::default());
+        let client: Arc<dyn DownloadClient> = recorder.clone();
+        let state = crate::test_support::build_test_app_state(pool.clone(), Some(client));
+
+        let req = BulkDeleteRequest {
+            series_ids: vec![series_id],
+            delete_files: true,
+        };
+        let Json(_outcome) = bulk_delete(axum::extract::State(state), Json(req)).await;
+
+        let observed = recorder.deletes.lock().unwrap();
+        assert_eq!(
+            observed.len(),
+            1,
+            "exactly one client.delete expected; got {:?}",
+            observed
+        );
+        assert_eq!(
+            observed[0], removed_hash,
+            "non-seed-rule hash should be the only one deleted"
+        );
+        assert!(
+            !observed.contains(&kept_hash.to_string()),
+            "seed-rule-flagged hash must NOT reach client.delete"
+        );
     }
 }
