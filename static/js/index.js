@@ -291,45 +291,111 @@ function escAttr(s) {
 
 // ── Bulk select (issue #125) ────────────────────────────────────────
 //
-// Selection state lives client-side; refresh clears it (matches the
-// user's mental model — "I selected some cards on this page", not "I
-// have a persistent selection that survives reloads"). A `Set` keyed
-// by integer series id; the card's `.selected` class is the visual
-// projection of membership.
+// Sonarr-style "edit mode" pattern. The "Select" toggle in the filter
+// row enters bulk-select mode, which makes every card a checkbox
+// target instead of a navigation link. Default browsing is unaffected;
+// the toolbar + checkboxes only appear when the user explicitly opts
+// in. Selection state lives client-side; mode exit clears it.
+//
+// Keyed by integer series id; the card's `.selected` class is the
+// visual projection of membership.
 
+var bulkSelectMode = false;
 var bulkSelectedIds = new Set();
 var bulkPendingMode = null;
 
-function toggleSeriesSelect(event, seriesId) {
-    // Stop propagation so the parent <a> (whose href is /series/<id>)
-    // doesn't navigate when the user clicks the checkbox itself.
-    event.stopPropagation();
+// Enter / exit bulk-select mode. The mode flag drives:
+//   - .library-grid.selecting class (CSS shows the chip on every card,
+//     suppresses the card-hover transform).
+//   - The "Select" toggle's appearance (becomes mauve-active when on).
+//   - The bottom toolbar's visibility.
+//   - The delegated click handler's preventDefault behavior on cards.
+function toggleBulkSelectMode() {
+    if (bulkSelectMode) {
+        exitBulkSelectMode();
+    } else {
+        enterBulkSelectMode();
+    }
+}
+
+function enterBulkSelectMode() {
+    bulkSelectMode = true;
+    var grid = document.getElementById('library-grid');
+    if (grid) grid.classList.add('selecting');
+    var toggle = document.getElementById('bulk-select-toggle');
+    if (toggle) {
+        toggle.classList.add('active');
+        var label = toggle.querySelector('.bulk-select-toggle-label');
+        if (label) label.textContent = 'Cancel';
+    }
+    renderBulkToolbar();
+}
+
+function exitBulkSelectMode() {
+    bulkSelectMode = false;
+    var grid = document.getElementById('library-grid');
+    if (grid) grid.classList.remove('selecting');
+    var toggle = document.getElementById('bulk-select-toggle');
+    if (toggle) {
+        toggle.classList.remove('active');
+        var label = toggle.querySelector('.bulk-select-toggle-label');
+        if (label) label.textContent = 'Select';
+    }
+    clearBulkSelection();
+    renderBulkToolbar();
+}
+
+// Toggle one series's selection state. Called from the delegated
+// click handler on the library grid (which preventDefaults the
+// card's <a> navigation while in selecting mode).
+function toggleSeriesSelectById(seriesId) {
     var card = document.getElementById('series-' + seriesId);
     if (!card) return;
     var checkbox = card.querySelector('.series-card-select');
-    var checked = checkbox ? checkbox.checked : false;
-    if (checked) {
-        bulkSelectedIds.add(seriesId);
-        card.classList.add('selected');
-    } else {
+    if (bulkSelectedIds.has(seriesId)) {
         bulkSelectedIds.delete(seriesId);
         card.classList.remove('selected');
+        if (checkbox) checkbox.checked = false;
+    } else {
+        bulkSelectedIds.add(seriesId);
+        card.classList.add('selected');
+        if (checkbox) checkbox.checked = true;
     }
+    renderBulkToolbar();
+}
+
+function selectAllVisibleSeries() {
+    if (!bulkSelectMode) return;
+    document.querySelectorAll('.series-card').forEach(function (card) {
+        // Skip cards filtered out by liveLibrarySearch (display: none).
+        if (card.style.display === 'none') return;
+        var id = parseInt(card.dataset.seriesId, 10);
+        if (!id || bulkSelectedIds.has(id)) return;
+        bulkSelectedIds.add(id);
+        card.classList.add('selected');
+        var cb = card.querySelector('.series-card-select');
+        if (cb) cb.checked = true;
+    });
     renderBulkToolbar();
 }
 
 function renderBulkToolbar() {
     var bar = document.getElementById('bulk-action-toolbar');
     var num = document.getElementById('bulk-action-count-num');
+    var monitorBtn = document.getElementById('bulk-action-monitor-btn');
     if (!bar || !num) return;
     num.textContent = String(bulkSelectedIds.size);
-    if (bulkSelectedIds.size > 0) {
+    // Toolbar visibility tracks selecting MODE, not selection count —
+    // the user wants context that they're in select mode even with
+    // nothing selected yet. Action buttons disable when N == 0.
+    if (bulkSelectMode) {
         bar.hidden = false;
         bar.classList.add('visible');
     } else {
         bar.hidden = true;
         bar.classList.remove('visible');
     }
+    if (monitorBtn) monitorBtn.disabled = bulkSelectedIds.size === 0;
 }
 
 function clearBulkSelection() {
@@ -401,12 +467,11 @@ function confirmBulkMonitor() {
     .then(function (r) { return r.json(); })
     .then(function (outcome) {
         renderBulkOutcome(outcome, 'Monitor mode updated');
-        // Page reload after the toast briefly displays. Per-episode
-        // monitor flags are recomputed server-side; the index page
-        // doesn't render those per-card so a partial DOM update would
-        // be a wash. Future bulk actions that affect visible badges
-        // (delete, upgrades) will refresh in place.
-        setTimeout(function () { location.reload(); }, 600);
+        // No reload necessary — the library page doesn't render
+        // per-episode monitor state. Series-detail pages will reflect
+        // the new monitor mode on next visit. Future bulk actions
+        // that affect visible badges (delete, upgrades) will refresh
+        // their per-card state in place from the response.
     })
     .catch(function (e) {
         if (confirmBtn) {
@@ -431,17 +496,24 @@ function renderBulkOutcome(outcome, verb) {
     var ok = (outcome.succeeded || []).length;
     var bad = (outcome.failed || []).length;
     if (!window.ryokanToast) return;
+    var modal = document.getElementById('bulk-monitor-modal');
+    if (modal) modal.style.display = 'none';
+
     if (bad === 0) {
+        // All succeeded: toast + exit mode (which clears selection).
         window.ryokanToast({ kind: 'success', title: verb, body: ok + ' succeeded', log: false, duration: 3000 });
-        var modal = document.getElementById('bulk-monitor-modal');
-        if (modal) modal.style.display = 'none';
-        clearBulkSelection();
+        exitBulkSelectMode();
     } else if (ok === 0) {
+        // All failed: keep mode open + selection intact so the user
+        // can retry without re-selecting.
         var first = outcome.failed[0];
         var summary = bad + ' failed';
         if (first) summary += '; ' + (first.reason || 'unknown error');
         window.ryokanToast({ kind: 'error', title: verb + ' failed', body: summary, log: true });
     } else {
+        // Partial: succeeded IDs cleared from selection, failed IDs
+        // remain so the user sees what still needs attention. Mode
+        // stays on.
         var failedSet = new Set(outcome.failed.map(function (f) { return f.series_id; }));
         var stillSelected = new Set();
         bulkSelectedIds.forEach(function (id) {
@@ -465,16 +537,35 @@ function renderBulkOutcome(outcome, verb) {
             log: true,
             duration: 6000
         });
-        var modal2 = document.getElementById('bulk-monitor-modal');
-        if (modal2) modal2.style.display = 'none';
     }
 }
 
-// One-shot Esc-to-clear listener. The `__ryokan*` boot guard pattern
-// keeps hx-boost re-execs of this file from accumulating duplicate
-// handlers on every nav-back into /.
+// One-shot global listeners. The `__ryokan*` boot guard pattern keeps
+// hx-boost re-execs of this file from accumulating duplicate handlers
+// on every nav-back into /.
 if (!window.__ryokanBulkSelectInit) {
     window.__ryokanBulkSelectInit = true;
+
+    // Delegated click handler on the grid. In selecting mode this
+    // intercepts every card click, preventDefaults the parent <a>'s
+    // navigation, and toggles selection. Outside selecting mode it
+    // does nothing — cards navigate as normal.
+    var grid = document.getElementById('library-grid');
+    if (grid) {
+        grid.addEventListener('click', function (ev) {
+            if (!bulkSelectMode) return;
+            var card = ev.target.closest('.series-card');
+            if (!card) return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            var id = parseInt(card.dataset.seriesId, 10);
+            if (!id) return;
+            toggleSeriesSelectById(id);
+        });
+    }
+
+    // Esc: exits the bulk monitor modal first if open; otherwise
+    // exits selecting mode (which clears the selection on the way out).
     document.addEventListener('keydown', function (ev) {
         if (ev.key !== 'Escape') return;
         var modal = document.getElementById('bulk-monitor-modal');
@@ -482,8 +573,8 @@ if (!window.__ryokanBulkSelectInit) {
             modal.style.display = 'none';
             return;
         }
-        if (bulkSelectedIds.size > 0) {
-            clearBulkSelection();
+        if (bulkSelectMode) {
+            exitBulkSelectMode();
         }
     });
 }

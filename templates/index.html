@@ -87,7 +87,14 @@
                was removed. Successively trimmed as the row grew —
                first for the always-reserved Clear slot, then for
                the height-matched (and so wider) dropdowns + search. #}
-            <button class="btn btn-primary" style="margin-left: 32px;" onclick="openAddModal()">+ Add Series</button>
+            <button type="button" id="bulk-select-toggle" class="btn btn-secondary btn-pill bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select multiple series for bulk actions">
+                <svg class="bulk-select-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline class="bulk-select-toggle-icon-default" points="9 11 12 14 22 4"/>
+                    <path class="bulk-select-toggle-icon-default" d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                <span class="bulk-select-toggle-label">Select</span>
+            </button>
+            <button class="btn btn-primary" style="margin-left: 12px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>
 </div>
@@ -124,14 +131,18 @@
 <div class="library-grid" id="library-grid">
     {% for s in library %}
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}" data-series-id="{{ s.id }}">
-        {# Bulk-select checkbox overlay (issue #125). Stops propagation
-           on click so the parent <a> doesn't navigate. State is mirrored
-           to the card via a `selected` class for the highlighted look;
-           the actual selection set lives in JS. #}
+        {# Bulk-select checkbox overlay (issue #125). Hidden until the
+           library grid enters .selecting mode (see static/js/index.js
+           toggleBulkSelectMode). In mode, the entire card body becomes
+           a click target for selection — the .library-grid delegated
+           handler in index.js preventDefaults the parent <a>'s
+           navigation and toggles selection, so we don't need an inline
+           onclick here. The native input stays for keyboard +
+           screen-reader semantics. #}
         <input type="checkbox"
                class="series-card-select"
                aria-label="Select for bulk action"
-               onclick="toggleSeriesSelect(event, {{ s.id }})">
+               tabindex="-1">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
             {# Decorative — the title renders as visible text in
@@ -168,15 +179,20 @@
 </div>
 {% endif %}
 
-{# Bulk action toolbar (issue #125). Hidden until at least one card is
-   checked; toggled via the `.visible` class from JS. Sticks to the
-   bottom of the viewport so it stays in reach while the user scrolls
-   through the grid selecting more cards. #}
+{# Bulk action toolbar (issue #125). Mounted as soon as the user
+   enters bulk-select mode (see toggleBulkSelectMode in index.js).
+   Bottom-stuck so it stays reachable while the user scrolls the
+   grid selecting more cards. The action buttons (currently Set
+   monitor mode) act on the selected set; "Done" exits mode +
+   clears selection. #}
 <div id="bulk-action-toolbar" class="bulk-action-toolbar" aria-live="polite" hidden>
     <div class="bulk-action-toolbar-inner">
         <span class="bulk-action-count"><span id="bulk-action-count-num">0</span> selected</span>
-        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkMonitorModal()">Set monitor mode</button>
-        <button type="button" class="btn btn-ghost btn-sm" onclick="clearBulkSelection()">Clear</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="selectAllVisibleSeries()">Select all</button>
+        <span class="bulk-action-divider" aria-hidden="true"></span>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkMonitorModal()" id="bulk-action-monitor-btn">Set monitor mode</button>
+        <span class="bulk-action-divider" aria-hidden="true"></span>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="exitBulkSelectMode()">Done</button>
     </div>
 </div>
 

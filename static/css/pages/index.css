@@ -405,10 +405,11 @@
     position: relative;
 }
 
-/* The checkbox is a real <input type="checkbox">, kept for
-   accessibility (keyboard focus, screen-reader semantics) and so the
-   :checked CSS state still drives the visual. We strip its native
-   appearance and re-skin from scratch. */
+/* The checkbox is a real <input type="checkbox">, kept for screen-
+   reader semantics and so the :checked CSS state drives the visual.
+   We strip its native appearance and re-skin from scratch. Hidden
+   entirely outside selecting mode (display: none); the parent grid
+   gets the .selecting class which reveals it. */
 .series-card-select {
     position: absolute;
     top: 10px;
@@ -420,6 +421,7 @@
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
+    display: none;
 
     /* Glassy dark backdrop so the indicator stays visible regardless
        of cover-art brightness. backdrop-filter blurs the bit of cover
@@ -431,31 +433,38 @@
     border: 1.5px solid rgba(232, 232, 240, 0.35);
     border-radius: 7px;
 
-    /* Hidden by default; revealed on card hover or when checked. The
-       slight scale-up on reveal gives a tactile pop. */
-    opacity: 0;
-    transform: scale(0.85);
     transition:
-        opacity 0.18s ease-out,
-        transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1),
         background 0.18s ease-out,
         border-color 0.18s ease-out,
-        box-shadow 0.18s ease-out;
+        box-shadow 0.18s ease-out,
+        transform 0.12s ease-out;
 }
 
-/* Reveal on card hover, keyboard focus, or when checked. */
-.series-card:hover .series-card-select,
-.series-card-select:focus-visible,
-.series-card-select:checked {
-    opacity: 1;
-    transform: scale(1);
+/* In selecting mode, every card's chip is visible. The reveal is a
+   spring-scale + fade-in via a one-shot @keyframes so entering the
+   mode feels like a deliberate state change rather than an instant
+   pop. */
+.library-grid.selecting .series-card-select {
+    display: block;
+    animation: bulk-select-chip-in 0.22s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 
-/* Hover (unchecked): brighten the border so the indicator reads as
+@keyframes bulk-select-chip-in {
+    from {
+        opacity: 0;
+        transform: scale(0.6) translateY(-4px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+/* Hover (unchecked): brighten the border so the chip reads as
    "ready to click" without committing to mauve yet. */
-.series-card:hover .series-card-select:not(:checked) {
-    border-color: rgba(232, 232, 240, 0.7);
-    background: rgba(15, 15, 19, 0.7);
+.library-grid.selecting .series-card:hover .series-card-select:not(:checked) {
+    border-color: rgba(232, 232, 240, 0.75);
+    background: rgba(15, 15, 19, 0.75);
 }
 
 .series-card-select:focus-visible {
@@ -482,6 +491,15 @@
     background-size: 16px 16px;
 }
 
+/* In selecting mode, the card-hover lift turns into a "selectable"
+   cue (slightly different curve from default-mode hover so the user
+   senses the mode shift). The body click toggles selection rather
+   than navigating; cursor stays pointer. */
+.library-grid.selecting .series-card:hover {
+    transform: translateY(-1px);
+    border-color: var(--border-accent);
+}
+
 /* Selected card: thicker mauve border + soft mauve glow + a tiny lift
    so the selected state reads at-a-glance even when the user is
    scrolled past the checkbox. The transform is scoped to the card
@@ -498,6 +516,46 @@
     /* Override the existing card-hover transform so selected state
        wins on hover instead of competing transforms double-stacking. */
     transform: translateY(-3px);
+    border-color: var(--accent);
+}
+
+/* "Select" toggle button in the filter row. Default-mode look matches
+   the other btn-secondary pills; active state (mode on) inverts to
+   mauve fill so the user has a constant visual confirmation that
+   they're in selecting mode. */
+.bulk-select-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: background 0.15s ease-out, color 0.15s ease-out, border-color 0.15s ease-out;
+}
+.bulk-select-toggle.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+}
+.bulk-select-toggle.active:hover {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+.bulk-select-toggle-icon {
+    flex-shrink: 0;
+}
+
+/* Visual divider in the toolbar between groups (count | actions | done). */
+.bulk-action-divider {
+    width: 1px;
+    height: 18px;
+    background: rgba(255, 255, 255, 0.08);
+    flex-shrink: 0;
+}
+
+/* Disabled action button: muted look so the user can tell the action
+   is gated on selection without reading the disabled attribute. */
+.bulk-action-toolbar .btn-sm:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+    pointer-events: none;
 }
 
 /* Sticky bottom toolbar. Pill-shaped capsule centered at the bottom,
