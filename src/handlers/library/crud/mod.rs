@@ -511,6 +511,40 @@ pub async fn set_folder(
 /// tells the user "Will follow your AL/MAL list" until that happens.
 pub(crate) const MONITOR_MODE_SYNC_SENTINEL: &str = "sync";
 
+/// Apply a monitor-mode change to one series + recompute the per-episode
+/// monitoring rows that depend on it. Extracted from `set_monitoring`
+/// (the per-series handler) so `handlers::library::bulk` can reuse the
+/// same write path without duplicating the sentinel-vs-explicit branch.
+///
+/// Returns `Result<(), String>` to fit the bulk-handler aggregation
+/// shape (per-series failures collected into `BulkOutcome.failed`
+/// rather than aborting the batch). The string is user-displayable;
+/// callers may surface it directly in toasts / failure modals.
+pub(crate) async fn apply_monitor_mode(
+    db: &sqlx::SqlitePool,
+    series_id: i64,
+    mode_str: &str,
+) -> Result<(), String> {
+    if mode_str == MONITOR_MODE_SYNC_SENTINEL {
+        series::update_monitor_mode_manual_override(db, series_id, false)
+            .await
+            .map_err(|e| format!("Failed to clear monitor override: {e}"))?;
+    } else {
+        let mode = monitoring::MonitorMode::from_str(mode_str);
+        series::update_monitor_mode_with_override(db, series_id, mode.as_str(), true)
+            .await
+            .map_err(|e| format!("Failed to set monitor mode: {e}"))?;
+    }
+    // Best-effort recompute. A failure here means the per-episode
+    // monitor flags are stale until the next sync tick, but the
+    // primary write succeeded; report success to the caller and
+    // let the supervised loop fix the per-episode rows on its
+    // next pass. Same posture as the existing `set_monitoring`
+    // handler, which logs the recompute error and returns 200.
+    let _ = monitoring_service::recompute_series_monitoring(db, series_id).await;
+    Ok(())
+}
+
 #[utoipa::path(
     post,
     path = "/api/library/monitoring",

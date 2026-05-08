@@ -123,7 +123,15 @@
 {% else %}
 <div class="library-grid" id="library-grid">
     {% for s in library %}
-    <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
+    <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}" data-series-id="{{ s.id }}">
+        {# Bulk-select checkbox overlay (issue #125). Stops propagation
+           on click so the parent <a> doesn't navigate. State is mirrored
+           to the card via a `selected` class for the highlighted look;
+           the actual selection set lives in JS. #}
+        <input type="checkbox"
+               class="series-card-select"
+               aria-label="Select for bulk action"
+               onclick="toggleSeriesSelect(event, {{ s.id }})">
         <div class="series-cover">
             {% if !s.cover_url.is_empty() %}
             {# Decorative — the title renders as visible text in
@@ -159,6 +167,47 @@
     {% endfor %}
 </div>
 {% endif %}
+
+{# Bulk action toolbar (issue #125). Hidden until at least one card is
+   checked; toggled via the `.visible` class from JS. Sticks to the
+   bottom of the viewport so it stays in reach while the user scrolls
+   through the grid selecting more cards. #}
+<div id="bulk-action-toolbar" class="bulk-action-toolbar" aria-live="polite" hidden>
+    <div class="bulk-action-toolbar-inner">
+        <span class="bulk-action-count"><span id="bulk-action-count-num">0</span> selected</span>
+        <button type="button" class="btn btn-secondary btn-sm" onclick="openBulkMonitorModal()">Set monitor mode</button>
+        <button type="button" class="btn btn-ghost btn-sm" onclick="clearBulkSelection()">Clear</button>
+    </div>
+</div>
+
+{# Bulk monitor mode picker. Reuses the .modal primitives. Distinct
+   from the per-series #monitor-modal because the bulk flow needs to
+   collect a single mode choice for many series rather than one. #}
+<div class="modal-backdrop" id="bulk-monitor-modal" style="display:none" onclick="closeBulkMonitorModal(event)">
+    <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px">
+        <div class="modal-header">
+            <h3>Set monitor mode</h3>
+            <button type="button" class="btn-icon" onclick="closeBulkMonitorModal(event)" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint">Apply the same monitor mode to <span id="bulk-monitor-count">0</span> selected series.</p>
+            <div class="monitor-options" id="bulk-monitor-options">
+                <button type="button" class="monitor-option-btn" data-mode="all">All episodes</button>
+                <button type="button" class="monitor-option-btn" data-mode="future">Future only</button>
+                <button type="button" class="monitor-option-btn" data-mode="missing">Missing</button>
+                <button type="button" class="monitor-option-btn" data-mode="existing">Existing</button>
+                <button type="button" class="monitor-option-btn" data-mode="none">None</button>
+                <button type="button" class="monitor-option-btn" data-mode="sync">Sync from AL/MAL</button>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeBulkMonitorModal(event)">Cancel</button>
+            <button type="button" id="bulk-monitor-confirm-btn" class="btn btn-primary" onclick="confirmBulkMonitor()" disabled>Apply</button>
+        </div>
+    </div>
+</div>
 
 <div class="modal-backdrop" id="add-modal" style="display:none" onclick="closeAddModal(event)">
     <div class="modal" onclick="event.stopPropagation()">

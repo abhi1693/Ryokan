@@ -288,3 +288,202 @@ function escAttr(s) {
     if (!s) return '';
     return s.replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+// ── Bulk select (issue #125) ────────────────────────────────────────
+//
+// Selection state lives client-side; refresh clears it (matches the
+// user's mental model — "I selected some cards on this page", not "I
+// have a persistent selection that survives reloads"). A `Set` keyed
+// by integer series id; the card's `.selected` class is the visual
+// projection of membership.
+
+var bulkSelectedIds = new Set();
+var bulkPendingMode = null;
+
+function toggleSeriesSelect(event, seriesId) {
+    // Stop propagation so the parent <a> (whose href is /series/<id>)
+    // doesn't navigate when the user clicks the checkbox itself.
+    event.stopPropagation();
+    var card = document.getElementById('series-' + seriesId);
+    if (!card) return;
+    var checkbox = card.querySelector('.series-card-select');
+    var checked = checkbox ? checkbox.checked : false;
+    if (checked) {
+        bulkSelectedIds.add(seriesId);
+        card.classList.add('selected');
+    } else {
+        bulkSelectedIds.delete(seriesId);
+        card.classList.remove('selected');
+    }
+    renderBulkToolbar();
+}
+
+function renderBulkToolbar() {
+    var bar = document.getElementById('bulk-action-toolbar');
+    var num = document.getElementById('bulk-action-count-num');
+    if (!bar || !num) return;
+    num.textContent = String(bulkSelectedIds.size);
+    if (bulkSelectedIds.size > 0) {
+        bar.hidden = false;
+        bar.classList.add('visible');
+    } else {
+        bar.hidden = true;
+        bar.classList.remove('visible');
+    }
+}
+
+function clearBulkSelection() {
+    bulkSelectedIds.forEach(function (id) {
+        var card = document.getElementById('series-' + id);
+        if (card) {
+            card.classList.remove('selected');
+            var cb = card.querySelector('.series-card-select');
+            if (cb) cb.checked = false;
+        }
+    });
+    bulkSelectedIds.clear();
+    renderBulkToolbar();
+}
+
+function openBulkMonitorModal() {
+    if (bulkSelectedIds.size === 0) return;
+    var modal = document.getElementById('bulk-monitor-modal');
+    var count = document.getElementById('bulk-monitor-count');
+    var confirmBtn = document.getElementById('bulk-monitor-confirm-btn');
+    if (count) count.textContent = String(bulkSelectedIds.size);
+    bulkPendingMode = null;
+    if (confirmBtn) confirmBtn.disabled = true;
+    document.querySelectorAll('#bulk-monitor-options .monitor-option-btn').forEach(function (btn) {
+        btn.classList.remove('active');
+        btn.onclick = function () { selectBulkMonitorMode(btn); };
+    });
+    if (modal) modal.style.display = 'flex';
+}
+
+function closeBulkMonitorModal(event) {
+    // Allow the close button + backdrop click + explicit programmatic
+    // close to all hit this. The backdrop click sets event.target ===
+    // event.currentTarget; the close button uses .btn-icon. Anything
+    // else (e.g. clicks bubbling up from inside the panel) is ignored.
+    if (event && event.target && event.currentTarget && event.target !== event.currentTarget) {
+        if (!event.target.closest('.btn-icon') && !event.target.classList.contains('btn-secondary')) {
+            return;
+        }
+    }
+    var modal = document.getElementById('bulk-monitor-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+function selectBulkMonitorMode(btn) {
+    document.querySelectorAll('#bulk-monitor-options .monitor-option-btn').forEach(function (b) {
+        b.classList.remove('active');
+    });
+    btn.classList.add('active');
+    bulkPendingMode = btn.dataset.mode;
+    var confirmBtn = document.getElementById('bulk-monitor-confirm-btn');
+    if (confirmBtn) confirmBtn.disabled = false;
+}
+
+function confirmBulkMonitor() {
+    if (!bulkPendingMode || bulkSelectedIds.size === 0) return;
+    var ids = Array.from(bulkSelectedIds);
+    var mode = bulkPendingMode;
+    var confirmBtn = document.getElementById('bulk-monitor-confirm-btn');
+    if (confirmBtn) {
+        confirmBtn.disabled = true;
+        confirmBtn.textContent = 'Applying…';
+    }
+    fetch('/api/library/bulk/monitor', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ series_ids: ids, mode: mode })
+    })
+    .then(function (r) { return r.json(); })
+    .then(function (outcome) {
+        renderBulkOutcome(outcome, 'Monitor mode updated');
+        // Page reload after the toast briefly displays. Per-episode
+        // monitor flags are recomputed server-side; the index page
+        // doesn't render those per-card so a partial DOM update would
+        // be a wash. Future bulk actions that affect visible badges
+        // (delete, upgrades) will refresh in place.
+        setTimeout(function () { location.reload(); }, 600);
+    })
+    .catch(function (e) {
+        if (confirmBtn) {
+            confirmBtn.disabled = false;
+            confirmBtn.textContent = 'Apply';
+        }
+        if (window.ryokanToast) {
+            window.ryokanToast({ kind: 'error', title: 'Bulk update failed', body: (e && e.message) || 'Network error', log: true });
+        }
+    });
+}
+
+// Render a BulkOutcome ({ succeeded: [], failed: [{series_id, reason}] })
+// as a toast. All-success → success toast. All-failure → error toast,
+// selection preserved so the user can retry without re-selecting.
+// Partial → warn toast; succeeded IDs cleared from selection,
+// failed IDs remain selected so the user sees which ones to address.
+//
+// Reused across all bulk actions; the `verb` argument is the user-
+// facing summary noun ("Monitor mode updated" / "Series deleted" / etc.).
+function renderBulkOutcome(outcome, verb) {
+    var ok = (outcome.succeeded || []).length;
+    var bad = (outcome.failed || []).length;
+    if (!window.ryokanToast) return;
+    if (bad === 0) {
+        window.ryokanToast({ kind: 'success', title: verb, body: ok + ' succeeded', log: false, duration: 3000 });
+        var modal = document.getElementById('bulk-monitor-modal');
+        if (modal) modal.style.display = 'none';
+        clearBulkSelection();
+    } else if (ok === 0) {
+        var first = outcome.failed[0];
+        var summary = bad + ' failed';
+        if (first) summary += '; ' + (first.reason || 'unknown error');
+        window.ryokanToast({ kind: 'error', title: verb + ' failed', body: summary, log: true });
+    } else {
+        var failedSet = new Set(outcome.failed.map(function (f) { return f.series_id; }));
+        var stillSelected = new Set();
+        bulkSelectedIds.forEach(function (id) {
+            if (failedSet.has(id)) {
+                stillSelected.add(id);
+            } else {
+                var c = document.getElementById('series-' + id);
+                if (c) {
+                    c.classList.remove('selected');
+                    var cb = c.querySelector('.series-card-select');
+                    if (cb) cb.checked = false;
+                }
+            }
+        });
+        bulkSelectedIds = stillSelected;
+        renderBulkToolbar();
+        window.ryokanToast({
+            kind: 'warn',
+            title: verb,
+            body: ok + ' succeeded, ' + bad + ' failed (selection still shows the failures)',
+            log: true,
+            duration: 6000
+        });
+        var modal2 = document.getElementById('bulk-monitor-modal');
+        if (modal2) modal2.style.display = 'none';
+    }
+}
+
+// One-shot Esc-to-clear listener. The `__ryokan*` boot guard pattern
+// keeps hx-boost re-execs of this file from accumulating duplicate
+// handlers on every nav-back into /.
+if (!window.__ryokanBulkSelectInit) {
+    window.__ryokanBulkSelectInit = true;
+    document.addEventListener('keydown', function (ev) {
+        if (ev.key !== 'Escape') return;
+        var modal = document.getElementById('bulk-monitor-modal');
+        if (modal && modal.style.display !== 'none' && modal.style.display !== '') {
+            modal.style.display = 'none';
+            return;
+        }
+        if (bulkSelectedIds.size > 0) {
+            clearBulkSelection();
+        }
+    });
+}

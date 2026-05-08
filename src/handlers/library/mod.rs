@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::models::series;
 use crate::services::anilist;
 
+pub mod bulk;
 pub mod crud;
 pub mod episodes;
 pub mod pages;

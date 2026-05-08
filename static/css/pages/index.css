@@ -392,3 +392,80 @@
     color: var(--text-dim);
 }
 
+/* ── Bulk select (issue #125) ───────────────────────────────────────
+   Per-card checkbox overlay + sticky bottom toolbar. The card stays
+   navigable on body click; only the checkbox toggles selection. */
+
+.series-card {
+    position: relative;
+}
+
+.series-card-select {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 2;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    cursor: pointer;
+    /* Default: muted so the unselected checkbox doesn't dominate the
+       cover. Becomes fully visible on card hover or once selected. */
+    opacity: 0.55;
+    transition: opacity 0.15s ease-out;
+    accent-color: var(--accent);
+}
+.series-card:hover .series-card-select,
+.series-card-select:focus,
+.series-card-select:checked {
+    opacity: 1;
+}
+
+/* Selection halo: mauve outline + soft glow so the user sees at-a-
+   glance which cards are in the bulk set without having to scan
+   checkboxes individually. */
+.series-card.selected {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent), 0 4px 12px rgba(203, 166, 247, 0.18);
+}
+
+/* Sticky bottom toolbar. Appears when at least one card is checked.
+   Centered horizontally; slides up from the bottom edge. */
+.bulk-action-toolbar {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%) translateY(120%);
+    background: var(--bg-elevated);
+    border: 1px solid var(--accent);
+    border-radius: 999px;
+    padding: 8px 14px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(203, 166, 247, 0.25);
+    z-index: 50;
+    transition: transform 0.18s ease-out, opacity 0.18s ease-out;
+    opacity: 0;
+    pointer-events: none;
+}
+.bulk-action-toolbar.visible {
+    transform: translateX(-50%) translateY(0);
+    opacity: 1;
+    pointer-events: auto;
+}
+.bulk-action-toolbar-inner {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: nowrap;
+}
+.bulk-action-count {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-bright);
+    padding-right: 4px;
+    white-space: nowrap;
+}
+.bulk-action-toolbar .btn-sm {
+    padding: 5px 12px;
+    font-size: 13px;
+}
+
