@@ -113,10 +113,18 @@ pub async fn bulk_monitor(
     }
 
     let failed_ids: Vec<i64> = failed.iter().map(|f| f.series_id).collect();
-    // `mode` is user-supplied; sanitize before it lands in the log
-    // detail. Per-row's `remove_series` does the same for its log
-    // line. failed_ids is i64-only so safe to format directly.
-    let safe_mode = crate::handlers::auth::sanitize_for_log(&req.mode);
+    // Log the canonical mode so the trail matches per-row's
+    // `set_monitoring` log line — that handler logs
+    // `MonitorMode::from_str(...).as_str()` (lowercase known value).
+    // Without this both `mode=ALL` and `mode=all` could land in the
+    // log depending on which path the user took, which makes the
+    // System → Logs filter brittle. Sentinel passes through verbatim
+    // because `MonitorMode::from_str` would coerce it to `future`.
+    let canonical_mode: &str = if req.mode == super::crud::MONITOR_MODE_SYNC_SENTINEL {
+        super::crud::MONITOR_MODE_SYNC_SENTINEL
+    } else {
+        crate::models::monitoring::MonitorMode::from_str(&req.mode).as_str()
+    };
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -127,7 +135,7 @@ pub async fn bulk_monitor(
         ),
         &format!(
             "action=monitor_set mode={} failed_ids={:?}",
-            safe_mode, failed_ids
+            canonical_mode, failed_ids
         ),
     )
     .await;
@@ -264,11 +272,15 @@ async fn delete_one_series(
             // cleanup so the library entry disappears (matches
             // per-row behavior; user asked for delete and we
             // honor that). Surface the partial-failure detail so
-            // the user sees what didn't get cleaned.
+            // the user sees what didn't get cleaned. If `series::remove`
+            // *also* fails, concat both — the upstream
+            // traversal-refused / seed-rule signal is more interesting
+            // than the bare sqlx error and should land in the failure
+            // modal regardless.
             let reason = report.partial_failure_reason();
-            series::remove(&state.db, series_id)
-                .await
-                .map_err(|e| format!("db remove after partial cleanup: {e}"))?;
+            if let Err(e) = series::remove(&state.db, series_id).await {
+                return Err(format!("{reason}; db remove after partial cleanup: {e}"));
+            }
             return Err(reason);
         }
     }

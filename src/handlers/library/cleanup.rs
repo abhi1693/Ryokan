@@ -66,8 +66,12 @@ impl SeriesCleanupReport {
     /// One-line summary for the bulk failure-modal copy. Only called
     /// when `is_clean()` is false; assembles the partial-failure
     /// reason out of the substage signals so the user sees what
-    /// didn't get cleaned. ASCII-only so HX-Trigger envelopes don't
-    /// mojibake (see CLAUDE.md "HX-Trigger payloads must be ASCII").
+    /// didn't get cleaned. The reason rides back to the frontend as
+    /// JSON via [`BulkOutcome`](super::bulk::BulkOutcome) — no
+    /// HX-Trigger involvement — so any UTF-8 the filesystem can
+    /// produce in `folder_detail` is fine to interpolate as-is.
+    ///
+    /// [`BulkOutcome`]: super::bulk::BulkOutcome
     pub fn partial_failure_reason(&self) -> String {
         let mut parts: Vec<String> = Vec::new();
         match self.folder_status {
