@@ -16,9 +16,11 @@
 //!
 //! Per the parent CLAUDE.md "Airing schedule batch query" note: the
 //! AL rate limit degrades to **30/min** on this endpoint, so the
-//! caller (`services::calendar`) layers a 15-min server-side cache
-//! on top so a thundering herd of iCal subscribers doesn't drain
-//! the budget.
+//! caller (`services::airing_refresh`) only fires this query on its
+//! 12h supervised tick and writes the result to the local
+//! `episode_airings` table; calendar requests never round-trip to
+//! AL so a thundering herd of iCal subscribers doesn't drain the
+//! budget.
 
 use serde_json::json;
 
@@ -245,8 +247,3 @@ async fn fetch_page(
     }
     Ok((out, has_next))
 }
-
-// Suppress dead-code on the duration-default constant; it'll be
-// referenced once `services::calendar` lands the iCal emitter.
-#[allow(dead_code)]
-const _DEFAULT_DURATION_MINUTES: i32 = 24;

@@ -121,7 +121,7 @@ pub(crate) fn login_clear(key: &str) {
 /// default would let an attacker spoof a fresh IP per attempt and defeat
 /// the per-IP login throttle. Flip this on only when Ryokan is behind a
 /// proxy that overwrites the headers on ingress.
-static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
+pub(crate) static TRUST_PROXY_HEADERS: LazyLock<bool> = LazyLock::new(|| {
     std::env::var("RYOKAN_TRUSTED_PROXY")
         .map(|v| {
             let v = v.trim().to_ascii_lowercase();

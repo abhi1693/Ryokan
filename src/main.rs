@@ -371,9 +371,9 @@ async fn main() {
     });
 
     // WAL mode lets readers run concurrently with a writer, which matters a
-    // lot here: seven background tasks (rss_sync, post_processing, cleanup,
-    // library_classify, metadata_refresh, upgrade_search, anibridge_refresh)
-    // all share this pool with the request path. In the default DELETE
+    // lot here: every supervised background task (grep `supervise(&` for the
+    // canonical names — currently 11) shares this pool with the request
+    // path. In the default DELETE
     // journal mode every writer takes a whole-database lock and stalls the
     // next page load behind whatever scheduled_tasks row update or log insert
     // happens to be running. `synchronous=NORMAL` is safe under WAL (durable

@@ -40,7 +40,6 @@
 //! page gates on the cookie `require_auth` middleware. Both call
 //! this same function.
 
-use serde::Serialize;
 use sqlx::Row;
 use sqlx::SqlitePool;
 
@@ -48,9 +47,9 @@ use crate::models::config::Config;
 
 /// Per-episode shape served to both consumers. Title is already
 /// resolved via `Config.title_language` so neither the iCal text
-/// emitter nor the JSON page renderer needs to re-pick from
+/// emitter nor the page renderer needs to re-pick from
 /// romaji/english/native.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct UpcomingEpisode {
     /// Ryokan-internal `series.id`. Used to back-link to
     /// `/series/{id}` in iCal events + the calendar page cards.

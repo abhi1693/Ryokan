@@ -37,10 +37,12 @@
 //!
 //! ## Caching
 //!
-//! Server-side: 15-min cache in `services::calendar`.
-//! HTTP-side: `Cache-Control: public, max-age=600` + `ETag` derived
-//! from `max(airing_at)` so calendar clients honor conditional GETs
-//! for free.
+//! Server-side: the calendar reader joins against the local
+//! `episode_airings` table, kept fresh by the 12h `airing_refresh`
+//! supervised task — no per-request AL fetch, no in-process cache.
+//! HTTP-side: `Cache-Control: public, max-age=600` + an `ETag`
+//! hashed over each event's `(series_id, episode, airing_at)`
+//! tuple, so calendar clients honor conditional GETs for free.
 
 use askama::Template;
 use axum::{
@@ -148,9 +150,8 @@ struct CalendarPageTemplate {
     library_is_empty: bool,
 }
 
-/// Per-episode wire shape for both the server template and the
-/// JSON endpoint. Pre-formats per-day-grouping fields so the
-/// client doesn't have to re-derive them.
+/// Per-episode template input. Pre-formats per-day-grouping
+/// fields so the client doesn't have to re-derive them.
 #[derive(Debug, Clone, Serialize)]
 pub struct EpisodeView {
     pub series_id: i64,
@@ -499,8 +500,13 @@ pub async fn ical_feed(
         }
     };
 
-    let host = extract_host(&headers);
-    let body = render_ical(&episodes, &cfg.title_language, host.as_deref(), now);
+    let host_and_scheme = extract_host_and_scheme(&headers);
+    let body = render_ical(
+        &episodes,
+        &cfg.title_language,
+        host_and_scheme.as_ref(),
+        now,
+    );
     let etag = etag_for(&episodes);
 
     // Conditional GET — if the client sent the same etag they're
@@ -544,19 +550,43 @@ pub async fn ical_feed(
 }
 
 /// Best-effort extraction of the request's external host so the
-/// iCal `URL` field can deep-link back to the series page.
-/// Prefers `X-Forwarded-Host` then `Host`; returns None when
-/// neither header is parseable, in which case the URL field is
-/// emitted as a relative path.
-fn extract_host(headers: &HeaderMap) -> Option<String> {
-    if let Some(h) = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(header::HOST))
-        && let Ok(s) = h.to_str()
-    {
-        return Some(s.to_string());
+/// iCal `URL` field can deep-link back to the series page. Returns
+/// `(host, scheme)` when resolvable, or `None` when nothing is
+/// trustworthy enough to emit (in which case the URL field falls
+/// back to a relative path).
+///
+/// `X-Forwarded-Host` and `X-Forwarded-Proto` are honored only
+/// when `RYOKAN_TRUSTED_PROXY` is set, matching the auth path's
+/// header-trust contract: trusting them by default would let any
+/// HTTP client write whatever they want into iCal events. With
+/// the flag off we use the request's `Host` header (browsers /
+/// HTTP clients always set this, and an attacker can't usefully
+/// spoof it for someone else's calendar feed) and default the
+/// scheme to `http`.
+fn extract_host_and_scheme(headers: &HeaderMap) -> Option<(String, &'static str)> {
+    let trust = *crate::handlers::auth::TRUST_PROXY_HEADERS;
+    let host = if trust {
+        headers
+            .get("x-forwarded-host")
+            .or_else(|| headers.get(header::HOST))
+    } else {
+        headers.get(header::HOST)
     }
-    None
+    .and_then(|h| h.to_str().ok())?
+    .to_string();
+    let scheme = if trust {
+        match headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.split(',').next().unwrap_or(s).trim().to_ascii_lowercase())
+        {
+            Some(ref s) if s == "https" => "https",
+            _ => "http",
+        }
+    } else {
+        "http"
+    };
+    Some((host, scheme))
 }
 
 /// Hand-rolled iCalendar 2.0 text. RFC 5545 compatible enough for
@@ -566,7 +596,7 @@ fn extract_host(headers: &HeaderMap) -> Option<String> {
 fn render_ical(
     episodes: &[UpcomingEpisode],
     _title_language: &str,
-    host: Option<&str>,
+    host_and_scheme: Option<&(String, &'static str)>,
     now_unix: i64,
 ) -> String {
     // CRLF line endings per RFC 5545 §3.1. Some clients are lax
@@ -595,27 +625,34 @@ fn render_ical(
         } else {
             "Not monitored"
         };
-        let description = format!("AniList ID: {}\\n{}", ep.anilist_id, mon_label);
-        let url = match host {
-            Some(h) => format!("http://{}/series/{}", h, ep.series_id),
+        // Real `\n` here, not the two-char escape `\\n`. RFC 5545
+        // §3.3.11 says newlines inside TEXT values must be encoded
+        // as the two-char sequence `\n`, and `escape_ical_text`'s
+        // `'\n' => "\\n"` arm handles the encoding. Writing
+        // `"\\n"` here would emit literal backslash-n on the wire.
+        let description = format!("AniList ID: {}\n{}", ep.anilist_id, mon_label);
+        let url = match host_and_scheme {
+            Some((h, scheme)) => format!("{}://{}/series/{}", scheme, h, ep.series_id),
             None => format!("/series/{}", ep.series_id),
         };
 
         out.push_str("BEGIN:VEVENT\r\n");
         // DTSTAMP is required per RFC 5545; use now as the
         // server-side stamp. Some validators reject events
-        // without it.
-        out.push_str(&format!("DTSTAMP:{}\r\n", format_ical_utc(now_unix)));
-        out.push_str(&format!("UID:{}\r\n", escape_ical_text(&uid)));
-        out.push_str(&format!("DTSTART:{}\r\n", start_utc));
-        out.push_str(&format!("DTEND:{}\r\n", end_utc));
-        out.push_str(&format!("SUMMARY:{}\r\n", escape_ical_text(&summary)));
-        out.push_str(&format!(
-            "DESCRIPTION:{}\r\n",
-            escape_ical_text(&description)
-        ));
-        out.push_str(&format!("URL:{}\r\n", escape_ical_text(&url)));
-        out.push_str(&format!("STATUS:{}\r\n", status));
+        // without it. Every content line below routes through
+        // `push_folded_line` so a long title (the SUMMARY/UID
+        // most likely to overflow) gets the §3.1 75-octet fold.
+        push_folded_line(&mut out, &format!("DTSTAMP:{}", format_ical_utc(now_unix)));
+        push_folded_line(&mut out, &format!("UID:{}", escape_ical_text(&uid)));
+        push_folded_line(&mut out, &format!("DTSTART:{}", start_utc));
+        push_folded_line(&mut out, &format!("DTEND:{}", end_utc));
+        push_folded_line(&mut out, &format!("SUMMARY:{}", escape_ical_text(&summary)));
+        push_folded_line(
+            &mut out,
+            &format!("DESCRIPTION:{}", escape_ical_text(&description)),
+        );
+        push_folded_line(&mut out, &format!("URL:{}", escape_ical_text(&url)));
+        push_folded_line(&mut out, &format!("STATUS:{}", status));
         out.push_str("END:VEVENT\r\n");
     }
 
@@ -651,13 +688,59 @@ fn escape_ical_text(s: &str) -> String {
     out
 }
 
-/// Build an ETag from `max(airing_at)` across the included events.
-/// Conditional-GET-friendly because the same set of events
-/// produces the same etag, and adding/removing events shifts the
-/// max (or the count, accounted for via the prefix).
+/// Build an ETag by hashing every event's identity tuple
+/// `(series_id, episode, airing_at)`. Conditional-GET-friendly
+/// because the same set of events hashes the same way, and any
+/// shift (an episode shifted, a series added or removed) changes
+/// the digest. The previous shape used `(count, max(airing_at))`
+/// which collided when two distinct sets shared a count and a max
+/// — narrow in practice, but a hash over the full identity space
+/// is correctness-preserving and just as cheap.
 fn etag_for(episodes: &[UpcomingEpisode]) -> String {
-    let max_airing = episodes.iter().map(|e| e.airing_at).max().unwrap_or(0);
-    format!("\"{}-{}\"", episodes.len(), max_airing)
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    episodes.len().hash(&mut hasher);
+    for e in episodes {
+        e.series_id.hash(&mut hasher);
+        e.episode.hash(&mut hasher);
+        e.airing_at.hash(&mut hasher);
+    }
+    format!("\"{:x}\"", hasher.finish())
+}
+
+/// Fold a content line per RFC 5545 §3.1: lines longer than 75
+/// octets are split with CRLF followed by a single space, which
+/// the parser folds back together. Splits respect UTF-8 char
+/// boundaries — the 75-octet limit is byte-based, but cutting
+/// mid-codepoint would corrupt non-ASCII titles.
+///
+/// Emits a trailing `\r\n` so callers can write a complete content
+/// line in one push.
+fn push_folded_line(out: &mut String, line: &str) {
+    const MAX: usize = 75;
+    let bytes = line.as_bytes();
+    if bytes.len() <= MAX {
+        out.push_str(line);
+        out.push_str("\r\n");
+        return;
+    }
+    let mut start = 0;
+    let mut first = true;
+    while start < bytes.len() {
+        let budget = if first { MAX } else { MAX - 1 }; // continuation lines start with a space
+        let mut end = (start + budget).min(bytes.len());
+        // Walk back to the nearest UTF-8 char boundary.
+        while end < bytes.len() && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        if !first {
+            out.push(' ');
+        }
+        out.push_str(&line[start..end]);
+        out.push_str("\r\n");
+        start = end;
+        first = false;
+    }
 }
 
 #[cfg(test)]
@@ -697,10 +780,11 @@ mod tests {
     #[test]
     fn vevent_carries_uid_dtstart_dtend_status() {
         let now = 1_700_000_000_i64; // somewhere in 2023
+        let host = ("ryokan.example:8978".to_string(), "http");
         let body = render_ical(
             &[ep(42, 100, 7, now + 3 * 86400, true)],
             "romaji",
-            Some("ryokan.example:8978"),
+            Some(&host),
             now,
         );
         assert!(body.contains("UID:ryokan-42-7@ryokan.local\r\n"));
@@ -714,6 +798,18 @@ mod tests {
         assert!(body.contains("SUMMARY:Test Series \u{00B7} E07\r\n"));
         // URL uses the host header.
         assert!(body.contains("URL:http://ryokan.example:8978/series/42\r\n"));
+        // DESCRIPTION line break is RFC-5545 `\n`, not literal `\\n`.
+        // After escape_ical_text the wire-form is single-backslash-n
+        // sandwiched between the two parts.
+        assert!(body.contains("DESCRIPTION:AniList ID: 100\\nMonitored\r\n"));
+    }
+
+    #[test]
+    fn vevent_url_picks_https_when_scheme_is_passed() {
+        let now = 1_700_000_000_i64;
+        let host = ("ryokan.example".to_string(), "https");
+        let body = render_ical(&[ep(7, 1, 1, now + 3600, true)], "romaji", Some(&host), now);
+        assert!(body.contains("URL:https://ryokan.example/series/7\r\n"));
     }
 
     #[test]
