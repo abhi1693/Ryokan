@@ -1,3 +1,4 @@
+pub mod airing_refresh;
 pub mod anilist;
 pub mod calendar;
 pub mod crypto;

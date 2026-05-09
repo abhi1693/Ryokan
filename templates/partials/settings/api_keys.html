@@ -8,6 +8,14 @@
    without a round-trip page reload. JS lives in
    `static/js/settings.js` under the api-keys section. #}
 <div class="api-keys-tab" id="api-keys-tab">
+    {# Per-tab toast — see settings.html comment for the rationale. #}
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="API Keys">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="API Keys">{{ err }}</div>
+    {% endif %}
+
     <div class="api-keys-section-header">
         <div>
             <h3 class="settings-section-title">API Keys</h3>

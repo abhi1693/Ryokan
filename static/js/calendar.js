@@ -147,32 +147,49 @@
     }
 
     // ── Per-cell time hydration ─────────────────────────────────
-    // Server renders `·` as a placeholder; we hydrate to the
-    // user's local-time format on first paint and after every
+    // Server renders `·` as a placeholder for both the list view
+    // (`.calendar-episode-time`) and the grid view's pills
+    // (`.calendar-month-pill-time`). We hydrate both shapes to
+    // the user's local-time format on first paint and after every
     // HTMX swap.
     function hydrateTimes(root) {
-        (root || document).querySelectorAll('.calendar-episode-time[data-airing-at]').forEach(function (el) {
+        var sel = '.calendar-episode-time[data-airing-at], .calendar-month-pill-time[data-airing-at]';
+        (root || document).querySelectorAll(sel).forEach(function (el) {
             var ts = parseInt(el.dataset.airingAt, 10);
             if (ts > 0) el.textContent = fmtTime(ts);
         });
     }
 
     // ── Today highlight + scroll-to-today ───────────────────────
+    // Both views key by `data-day-key` (UTC midnight). List view
+    // gets `.calendar-day-today`; grid view gets
+    // `.calendar-month-cell-today`. Server-side render already
+    // sets `is_today` on the right cell, so this is mainly the
+    // post-swap re-apply.
     function applyTodayHighlight(root) {
         var now = Math.floor(Date.now() / 1000);
         var todayUtcMidnight = now - (((now % 86400) + 86400) % 86400);
         var todayEl = null;
-        (root || document).querySelectorAll('.calendar-day').forEach(function (el) {
+        (root || document).querySelectorAll('.calendar-day, .calendar-month-cell').forEach(function (el) {
             var dk = parseInt(el.dataset.dayKey, 10);
             var isToday = dk === todayUtcMidnight;
-            el.classList.toggle('calendar-day-today', isToday);
-            if (isToday) todayEl = el;
+            if (el.classList.contains('calendar-day')) {
+                el.classList.toggle('calendar-day-today', isToday);
+            } else {
+                el.classList.toggle('calendar-month-cell-today', isToday);
+            }
+            if (isToday && !todayEl) todayEl = el;
         });
         return todayEl;
     }
 
     function maybeScrollToToday(todayEl) {
         if (!todayEl || typeof todayEl.scrollIntoView !== 'function') return;
+        // Skip auto-scroll in grid view — the full month fits
+        // roughly one screen, and jumping to today's cell mid-grid
+        // hides the leading weeks. List view benefits from the
+        // jump because the day-grouped flow can be long.
+        if (todayEl.classList.contains('calendar-month-cell')) return;
         // Defer to next frame so layout has settled.
         requestAnimationFrame(function () {
             todayEl.scrollIntoView({ behavior: 'auto', block: 'start' });
@@ -180,21 +197,21 @@
         });
     }
 
-    // ── Local filters: series-name search + premieres-only ──────
+    // ── Local filter: series-name search ────────────────────────
+    // Premiere status is now a passive visual indicator (badge in
+    // list view, ★ + accent border in grid view), not a filter.
     var seriesSearchInput = document.getElementById('calendar-series-search');
-    var premieresToggle = document.getElementById('calendar-premieres-toggle');
 
     function applyLocalFilters(root) {
         var query = seriesSearchInput ? seriesSearchInput.value.trim().toLowerCase() : '';
-        var premieresOnly = premieresToggle ? premieresToggle.checked : false;
+        var scope = root || document;
 
-        (root || document).querySelectorAll('.calendar-day').forEach(function (day) {
+        // List view — day-grouped sections.
+        scope.querySelectorAll('.calendar-day').forEach(function (day) {
             var visibleCount = 0;
             day.querySelectorAll('.calendar-episode').forEach(function (ep) {
                 var name = ep.dataset.seriesName || '';
-                var epNum = parseInt(ep.dataset.episode, 10) || 0;
-                var matches = (!query || name.indexOf(query) !== -1)
-                    && (!premieresOnly || epNum === 1);
+                var matches = !query || name.indexOf(query) !== -1;
                 ep.classList.toggle('calendar-episode-hidden', !matches);
                 if (matches) visibleCount++;
             });
@@ -209,13 +226,19 @@
                 }
             }
         });
+
+        // Grid view — filter pills per cell. Cells stay in place
+        // (hiding them would break the 7-column rectangle); only
+        // non-matching pills get hidden.
+        scope.querySelectorAll('.calendar-month-pill').forEach(function (pill) {
+            var name = pill.dataset.seriesName || '';
+            var matches = !query || name.indexOf(query) !== -1;
+            pill.classList.toggle('calendar-episode-hidden', !matches);
+        });
     }
 
     if (seriesSearchInput) {
         seriesSearchInput.addEventListener('input', function () { applyLocalFilters(); });
-    }
-    if (premieresToggle) {
-        premieresToggle.addEventListener('change', function () { applyLocalFilters(); });
     }
 
     // Initial paint hydrators + first scroll-to-today.

@@ -1,3 +1,11 @@
+    {# Per-tab toast — see settings.html comment for the rationale. #}
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Indexers">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Indexers">{{ err }}</div>
+    {% endif %}
+
     {# Indexers fieldset — owned by the section partial so a
        successful HTMX upsert/delete can re-render the whole thing
        (catalog grid + existing-indexer cards + modal) in one swap.

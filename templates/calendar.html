@@ -71,11 +71,6 @@
                aria-label="Filter by series name"
                autocomplete="off">
 
-        <label class="calendar-toggle-filter" title="Show only first episodes (S01E01)">
-            <input type="checkbox" id="calendar-premieres-toggle">
-            <span>Premieres only</span>
-        </label>
-
         <label class="calendar-toggle-filter">
             <input type="checkbox"
                    id="calendar-monitored-toggle"
@@ -85,11 +80,18 @@
     </div>
 </div>
 
-{# Day-grouped episode list. Each day is a sticky header followed
-   by its episode rows; the JS layer re-renders this region in
-   place when range/filter change. #}
-<div class="calendar-list" id="calendar-list">
+{# Body container — `#calendar-list` is the HTMX swap target for
+   range tab clicks + the monitored-only toggle. The handler
+   branches on view_mode and returns either the day-grouped list
+   partial (week ranges) or the calendar-month grid (month range).
+   Keeping both paths anchored at the same target means the JS
+   afterSwap hook hydrates whichever shape just landed. #}
+<div class="calendar-list" id="calendar-list" data-view-mode="{{ view_mode }}">
+{% if view_mode == "grid" %}
+{%~ include "partials/calendar/grid.html" ~%}
+{% else %}
 {%~ include "partials/calendar/list.html" ~%}
+{% endif %}
 </div>
 
 {# Subscribe modal — opened by the "iCal Link" button in the

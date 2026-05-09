@@ -291,6 +291,16 @@
     background: rgba(108, 112, 134, 0.18);
 }
 
+/* "Premiere" — first episode of a Ryokan series. Each anime
+   season is its own series here, so this fires for E1 of any
+   new cour, not just brand-new shows. Accent-coloured to draw
+   the eye but not louder than monitored/unmon since premieres
+   are common. */
+.calendar-episode-badge-premiere {
+    color: var(--accent);
+    background: rgba(168, 124, 255, 0.16);
+}
+
 .calendar-empty {
     padding: 48px 24px;
     text-align: center;
@@ -299,6 +309,202 @@
 
 .calendar-empty p {
     margin: 0 0 8px;
+}
+
+/* ── Month-grid view (range=month) ───────────────────────────
+   Sun→Sat 7-column rectangle. Each cell is a square-ish slot
+   with the day number top-right and stacked episode pills
+   beneath. Out-of-month cells stay rendered (faded) so each
+   week is a clean row. */
+
+.calendar-month {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.calendar-month-title {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin: 0 0 4px;
+    letter-spacing: 0.01em;
+}
+
+.calendar-month-dow {
+    display: grid;
+    /* `minmax(0, 1fr)` instead of bare `1fr` — bare `1fr` lets a
+       column grow past its share when a child has a min content
+       width (the nowrap pill title), making columns wildly
+       uneven. `minmax(0, 1fr)` caps the lower bound at 0 so the
+       7 columns stay equal. */
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 1px;
+    text-transform: uppercase;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+}
+
+.calendar-month-dow span {
+    padding: 4px 8px;
+}
+
+.calendar-month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.calendar-month-cell {
+    background: var(--bg-card);
+    min-height: 120px;
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    position: relative;
+    transition: background 0.12s;
+    /* Same min-width-0 escape hatch as the column track — without
+       this, a wide pill child propagates its min-content width
+       up and overrides the grid track's `minmax(0, 1fr)`. */
+    min-width: 0;
+}
+
+.calendar-month-cell-other {
+    background: var(--bg);
+    color: var(--text-dim);
+}
+
+.calendar-month-cell-other .calendar-month-cell-num {
+    color: var(--text-dim);
+    opacity: 0.6;
+}
+
+.calendar-month-cell-num {
+    align-self: flex-end;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-dim);
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+}
+
+.calendar-month-cell-today {
+    background: var(--bg-elevated);
+    box-shadow: inset 0 2px 0 var(--accent);
+}
+
+.calendar-month-cell-today .calendar-month-cell-num {
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.calendar-month-cell-eps {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    overflow: hidden;
+}
+
+.calendar-month-pill {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    padding: 3px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    line-height: 1.3;
+    text-decoration: none;
+    color: var(--text);
+    background: var(--bg-elevated);
+    border-left: 3px solid var(--text-dim);
+    overflow: hidden;
+    transition: background 0.12s;
+    /* Min-width-0 on the flex container so the title's nowrap
+       can't push the pill (and its grid cell) past its share. */
+    min-width: 0;
+}
+
+.calendar-month-pill:hover {
+    background: var(--bg);
+}
+
+.calendar-month-pill-monitored {
+    border-left-color: var(--green, #a6e3a1);
+}
+
+.calendar-month-pill-unmon {
+    border-left-color: var(--text-dim);
+    opacity: 0.78;
+}
+
+/* Premiere pill — accent-coloured left border (overrides
+   monitored/unmon) + a small ★ glyph before the title. The
+   border-left wins because the class is appended after the
+   monitored/unmon class in the template. */
+.calendar-month-pill-premiere {
+    border-left-color: var(--accent);
+    /* Restore full opacity even when the underlying state is
+       unmonitored — premieres are notable enough that they
+       shouldn't be dimmed. */
+    opacity: 1;
+}
+
+.calendar-month-pill-prem-mark {
+    flex-shrink: 0;
+    color: var(--accent);
+    font-size: 10px;
+    line-height: 1;
+    /* Center the glyph against baseline-aligned siblings. */
+    align-self: center;
+}
+
+.calendar-month-pill-time {
+    flex-shrink: 0;
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+    color: var(--text-dim);
+    min-width: 36px;
+}
+
+.calendar-month-pill-title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+    /* Required for `text-overflow: ellipsis` to actually engage
+       inside a flex item; without it the item's min-content
+       width = full text width and there's nothing to truncate. */
+    min-width: 0;
+}
+
+.calendar-month-pill-ep {
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+@media (max-width: 900px) {
+    .calendar-month-cell {
+        min-height: 90px;
+        padding: 4px;
+    }
+    .calendar-month-pill {
+        gap: 4px;
+        padding: 2px 4px;
+    }
+    .calendar-month-pill-time {
+        display: none;
+    }
 }
 
 @media (max-width: 640px) {
@@ -323,5 +529,45 @@
     .calendar-episode-cover {
         width: 40px;
         height: 56px;
+    }
+
+    /* Month grid on phones — the 7-column rectangle is too
+       cramped to read. Collapse to a single-column flow that
+       skips empty + out-of-month cells; effectively turns the
+       grid into a date-grouped list while keeping the same
+       day_key markup so the JS today-highlight + filters work
+       unchanged. */
+    .calendar-month-dow {
+        display: none;
+    }
+    .calendar-month-grid {
+        grid-template-columns: 1fr;
+        gap: 0;
+        background: transparent;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+    }
+    .calendar-month-cell {
+        min-height: 0;
+        border-bottom: 1px solid var(--border);
+    }
+    .calendar-month-cell:last-child {
+        border-bottom: none;
+    }
+    .calendar-month-cell:has(.calendar-month-cell-eps) .calendar-month-cell-num {
+        align-self: flex-start;
+        color: var(--accent);
+        font-size: 11px;
+    }
+    .calendar-month-cell-other,
+    .calendar-month-cell:not(:has(.calendar-month-cell-eps)) {
+        display: none;
+    }
+    .calendar-month-pill {
+        font-size: 12px;
+        padding: 6px 8px;
+    }
+    .calendar-month-pill-time {
+        display: inline;
     }
 }

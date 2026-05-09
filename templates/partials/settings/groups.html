@@ -1,3 +1,11 @@
+    {# Per-tab toast — see settings.html comment for the rationale. #}
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Release Groups">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Release Groups">{{ err }}</div>
+    {% endif %}
+
     <fieldset>
         <legend>Release Group Source Map</legend>
         <p class="form-hint">Maps release groups to their known source. Used by Layer 3 of the classification pipeline when the filename alone doesn't carry source keywords (e.g. SubsPlease is WEB, VCB-Studio is BD). Seeded rows are restored on startup; user-edited rows are preserved.</p>

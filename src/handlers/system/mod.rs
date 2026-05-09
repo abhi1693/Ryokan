@@ -17,7 +17,9 @@ use crate::models::{
     log::{self, LogCategory, LogLevel},
     rss, scheduled_tasks,
 };
-use crate::services::{logger, metadata_sync, post_processing, rss as rss_service, upgrade};
+use crate::services::{
+    airing_refresh, logger, metadata_sync, post_processing, rss as rss_service, upgrade,
+};
 
 /// Wrap a handler body in a detached `tokio::spawn` so the work runs
 /// to completion even when the client navigates away mid-flight.
@@ -1080,6 +1082,57 @@ pub async fn api_force_metadata_refresh(
         Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
             "ok": failed == 0,
             "message": format!("Metadata refresh complete. Refreshed: {}. Failed: {}.", refreshed, failed),
+        })))
+    })
+    .await?
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/tasks/airing-refresh",
+    tag = "System",
+    summary = "Trigger airing-schedule refresh",
+    description = "Manually re-stamp the local `episode_airings` cache used by the calendar. Skips with `already running` if the supervised task is currently in flight.",
+    responses(
+        (status = 200, description = "Refresh report", body = serde_json::Value),
+    ),
+)]
+pub async fn api_force_airing_refresh(
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    detached_task(async move {
+        // try_lock so a manual trigger during the 12h scheduled
+        // tick returns "already running" rather than queuing —
+        // mirrors the rss_sync / external_sync / upgrade_search
+        // shapes.
+        let Ok(_guard) = airing_refresh::AIRING_REFRESH_LOCK.try_lock() else {
+            return Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+                "ok": false,
+                "message": "Airing refresh is already running",
+            })));
+        };
+        let _ = scheduled_tasks::mark_started(
+            &state.db,
+            "airing_refresh",
+            "Manual airing refresh started",
+        )
+        .await;
+        let (status, message, detail) = match airing_refresh::refresh_all(&state.db).await {
+            Ok(summary) => {
+                let s = if summary.al_failures > 0 { "warn" } else { "ok" };
+                let msg = format!(
+                    "Airing refresh complete. Series: {}. Upserted: {}. Pruned: {}.",
+                    summary.series_scanned, summary.airings_upserted, summary.airings_pruned,
+                );
+                (s, msg, summary.detail())
+            }
+            Err(err) => ("error", format!("Airing refresh failed: {err}"), err),
+        };
+        let _ =
+            scheduled_tasks::mark_finished(&state.db, "airing_refresh", status, &detail).await;
+        Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
+            "ok": status != "error",
+            "message": message,
         })))
     })
     .await?

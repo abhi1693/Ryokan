@@ -18,9 +18,13 @@
 //! "RFC-5545 compatible enough for Google + Apple + Thunderbird").
 //!
 //! Per VEVENT:
-//! - `SUMMARY`: `<series_title> S01E<episode>` (anime convention =
-//!   always Season 1; matches `services/post_processing/mod.rs`'s
-//!   on-disk naming shape).
+//! - `SUMMARY`: `<series_title> · E<episode>`. Each anime "season"
+//!   in Ryokan is its own series with its own E1..EN numbering, so
+//!   a hardcoded `S01` would read as wrong when the title already
+//!   names the season ("Re:Zero ... 4th Season S01E07"). The
+//!   on-disk naming in `services/post_processing` keeps S01E for
+//!   Sonarr/Plex compat; the user-facing calendar entry doesn't
+//!   need that constraint.
 //! - `DTSTART` / `DTEND`: from `airing_at` + `duration_minutes`.
 //! - `UID`: `ryokan-<series_id>-<episode>@ryokan.local` — stable
 //!   across feed fetches so calendar clients dedupe.
@@ -44,7 +48,8 @@ use axum::{
     http::{HeaderMap, HeaderName, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
-use axum_htmx::HxRequest;
+use axum_htmx::{HxBoosted, HxRequest};
+use chrono::{Datelike, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
@@ -54,14 +59,55 @@ use crate::services::calendar::{self, DEFAULT_FORWARD_DAYS, UpcomingEpisode};
 const NOW_PLUS_7_DAYS_THRESHOLD: i64 = 7 * 86400;
 
 /// "Next week" needs an offset start (skip the first 7 days). All
-/// other ranges start from now. Returns `(from_offset_days,
-/// length_days)`.
+/// other week-shaped ranges start from now. Returns
+/// `(from_offset_days, length_days)`.
+///
+/// `month` is *not* served by this function — it's a calendar-month
+/// grid view, not a sliding-window list, so the handler computes
+/// its own from/to from the calendar month containing "now."
 fn range_to_window(range: &str) -> (i64, i64) {
     match range {
         "next_week" | "next-week" => (7, 7),
-        "month" => (0, 30),
         _ => (0, 7),
     }
+}
+
+/// Compute the from/to window for the month-grid view: the calendar
+/// weeks (Sun-start) covering the month containing `now_utc`. The
+/// grid extends to the Sunday on or before the 1st and the Saturday
+/// on or after the last day of the month, so a 4-week or 6-week
+/// grid is always a clean rectangle.
+fn month_grid_window(now_utc: chrono::DateTime<chrono::Utc>) -> (i64, i64) {
+    let first_of_month = chrono::Utc
+        .with_ymd_and_hms(now_utc.year(), now_utc.month(), 1, 0, 0, 0)
+        .single()
+        .expect("first-of-month is always valid");
+    let next_month_first = if now_utc.month() == 12 {
+        chrono::Utc
+            .with_ymd_and_hms(now_utc.year() + 1, 1, 1, 0, 0, 0)
+            .single()
+            .expect("next-january is always valid")
+    } else {
+        chrono::Utc
+            .with_ymd_and_hms(now_utc.year(), now_utc.month() + 1, 1, 0, 0, 0)
+            .single()
+            .expect("next-month-first is always valid")
+    };
+    let last_of_month = next_month_first - chrono::Duration::days(1);
+    let grid_start = sunday_on_or_before(first_of_month);
+    // Grid end is exclusive — Saturday on/after last day, then +1.
+    let grid_end_exclusive = saturday_on_or_after(last_of_month) + chrono::Duration::days(1);
+    (grid_start.timestamp(), grid_end_exclusive.timestamp())
+}
+
+fn sunday_on_or_before(d: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let offset = d.weekday().num_days_from_sunday() as i64;
+    d - chrono::Duration::days(offset)
+}
+
+fn saturday_on_or_after(d: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let offset = 6_i64 - d.weekday().num_days_from_sunday() as i64;
+    d + chrono::Duration::days(offset)
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,12 +129,15 @@ struct CalendarPageTemplate {
     /// Active range token — drives the toggle's selected state.
     range: String,
     monitored_only: bool,
-    /// Pre-grouped day buckets — the template iterates these
-    /// directly. HTMX swaps render the same `partials/calendar/
-    /// list.html` partial against this same shape, so the
-    /// initial paint and the swap paint produce identical
-    /// markup.
+    /// `"list"` for week-shaped ranges, `"grid"` for month. Drives
+    /// the body partial selection in the template.
+    view_mode: String,
+    /// Pre-grouped day buckets for the list view. Empty when
+    /// `view_mode == "grid"`.
     day_buckets: Vec<DayBucket>,
+    /// Pre-built calendar-month grid for the grid view. Empty
+    /// (`weeks: vec![]`) when `view_mode == "list"`.
+    month_grid: MonthGrid,
     /// Calendar-scoped API keys for the Subscribe section. Filtered
     /// to enabled keys with the `calendar` or `admin` scope so
     /// users only see ones that'd actually authorize the feed.
@@ -140,19 +189,56 @@ struct CalendarKeyOption {
     name: String,
 }
 
+/// One cell in the month-grid view. Cells outside the current
+/// calendar month are still rendered (faded) so each row is a
+/// complete Sun→Sat week.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MonthCell {
+    /// UTC midnight Unix timestamp for this cell's day. Lets the
+    /// JS today-highlighter match against the same key list-view
+    /// uses.
+    pub day_key: i64,
+    /// Day-of-month number (1-31). Just the day, e.g. `12`.
+    pub day_number: u32,
+    /// `true` when this cell is "now"'s UTC date — drives the
+    /// today accent in CSS so first paint doesn't flash.
+    pub is_today: bool,
+    /// `true` when this cell falls inside the visible calendar
+    /// month. Cells outside (the leading/trailing week padding)
+    /// render faded.
+    pub is_in_current_month: bool,
+    /// Episodes airing on this day, in airing-time order.
+    pub episodes: Vec<EpisodeView>,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct MonthGrid {
+    /// Render-ready label, e.g. `"May 2026"`.
+    pub month_label: String,
+    /// 4–6 weeks, each a Sun→Sat row of 7 cells.
+    pub weeks: Vec<Vec<MonthCell>>,
+}
+
 /// `GET /calendar` — the in-app calendar page. Cookie-auth gated
 /// (sits inside the `protected_routes` group).
 ///
-/// Branches on `HxRequest`:
-/// - `HX-Request: true` → renders just the `partials/calendar/list.html`
-///   partial. Used by the range-tab swap path so changing the range
-///   only replaces `#calendar-list` instead of the whole body.
-/// - Plain GET → renders the full page. Used on direct URL hits,
-///   browser back/forward to the page, and the no-JS fallback for
-///   the range tabs.
+/// Render branching:
+/// - `HX-Request: true` *and not* `HX-Boosted: true` → renders just
+///   the `partials/calendar/list.html` partial. This matches the
+///   range-tab swap path (explicit `hx-get` against `#calendar-list`)
+///   so changing the range only replaces the list region.
+/// - Boosted nav (clicking the topbar Calendar link sends
+///   `HX-Request` *and* `HX-Boosted`) or plain GET → full page.
+///   Used on direct URL hits, browser back/forward, and the no-JS
+///   fallback for the range tabs.
+///
+/// The boost-vs-swap discriminator is load-bearing: returning the
+/// partial on a boosted nav strips the page chrome (header, range
+/// tabs, modal) and leaves the user staring at a bare list.
 pub async fn page(
     State(state): State<AppState>,
     HxRequest(is_htmx): HxRequest,
+    HxBoosted(is_boosted): HxBoosted,
     Query(params): Query<CalendarPageQuery>,
 ) -> Html<String> {
     let cfg = config::get_config(&state.db)
@@ -163,10 +249,20 @@ pub async fn page(
     let range = params.range.unwrap_or_else(|| "this_week".to_string());
     let monitored_only = params.monitored.unwrap_or(false);
 
-    let (offset_days, length_days) = range_to_window(&range);
-    let now = chrono::Utc::now().timestamp();
-    let from = now + offset_days * 86400;
-    let to = from + length_days * 86400;
+    let now_utc = chrono::Utc::now();
+    let now = now_utc.timestamp();
+    let view_mode = if range == "month" { "grid" } else { "list" };
+
+    // Window selection: list ranges slide N days from now;
+    // grid uses the calendar weeks containing the current
+    // month so the rendered grid is always a clean rectangle.
+    let (from, to) = if view_mode == "grid" {
+        month_grid_window(now_utc)
+    } else {
+        let (offset_days, length_days) = range_to_window(&range);
+        let f = now + offset_days * 86400;
+        (f, f + length_days * 86400)
+    };
 
     let episodes = calendar::fetch_upcoming(&state.db, &cfg, from, to, monitored_only)
         .await
@@ -187,29 +283,46 @@ pub async fn page(
         })
         .collect();
 
-    let day_buckets = group_by_day(&episode_views);
+    let (day_buckets, month_grid) = if view_mode == "grid" {
+        (
+            Vec::new(),
+            build_month_grid(&episode_views, now_utc, from, to),
+        )
+    } else {
+        (group_by_day(&episode_views), MonthGrid::default())
+    };
 
-    // HTMX request → just the list partial (the swappable
-    // region inside #calendar-list). Skips the calendar_keys
-    // load + the page chrome since neither belongs in the
-    // partial.
-    if is_htmx {
-        let partial = CalendarListPartial {
-            day_buckets,
-            library_is_empty,
+    // HTMX swap (range tabs, monitored toggle) → just the body
+    // partial for the active view. A boosted full-page nav also
+    // carries `HX-Request` but expects a full body, so it falls
+    // through to the page render below.
+    if is_htmx && !is_boosted {
+        return if view_mode == "grid" {
+            let partial = CalendarGridPartial {
+                month_grid,
+                library_is_empty,
+            };
+            Html(partial.render().unwrap_or_default())
+        } else {
+            let partial = CalendarListPartial {
+                day_buckets,
+                library_is_empty,
+            };
+            Html(partial.render().unwrap_or_default())
         };
-        return Html(partial.render().unwrap_or_default());
     }
 
     // Full page render — includes chrome (range tabs, filters,
-    // iCal modal) plus the partial body.
+    // iCal modal) plus the body partial.
     let calendar_keys = collect_calendar_keys(&state.db).await;
     let tmpl = CalendarPageTemplate {
         page: "calendar".to_string(),
         title_language: cfg.title_language.clone(),
         range,
         monitored_only,
+        view_mode: view_mode.to_string(),
         day_buckets,
+        month_grid,
         calendar_keys,
         library_is_empty,
     };
@@ -221,6 +334,60 @@ pub async fn page(
 struct CalendarListPartial {
     day_buckets: Vec<DayBucket>,
     library_is_empty: bool,
+}
+
+#[derive(Template)]
+#[template(path = "partials/calendar/grid.html")]
+struct CalendarGridPartial {
+    month_grid: MonthGrid,
+    library_is_empty: bool,
+}
+
+/// Build the Sun→Sat calendar grid for the month containing
+/// `now_utc`. The `from`/`to` window is the same one passed to
+/// [`calendar::fetch_upcoming`], so cells are guaranteed to fall
+/// inside the fetched episode range.
+fn build_month_grid(
+    episodes: &[EpisodeView],
+    now_utc: chrono::DateTime<chrono::Utc>,
+    from: i64,
+    to_exclusive: i64,
+) -> MonthGrid {
+    use std::collections::HashMap;
+    let mut by_day: HashMap<i64, Vec<EpisodeView>> = HashMap::new();
+    for ep in episodes {
+        let day_key = ep.airing_at - ep.airing_at.rem_euclid(86400);
+        by_day.entry(day_key).or_default().push(ep.clone());
+    }
+    for v in by_day.values_mut() {
+        v.sort_by_key(|e| e.airing_at);
+    }
+
+    let today_key = now_utc.timestamp() - now_utc.timestamp().rem_euclid(86400);
+    let current_month = now_utc.month();
+    let month_label = now_utc.format("%B %Y").to_string();
+
+    let mut weeks: Vec<Vec<MonthCell>> = Vec::new();
+    let mut cur = from;
+    while cur < to_exclusive {
+        let mut week: Vec<MonthCell> = Vec::with_capacity(7);
+        for _ in 0..7 {
+            let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(cur, 0)
+                .unwrap_or_else(|| chrono::Utc.timestamp_opt(0, 0).single().unwrap());
+            let cell = MonthCell {
+                day_key: cur,
+                day_number: dt.day(),
+                is_today: cur == today_key,
+                is_in_current_month: dt.month() == current_month,
+                episodes: by_day.remove(&cur).unwrap_or_default(),
+            };
+            week.push(cell);
+            cur += 86400;
+        }
+        weeks.push(week);
+    }
+
+    MonthGrid { month_label, weeks }
 }
 
 async fn library_has_no_positive_al_series(db: &sqlx::SqlitePool) -> bool {
@@ -416,7 +583,7 @@ fn render_ical(
         let start_utc = format_ical_utc(ep.airing_at);
         let duration_secs = (ep.duration_minutes.max(1) as i64) * 60;
         let end_utc = format_ical_utc(ep.airing_at + duration_secs);
-        let summary = format!("{} S01E{:02}", ep.series_title, ep.episode);
+        let summary = format!("{} \u{00B7} E{:02}", ep.series_title, ep.episode);
         let uid = format!("ryokan-{}-{}@ryokan.local", ep.series_id, ep.episode);
         let status = if ep.airing_at - now_unix > NOW_PLUS_7_DAYS_THRESHOLD {
             "TENTATIVE"
@@ -542,8 +709,9 @@ mod tests {
         // DTSTART is the UTC airing time.
         assert!(body.contains("DTSTART:"));
         assert!(body.contains("DTEND:"));
-        // SUMMARY is `<title> S01E<NN>` zero-padded.
-        assert!(body.contains("SUMMARY:Test Series S01E07\r\n"));
+        // SUMMARY is `<title> · E<NN>` zero-padded; no S01 prefix
+        // because each anime "season" is its own Ryokan series.
+        assert!(body.contains("SUMMARY:Test Series \u{00B7} E07\r\n"));
         // URL uses the host header.
         assert!(body.contains("URL:http://ryokan.example:8978/series/42\r\n"));
     }
@@ -587,5 +755,111 @@ mod tests {
         let now = 1_700_000_000_i64;
         let body = render_ical(&[ep(99, 1, 1, now + 3600, true)], "romaji", None, now);
         assert!(body.contains("URL:/series/99\r\n"));
+    }
+
+    /// `2026-05-01` is a Friday → Sun-on-or-before is 2026-04-26
+    /// (Sunday). `2026-05-31` is a Sunday → Sat-on-or-after is
+    /// 2026-06-06 (Saturday). Grid spans 6 full weeks = 42 days.
+    #[test]
+    fn month_grid_window_spans_full_weeks_around_may_2026() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 9, 12, 0, 0)
+            .single()
+            .unwrap();
+        let (from, to) = month_grid_window(now);
+        let from_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(from, 0).unwrap();
+        let to_dt = chrono::DateTime::<chrono::Utc>::from_timestamp(to, 0).unwrap();
+        assert_eq!(from_dt.format("%Y-%m-%d").to_string(), "2026-04-26");
+        assert_eq!(to_dt.format("%Y-%m-%d").to_string(), "2026-06-07");
+        // 6 weeks × 7 days × 86400 sec.
+        assert_eq!(to - from, 6 * 7 * 86400);
+    }
+
+    /// `2026-02-01` is a Sunday → grid starts on the 1st itself.
+    /// `2026-02-28` is a Saturday → grid ends on the 28th. 4 weeks.
+    #[test]
+    fn month_grid_window_compacts_to_4_weeks_when_aligned() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 2, 14, 0, 0, 0)
+            .single()
+            .unwrap();
+        let (from, to) = month_grid_window(now);
+        assert_eq!(to - from, 4 * 7 * 86400);
+    }
+
+    #[test]
+    fn month_grid_handles_december_year_rollover() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 12, 15, 0, 0, 0)
+            .single()
+            .unwrap();
+        let (from, to) = month_grid_window(now);
+        // Window must be a positive multiple of 7 days.
+        let span_days = (to - from) / 86400;
+        assert!((4 * 7..=6 * 7).contains(&span_days));
+        assert_eq!(span_days % 7, 0);
+    }
+
+    fn ev(series_id: i64, episode: i32, airing_at: i64, monitored: bool) -> EpisodeView {
+        EpisodeView {
+            series_id,
+            series_title: "Test".to_string(),
+            cover_url: String::new(),
+            episode,
+            airing_at,
+            monitored,
+            search_haystack: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn build_month_grid_buckets_episodes_to_correct_cells() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 9, 12, 0, 0)
+            .single()
+            .unwrap();
+        let (from, to) = month_grid_window(now);
+        // Two episodes on May 12 (Tue) at 09:00 and 21:00 UTC.
+        let may12_09 = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 12, 9, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let may12_21 = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 12, 21, 0, 0)
+            .single()
+            .unwrap()
+            .timestamp();
+        let eps = vec![ev(1, 5, may12_21, true), ev(2, 1, may12_09, false)];
+        let grid = build_month_grid(&eps, now, from, to);
+        // Find the May 12 cell.
+        let mut found: Option<&MonthCell> = None;
+        for week in &grid.weeks {
+            for cell in week {
+                if cell.day_number == 12 && cell.is_in_current_month {
+                    found = Some(cell);
+                }
+            }
+        }
+        let cell = found.expect("May 12 should be in grid");
+        assert_eq!(cell.episodes.len(), 2);
+        // Sorted by airing_at ascending.
+        assert_eq!(cell.episodes[0].airing_at, may12_09);
+        assert_eq!(cell.episodes[1].airing_at, may12_21);
+    }
+
+    #[test]
+    fn build_month_grid_marks_today_cell() {
+        let now = chrono::Utc
+            .with_ymd_and_hms(2026, 5, 9, 18, 0, 0)
+            .single()
+            .unwrap();
+        let (from, to) = month_grid_window(now);
+        let grid = build_month_grid(&[], now, from, to);
+        let today_cells: Vec<&MonthCell> =
+            grid.weeks.iter().flatten().filter(|c| c.is_today).collect();
+        assert_eq!(today_cells.len(), 1);
+        assert_eq!(today_cells[0].day_number, 9);
+        assert!(today_cells[0].is_in_current_month);
     }
 }

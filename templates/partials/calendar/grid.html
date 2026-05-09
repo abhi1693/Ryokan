@@ -1,0 +1,61 @@
+{# Calendar month-grid partial (issue #116). Renders the Sun→Sat
+   month grid inside `#calendar-list`. Returned by the
+   `handlers::calendar::page` handler when `view_mode == "grid"`
+   (range=month) and the request carries `HX-Request: true` but
+   not `HX-Boosted: true`. The full page handler embeds it
+   directly into templates/calendar.html. The two render paths
+   share this partial so HTMX swaps and full page loads produce
+   identical markup. #}
+{% if month_grid.weeks.is_empty() %}
+<div class="calendar-empty">
+    {% if library_is_empty %}
+    <p>You don't have any series in your library yet.</p>
+    <p><a class="link-accent" href="/">Go to the library</a> to add some.</p>
+    {% else %}
+    <p>No episodes airing this month.</p>
+    {% endif %}
+</div>
+{% else %}
+<div class="calendar-month">
+    <div class="calendar-month-title">{{ month_grid.month_label }}</div>
+    <div class="calendar-month-dow" aria-hidden="true">
+        <span>Sun</span><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span>
+    </div>
+    <div class="calendar-month-grid" role="grid" aria-label="Calendar grid for {{ month_grid.month_label }}">
+        {% for week in month_grid.weeks %}
+        {% for cell in week %}
+        <div class="calendar-month-cell{% if !cell.is_in_current_month %} calendar-month-cell-other{% endif %}{% if cell.is_today %} calendar-month-cell-today{% endif %}"
+             data-day-key="{{ cell.day_key }}"
+             role="gridcell">
+            <div class="calendar-month-cell-num">{{ cell.day_number }}</div>
+            {% if !cell.episodes.is_empty() %}
+            <div class="calendar-month-cell-eps">
+                {% for ep in cell.episodes %}
+                {# Episode label drops the season prefix — each
+                   anime "season" is its own Ryokan series with its
+                   own E1..EN numbering, so a literal `S01` is
+                   meaningless (and misleading when the title
+                   already says "4th Season"). #}
+                <a class="calendar-month-pill{% if ep.monitored %} calendar-month-pill-monitored{% else %} calendar-month-pill-unmon{% endif %}{% if ep.episode == 1 %} calendar-month-pill-premiere{% endif %}"
+                   href="/series/{{ ep.series_id }}"
+                   data-airing-at="{{ ep.airing_at }}"
+                   data-series-name="{{ ep.search_haystack }}"
+                   data-episode="{{ ep.episode }}"
+                   data-monitored="{% if ep.monitored %}1{% else %}0{% endif %}"
+                   title="{{ ep.series_title }}{% if ep.episode == 1 %} · Premiere{% endif %} · Episode {{ ep.episode }}">
+                    <span class="calendar-month-pill-time" data-airing-at="{{ ep.airing_at }}">·</span>
+                    {% if ep.episode == 1 %}
+                    <span class="calendar-month-pill-prem-mark" aria-label="Premiere" title="Premiere">★</span>
+                    {% endif %}
+                    <span class="calendar-month-pill-title">{{ ep.series_title }}</span>
+                    <span class="calendar-month-pill-ep">E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
+                </a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+        {% endfor %}
+    </div>
+</div>
+{% endif %}

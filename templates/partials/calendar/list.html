@@ -38,8 +38,16 @@
                 <div class="calendar-episode-meta">
                     <div class="calendar-episode-title">{{ ep.series_title }}</div>
                     <div class="calendar-episode-sub">
-                        <span class="calendar-episode-num">S01E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
+                        {# Drop the `S01` prefix; each anime
+                           season is its own Ryokan series with
+                           its own E1..EN numbering, so a literal
+                           `S01` reads as wrong when the title
+                           already names the season. #}
+                        <span class="calendar-episode-num">E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
                         <span class="calendar-episode-time" data-airing-at="{{ ep.airing_at }}">·</span>
+                        {% if ep.episode == 1 %}
+                        <span class="calendar-episode-badge calendar-episode-badge-premiere" title="First episode of this series">Premiere</span>
+                        {% endif %}
                         {% if ep.monitored %}
                         <span class="calendar-episode-badge calendar-episode-badge-monitored">Monitored</span>
                         {% else %}

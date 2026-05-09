@@ -114,6 +114,7 @@ use services::{
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
         handlers::system::api_force_metadata_refresh,
+        handlers::system::api_force_airing_refresh,
         handlers::system::api_force_cleanup,
         handlers::system::api_force_post_processing,
         handlers::system::api_force_library_classify,
@@ -1009,6 +1010,10 @@ async fn main() {
             post(handlers::system::api_force_metadata_refresh),
         )
         .route(
+            "/api/tasks/airing-refresh",
+            post(handlers::system::api_force_airing_refresh),
+        )
+        .route(
             "/api/tasks/cleanup",
             post(handlers::system::api_force_cleanup),
         )
@@ -1315,6 +1320,14 @@ async fn main() {
     .await;
     let _ = models::scheduled_tasks::touch_definition(
         &db,
+        "airing_refresh",
+        "Episode air-date refresh",
+        "Every 12 hours",
+        true,
+    )
+    .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
         "library_classify",
         "Library classify sweep",
         "Every 6 hours",
@@ -1488,6 +1501,76 @@ async fn main() {
                     }
                 },
             )
+            .await;
+        });
+    }
+
+    // Background task: refresh stamped episode air dates every 12
+    // hours so the calendar reads from a freshly-warmed local table
+    // instead of round-tripping to AniList per-request. Mirrors
+    // Sonarr's `Episode.AirDateUtc` shape — one stamp at refresh
+    // time, then the calendar's hot path is a plain SQL range scan
+    // against `idx_episode_airings_at`. The refresh service holds
+    // its own lock so a manual-trigger handler can't race the
+    // scheduled tick. Startup delay is computed from
+    // `scheduled_task_runs.last_finished_at` so a process restart
+    // mid-window doesn't re-fire the sweep.
+    {
+        let airing_db = db.clone();
+        let task_registry_airing = state.tasks.clone();
+        tokio::spawn(async move {
+            supervise(&task_registry_airing, "airing_refresh", move || {
+                let db = airing_db.clone();
+                async move {
+                    let period = services::airing_refresh::REFRESH_INTERVAL;
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &db,
+                        "airing_refresh",
+                        period,
+                    )
+                    .await;
+                    tokio::time::sleep(delay).await;
+                    loop {
+                        // Hold the process-wide lock for the duration
+                        // of the run so a manual-trigger doesn't
+                        // double up.
+                        let _guard = services::airing_refresh::AIRING_REFRESH_LOCK.lock().await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &db,
+                            "airing_refresh",
+                            "Refreshing episode air dates",
+                        )
+                        .await;
+                        match services::airing_refresh::refresh_all(&db).await {
+                            Ok(summary) => {
+                                let status = if summary.al_failures > 0 {
+                                    "warn"
+                                } else {
+                                    "ok"
+                                };
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &db,
+                                    "airing_refresh",
+                                    status,
+                                    &summary.detail(),
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &db,
+                                    "airing_refresh",
+                                    "error",
+                                    &err,
+                                )
+                                .await;
+                            }
+                        }
+                        drop(_guard);
+                        tokio::time::sleep(period).await;
+                    }
+                }
+            })
             .await;
         });
     }
