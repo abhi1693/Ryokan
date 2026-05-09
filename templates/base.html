@@ -68,6 +68,7 @@
        `.indexer-*`, `.cf-*`, `.ep-*`, etc.) that cross-page rule
        collision is not a concern. #}
     <link rel="stylesheet" href="/static/css/pages/auth.css">
+    <link rel="stylesheet" href="/static/css/pages/calendar.css">
     <link rel="stylesheet" href="/static/css/pages/downloads.css">
     <link rel="stylesheet" href="/static/css/pages/grab_picker.css">
     <link rel="stylesheet" href="/static/css/pages/index.css">
@@ -158,6 +159,27 @@
                 </svg>
                 <span class="bulk-select-toggle-label">Select</span>
             </button>
+            {% endif %}
+            {# Issue #116 — Calendar entry. Desktop variant always
+               visible in the topbar; the library-only mobile-icon
+               variant lives in the library-only block below so
+               mobile users still reach /calendar from the library
+               page without burning a mobile-tabbar slot. #}
+            <a href="/calendar" class="nav-calendar-desktop {% if page == "calendar" %}active{% endif %}">Calendar</a>
+            {% if page == "library" %}
+            {# Mobile-only icon Calendar — same library-page-only
+               whitelist pattern as bulk-select. Desktop hides this
+               via the mobile filter (nav-links > *:not(...)) but
+               on mobile (where nav-links is forced visible only
+               for whitelisted children), this icon shows up. #}
+            <a href="/calendar" class="nav-action nav-calendar-mobile" aria-label="Calendar" title="Calendar">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <rect x="3" y="4" width="18" height="18" rx="2"/>
+                    <path d="M16 2v4"/>
+                    <path d="M8 2v4"/>
+                    <path d="M3 10h18"/>
+                </svg>
+            </a>
             {% endif %}
             <a href="/search" class="{% if page == "search" %}active{% endif %}">Search</a>
             <a href="/downloads" class="{% if page == "downloads" %}active{% endif %}">Downloads</a>

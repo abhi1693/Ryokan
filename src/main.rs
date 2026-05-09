@@ -1038,6 +1038,14 @@ async fn main() {
         )
         .route("/api/system/tasks", get(handlers::system::api_system_tasks))
         .route("/help", get(handlers::help::help_page))
+        // Issue #116 — in-app calendar page. Cookie-auth gated
+        // (rest of protected_routes); the iCal feed at
+        // /api/calendar.ics is the parallel scoped-key surface
+        // wired via `calendar_routes` further down. The same
+        // handler serves full-page renders and HTMX partial
+        // swaps (it branches on HxRequest), so there's no
+        // separate JSON route.
+        .route("/calendar", get(handlers::calendar::page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/export", get(handlers::system::api_logs_export))
@@ -1186,6 +1194,19 @@ async fn main() {
         )
         .with_state(state.clone());
 
+    // Issue #115 — iCal calendar feed. Lives in its own router
+    // group so it can carry the `require_calendar_scope`
+    // middleware (scoped-API-key auth from #114) instead of
+    // cookie-auth — calendar subscribers (Google Calendar / Apple
+    // Calendar / Thunderbird) can't carry cookies.
+    let calendar_routes = Router::new()
+        .route("/api/calendar.ics", get(handlers::calendar::ical_feed))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::scoped_auth::require_calendar_scope,
+        ))
+        .with_state(state.clone());
+
     // Brotli/gzip compression. The series detail template is ~80KB of HTML
     // and style.css is ~64KB — both highly compressible (lots of repeated
     // tokens, whitespace), and they ship on every page navigation. Axum
@@ -1212,6 +1233,7 @@ async fn main() {
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
+        .merge(calendar_routes)
         .merge(webhook_routes)
         .nest_service(
             "/static",

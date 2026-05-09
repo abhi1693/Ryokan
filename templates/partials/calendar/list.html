@@ -1,0 +1,56 @@
+{# Calendar list partial (issue #116). Renders the day-grouped
+   episode list inside `#calendar-list`. Returned by the
+   `handlers::calendar::page` handler when the request carries
+   `HX-Request: true`; the full page handler embeds it directly
+   into templates/calendar.html. The two render paths share this
+   partial so HTMX swaps and full page loads produce identical
+   markup. #}
+{% if day_buckets.is_empty() %}
+<div class="calendar-empty">
+    {% if library_is_empty %}
+    <p>You don't have any series in your library yet.</p>
+    <p><a class="link-accent" href="/">Go to the library</a> to add some.</p>
+    {% else %}
+    <p>No episodes airing in this range.</p>
+    <p class="form-hint">Try expanding the range or turning off the monitored-only filter.</p>
+    {% endif %}
+</div>
+{% else %}
+{% for bucket in day_buckets %}
+<section class="calendar-day" data-day-key="{{ bucket.day_key }}">
+    <h3 class="calendar-day-label">
+        <span class="calendar-day-label-text">{{ bucket.label }}</span>
+        <span class="calendar-day-label-count">{{ bucket.episodes.len() }}{% if bucket.episodes.len() == 1 %} ep{% else %} eps{% endif %}</span>
+    </h3>
+    <ul class="calendar-day-episodes">
+        {% for ep in bucket.episodes %}
+        <li class="calendar-episode"
+            data-airing-at="{{ ep.airing_at }}"
+            data-series-name="{{ ep.search_haystack }}"
+            data-episode="{{ ep.episode }}"
+            data-monitored="{% if ep.monitored %}1{% else %}0{% endif %}">
+            <a class="calendar-episode-link" href="/series/{{ ep.series_id }}">
+                {% if !ep.cover_url.is_empty() %}
+                <img class="calendar-episode-cover" src="{{ ep.cover_url }}" alt="" loading="lazy">
+                {% else %}
+                <div class="calendar-episode-cover calendar-episode-cover-placeholder" aria-hidden="true"></div>
+                {% endif %}
+                <div class="calendar-episode-meta">
+                    <div class="calendar-episode-title">{{ ep.series_title }}</div>
+                    <div class="calendar-episode-sub">
+                        <span class="calendar-episode-num">S01E{% if ep.episode < 10 %}0{% endif %}{{ ep.episode }}</span>
+                        <span class="calendar-episode-time" data-airing-at="{{ ep.airing_at }}">·</span>
+                        {% if ep.monitored %}
+                        <span class="calendar-episode-badge calendar-episode-badge-monitored">Monitored</span>
+                        {% else %}
+                        <span class="calendar-episode-badge calendar-episode-badge-unmon">Not monitored</span>
+                        {% endif %}
+                    </div>
+                </div>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endfor %}
+{% endif %}

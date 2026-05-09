@@ -1,0 +1,327 @@
+/* /calendar page (issue #116). Day-grouped episode list with
+   sticky day headers; range tabs + monitored-only filter at
+   the top; "iCal Link" button in the page header that opens a
+   subscription-URL modal (Sonarr-style, no inline section). */
+
+.calendar-page-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.calendar-ical-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.calendar-ical-btn svg {
+    flex-shrink: 0;
+}
+
+.calendar-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+}
+
+.calendar-range-tabs {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--bg-elevated);
+    padding: 3px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+.calendar-range-tab {
+    padding: 6px 12px;
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+}
+
+.calendar-range-tab:hover {
+    color: var(--text);
+}
+
+.calendar-range-tab.active {
+    color: var(--accent);
+    background: var(--bg-card);
+}
+
+/* Filters row — search input + per-mode toggle pills sit to the
+   right of the range tabs. On mobile they stack via the existing
+   .calendar-toolbar @media flex-direction: column. */
+.calendar-filters {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.calendar-series-search {
+    width: 220px;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+    transition: border-color 0.15s;
+}
+
+.calendar-series-search:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.calendar-series-search::placeholder {
+    color: var(--text-dim);
+}
+
+/* Shared shape for the per-mode checkboxes (premieres-only,
+   monitored-only). Inline label that reads as a pill of small
+   text + checkbox so it doesn't compete visually with the search
+   input. */
+.calendar-toggle-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Backwards-compat: the original `.calendar-monitored-filter`
+   class is still referenced by tests / older snapshots if we
+   ever pick it up, but new markup uses `.calendar-toggle-filter`
+   for the same shape. */
+.calendar-monitored-filter {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-dim);
+    font-size: 13px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.calendar-list {
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+}
+
+.calendar-day {
+    /* Soft-card shape so each day reads as a chunk; no heavy
+       border, just a faint surface tint. */
+}
+
+.calendar-day-label {
+    /* Sticky so the day label stays visible while scrolling
+       through a long week. Top offset clears the fixed topbar
+       (56px) plus a gap. */
+    position: sticky;
+    top: 64px;
+    z-index: 5;
+    margin: 0 0 12px;
+    padding: 6px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--accent);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    /* Layout for the date label + episode count pill on the
+       right end of the row. */
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.calendar-day-label-text {
+    /* Plain wrapper so the parent's flex layout positions the
+       text + count predictably. */
+}
+
+.calendar-day-label-count {
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    text-transform: none;
+    letter-spacing: 0.02em;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Today highlight — accent left border + brighter label color so
+   the user's eye lands on today even mid-week. The `.calendar-day`
+   gets a tinted left strip via border-left. */
+.calendar-day-today .calendar-day-label-text::before {
+    content: 'Today · ';
+    color: var(--accent);
+    font-weight: 700;
+}
+
+.calendar-day-today {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    margin-left: -15px;
+}
+
+/* Hidden-by-filter sections + episodes — `display: none` so the
+   container's flex/grid doesn't reserve their space. */
+.calendar-day-hidden,
+.calendar-episode-hidden {
+    display: none;
+}
+
+.calendar-day-episodes {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.calendar-episode {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    transition: border-color 0.15s, transform 0.1s ease-out;
+}
+
+.calendar-episode:hover {
+    border-color: var(--border-accent, var(--accent));
+}
+
+.calendar-episode-link {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 14px;
+    color: var(--text);
+    text-decoration: none;
+}
+
+.calendar-episode-cover {
+    flex-shrink: 0;
+    width: 48px;
+    height: 68px;
+    border-radius: 4px;
+    object-fit: cover;
+    background: var(--bg-elevated);
+}
+
+.calendar-episode-cover-placeholder {
+    background: linear-gradient(135deg, var(--bg-elevated), var(--bg-card));
+    border: 1px solid var(--border);
+}
+
+.calendar-episode-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1;
+}
+
+.calendar-episode-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.calendar-episode-sub {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-wrap: wrap;
+}
+
+.calendar-episode-num {
+    font-family: var(--font-mono);
+    font-weight: 600;
+    color: var(--accent);
+}
+
+.calendar-episode-time {
+    font-variant-numeric: tabular-nums;
+}
+
+.calendar-episode-badge {
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.calendar-episode-badge-monitored {
+    color: var(--green, #a6e3a1);
+    background: rgba(166, 227, 161, 0.18);
+}
+
+.calendar-episode-badge-unmon {
+    color: var(--text-dim);
+    background: rgba(108, 112, 134, 0.18);
+}
+
+.calendar-empty {
+    padding: 48px 24px;
+    text-align: center;
+    color: var(--text-dim);
+}
+
+.calendar-empty p {
+    margin: 0 0 8px;
+}
+
+@media (max-width: 640px) {
+    .calendar-toolbar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    .calendar-range-tabs {
+        justify-content: stretch;
+    }
+    .calendar-range-tab {
+        flex: 1 1 auto;
+        text-align: center;
+    }
+    .calendar-day-label {
+        top: 0;
+    }
+    .calendar-episode-link {
+        gap: 10px;
+        padding: 10px 12px;
+    }
+    .calendar-episode-cover {
+        width: 40px;
+        height: 56px;
+    }
+}

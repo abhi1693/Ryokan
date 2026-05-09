@@ -89,6 +89,31 @@
     flex-shrink: 0;
 }
 
+/* Issue #116 — Calendar nav entry shape. Two variants:
+   - `.nav-calendar-desktop`: regular labeled link in the topbar
+     between Library and bulk-select. Always rendered; hidden on
+     mobile via the `.nav-links > *:not(...)` filter below.
+   - `.nav-calendar-mobile`: icon-only library-page-only entry,
+     whitelisted through the mobile filter so it shows up next to
+     the bulk-select toggle on mobile. Hidden on desktop. */
+.nav-calendar-mobile {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    color: var(--text-dim);
+    border-radius: var(--radius);
+    transition: color 0.15s, background 0.15s;
+}
+.nav-calendar-mobile:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+}
+.nav-calendar-mobile svg {
+    flex-shrink: 0;
+}
+
 @media (max-width: 640px) {
     /* Keep .nav-links flexed on mobile but hide every child except
        (a) the mobile logout icon and (b) the bulk-select toggle on
@@ -100,10 +125,13 @@
         gap: 6px;
         align-items: center;
     }
-    .nav-links > *:not(.nav-logout-mobile):not(.bulk-select-toggle) {
+    .nav-links > *:not(.nav-logout-mobile):not(.bulk-select-toggle):not(.nav-calendar-mobile) {
         display: none;
     }
     .nav-logout-mobile {
+        display: inline-flex;
+    }
+    .nav-calendar-mobile {
         display: inline-flex;
     }
     .mobile-tabbar {
