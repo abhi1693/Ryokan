@@ -4,7 +4,13 @@
 {% block title %} - Settings{% endblock %}
 
 {% block content %}
-<div class="page-header">
+{# `.tabbed-page` is the viewport-breakout wrapper; everything
+   inside (h2, alerts, sidebar, content) shares the same left edge
+   so the page reads as one column rather than three different x
+   anchors. Below 900px the breakout resets so the page reverts to
+   the regular `.content`-centered single-block layout. #}
+<div class="tabbed-page">
+<div class="tabbed-page-header">
     <h2>Settings</h2>
 </div>
 
@@ -19,15 +25,59 @@
     <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Settings error">{{ err }}</div>
 {% endif %}
 
-<div class="settings-tabs system-tabs">
-    <a href="/settings?tab=integrations" class="system-tab {% if tab == "integrations" %}active{% endif %}">Connections</a>
-    <a href="/settings?tab=downloads" class="system-tab {% if tab == "downloads" %}active{% endif %}">Download Clients</a>
-    <a href="/settings?tab=indexers" class="system-tab {% if tab == "indexers" %}active{% endif %}">Indexers</a>
-    <a href="/settings?tab=quality" class="system-tab {% if tab == "quality" %}active{% endif %}">Preferred Quality &amp; Releases</a>
-    <a href="/settings?tab=custom_formats" class="system-tab {% if tab == "custom_formats" %}active{% endif %}">Custom Formats</a>
-    <a href="/settings?tab=groups" class="system-tab {% if tab == "groups" %}active{% endif %}">Release Groups</a>
-    <a href="/settings?tab=general" class="system-tab {% if tab == "general" %}active{% endif %}">General</a>
-</div>
+<div class="tabbed-layout">
+<nav class="tabbed-sidebar" aria-label="Settings sections">
+    {# Sidebar nav — scales past the 8-tab horizontal-strip cliff
+       (Connections + Download Clients + Indexers + Quality + CF +
+       Groups + General + API Keys, with #115 calendar panel + #126
+       backup/restore queued behind it). Same `?tab=X` URL shape as
+       the old strip; just a layout change. Below 900px the layout
+       collapses back to a horizontal scroll strip via CSS, so
+       mobile UX matches the prior shape.
+
+       Sidebar order matches the user's mental walk-through of
+       configuring Ryokan from scratch: "Where does it find releases
+       (Connections / Download Clients / Indexers) → How should it
+       grade them (Quality / Custom Formats / Release Groups) →
+       What about the rest (General / API Keys)." #}
+    {# Lucide-style 14×14 line icons, matching the System tab pattern
+       (`templates/system.html` lines 11-42). Icons help visual scanning
+       once the sidebar grows past ~6 entries; without them the eye
+       relies entirely on the label position to find the target tab. #}
+    <a href="/settings?tab=integrations" class="tabbed-side-tab {% if tab == "integrations" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        <span>Connections</span>
+    </a>
+    <a href="/settings?tab=downloads" class="tabbed-side-tab {% if tab == "downloads" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span>Download Clients</span>
+    </a>
+    <a href="/settings?tab=indexers" class="tabbed-side-tab {% if tab == "indexers" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        <span>Indexers</span>
+    </a>
+    <a href="/settings?tab=quality" class="tabbed-side-tab {% if tab == "quality" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+        <span>Preferred Quality &amp; Releases</span>
+    </a>
+    <a href="/settings?tab=custom_formats" class="tabbed-side-tab {% if tab == "custom_formats" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>
+        <span>Custom Formats</span>
+    </a>
+    <a href="/settings?tab=groups" class="tabbed-side-tab {% if tab == "groups" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Release Groups</span>
+    </a>
+    <a href="/settings?tab=general" class="tabbed-side-tab {% if tab == "general" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+        <span>General</span>
+    </a>
+    <a href="/settings?tab=api_keys" class="tabbed-side-tab {% if tab == "api_keys" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>
+        <span>API Keys</span>
+    </a>
+</nav>
+<div class="tabbed-content">
 
 {# Issue #129 Phase 1 completion — all three previously-bulk-form
    tabs (Integrations, Quality, General) now have their own subforms
@@ -104,6 +154,20 @@
 {%~ include "partials/settings/download_clients.html" ~%}
 </div>
 {% endif %}
+
+{# Issue #114 — scoped API keys. CRUD goes through JSON endpoints
+   under /api/api-keys/* rather than form-POST so the create flow
+   can render the plaintext inline. JS lives in static/js/settings.js
+   under the api-keys section. #}
+{% if tab == "api_keys" %}
+<div class="settings-tab-panel active">
+{%~ include "partials/settings/api_keys.html" ~%}
+</div>
+{% endif %}
+
+</div>{# /.tabbed-content #}
+</div>{# /.tabbed-layout #}
+</div>{# /.tabbed-page #}
 
 {% endblock %}
 

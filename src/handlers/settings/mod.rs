@@ -202,6 +202,11 @@ struct SettingsTemplate {
     /// alongside the torznab/newznab indexer rows. Empty until the
     /// user adds one via the bottom-of-tab form.
     direct_rss_feeds: Vec<crate::models::direct_rss_feeds::DirectRssFeed>,
+    /// Issue #114 — every existing scoped API key, newest-first. The
+    /// Settings → API Keys tab renders the list server-side; the
+    /// JSON CRUD endpoints under `/api/api-keys/*` handle subsequent
+    /// mutations + the create-key one-time-plaintext flow.
+    api_keys: Vec<crate::models::api_key::ApiKey>,
 }
 
 /// Safe-to-render projection of `ExternalAccount`. Holds everything
@@ -705,6 +710,11 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         // the bulk Save Settings button (HTML5 forbids nested forms,
         // so the picker has always lived outside the bulk form).
         Some("downloads") => "downloads".to_string(),
+        // Issue #114 — scoped API keys. Tab surfaces the create/list/
+        // delete UI; the actual CRUD goes through the JSON endpoints
+        // at `/api/api-keys/*` since the create flow needs JS to show
+        // the plaintext exactly once.
+        Some("api_keys") => "api_keys".to_string(),
         _ => "integrations".to_string(),
     }
 }
@@ -851,6 +861,7 @@ async fn build_settings_template(
         indexers_res,
         download_clients_res,
         direct_rss_feeds_res,
+        api_keys_res,
     ) = tokio::join!(
         cfg_load,
         load_groups(&state.db),
@@ -860,6 +871,7 @@ async fn build_settings_template(
         crate::models::indexers::list_all(&state.db),
         crate::models::download_clients::list_all(&state.db),
         crate::models::direct_rss_feeds::list_all(&state.db),
+        crate::models::api_key::list(&state.db),
     );
     let cfg = cfg_override.or(cfg_loaded).unwrap_or_default();
     // A decrypt failure (tampered blob, key rotation without migration)
@@ -900,6 +912,7 @@ async fn build_settings_template(
         .iter()
         .any(|r| r.is_default && protocol_for_kind(&r.kind) == Some("usenet"));
     let direct_rss_feeds = direct_rss_feeds_res.unwrap_or_default();
+    let api_keys = api_keys_res.unwrap_or_default();
     let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
     SettingsTemplate {
         page: "settings".to_string(),
@@ -923,6 +936,7 @@ async fn build_settings_template(
         first_usenet_client,
         direct_rss_feeds,
         cached_status,
+        api_keys,
     }
 }
 
@@ -1375,6 +1389,9 @@ pub async fn settings_submit(
         let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
             .await
             .unwrap_or_default();
+        let api_keys = crate::models::api_key::list(&state.db)
+            .await
+            .unwrap_or_default();
         let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
         let template = SettingsTemplate {
             page: "settings".to_string(),
@@ -1398,6 +1415,7 @@ pub async fn settings_submit(
             first_usenet_client,
             direct_rss_feeds,
             cached_status,
+            api_keys,
         };
         return Html(template.render().unwrap_or_default());
     }
@@ -1495,6 +1513,9 @@ pub async fn settings_submit(
     let direct_rss_feeds = crate::models::direct_rss_feeds::list_all(&state.db)
         .await
         .unwrap_or_default();
+    let api_keys = crate::models::api_key::list(&state.db)
+        .await
+        .unwrap_or_default();
     let cached_status = download_clients::snapshot_fresh_dc_status(&state.dc_status_cache);
     let template = SettingsTemplate {
         page: "settings".to_string(),
@@ -1523,6 +1544,7 @@ pub async fn settings_submit(
         first_usenet_client,
         direct_rss_feeds,
         cached_status,
+        api_keys,
     };
     Html(template.render().unwrap_or_default())
 }

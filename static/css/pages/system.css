@@ -578,8 +578,18 @@
     /* Reserve space on the right for the corner × delete button
        (absolute-positioned). ~36px covers a 20px button + spacing.
        Pre-PR there was also a per-card Test button doubled up here;
-       Test moved exclusively to the modal so the reservation halves. */
+       Test moved exclusively to the modal so the reservation halves.
+       Mobile bumps the button to a 44×44 touch target (`forms.css`
+       mobile @media), so the mobile reservation below grows to
+       ~60px to clear the larger button. */
     padding-right: 36px;
+}
+
+@media (max-width: 640px) {
+    .notif-card-header {
+        /* 44px button + 10px right offset + ~6px breathing room. */
+        padding-right: 60px;
+    }
 }
 .notif-card-title {
     display: flex;

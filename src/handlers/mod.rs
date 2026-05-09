@@ -11,9 +11,11 @@ pub mod search;
 pub mod settings;
 pub mod system;
 
+pub mod api_keys;
 pub mod arr_auth;
 pub mod arr_shared;
 pub mod media;
 pub mod radarr_compat;
+pub mod scoped_auth;
 pub mod sonarr_compat;
 pub mod webhook;

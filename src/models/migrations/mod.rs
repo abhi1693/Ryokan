@@ -2649,6 +2649,60 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
+    // Issue #114 — scoped API keys. `key` stores the plaintext
+    // (UNIQUE-indexed for both fast O(log N) auth-path lookup and
+    // collision dedup against 32-byte CSPRNG output). Plaintext
+    // matches the storage shape of every other Ryokan integration
+    // key (`config.sonarr_api_key`, `config.autobrr_api_key`,
+    // `config.jellyfin_api_key` — all TEXT plaintext). Encrypting
+    // just this one would be a defense-in-depth illusion when
+    // those plaintext keys live alongside it in the same DB.
+    //
+    // `scopes` is a JSON array of scope strings (see
+    // `models::api_key::ALL_SCOPES`); stored as TEXT because the
+    // set is small enough that a real JSON1 query isn't worth the
+    // cost. `last_used_at` is best-effort — touched after a
+    // successful request match so users can identify abandoned
+    // keys for cleanup.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            key TEXT NOT NULL DEFAULT '' UNIQUE,
+            scopes TEXT NOT NULL DEFAULT '[]',
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+            last_used_at INTEGER,
+            enabled INTEGER NOT NULL DEFAULT 1
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
+    // Idempotency for upgraders from the earlier hash+encrypted
+    // schema. The new `key` column starts empty for those rows,
+    // which means pre-rewrite keys can't authenticate against the
+    // new code path — they're effectively invalidated and need to
+    // be deleted + recreated. Acceptable in unmerged-dev land;
+    // documented in the commit so any local tester knows to wipe
+    // their `api_keys` rows after upgrading.
+    sqlx::query("ALTER TABLE api_keys ADD COLUMN key TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Lookup index on the plaintext key so the per-request
+    // middleware path (`SELECT ... WHERE key = ?`) is O(log N).
+    // The UNIQUE on the column already creates an index, so this
+    // CREATE INDEX is technically redundant — kept as a defensive
+    // statement in case a future schema change drops the UNIQUE
+    // constraint without remembering to add the index back.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys (key)")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

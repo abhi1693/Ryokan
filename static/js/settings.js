@@ -1561,3 +1561,504 @@ if (window.__ryokanSettingsRelativeTimeTimer) {
         init();
     }
 })();
+
+// ─── Issue #114 — scoped API keys ────────────────────────────────
+//
+// CRUD against /api/api-keys/* with a one-time-plaintext modal flow.
+// Wrapped in an IIFE so the var-at-module-scope rule (CLAUDE.md
+// per-page JS quirks) applies; the function is reentered every
+// time hx-boost re-runs the script after a body swap.
+//
+// State machine:
+//   1. List view (server-rendered + JS re-rendered after CRUD).
+//   2. Create button → modal opens with name + scope checkbox form.
+//   3. Submit → POST /api/api-keys → response carries plaintext +
+//      view. Modal swaps to "save your key" view with a copy button.
+//   4. "I've saved it" → close modal, refresh list via GET /api/api-keys.
+//
+// Per-row toggle / delete go through their own JSON endpoints; the
+// row markup is mutated in place rather than re-fetching the entire
+// list, which would cost a round-trip per click and feel laggy.
+(function () {
+    function escHtml(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    function renderCard(view) {
+        var scopeChips = view.scopes
+            .map(function (s) { return '<span class="api-key-scope-chip">' + escHtml(s) + '</span>'; })
+            .join('');
+        var statusPillClass = view.enabled
+            ? 'api-key-status-pill-on'
+            : 'api-key-status-pill-off';
+        var statusLabel = view.enabled ? 'Enabled' : 'Disabled';
+        var cardDisabledClass = view.enabled ? '' : ' api-key-card-disabled';
+        return ''
+            + '<article class="api-key-card' + cardDisabledClass + '" data-api-key-id="' + view.id + '">'
+            +   '<div class="api-key-card-header">'
+            +     '<div class="api-key-card-title">'
+            +       '<strong class="api-key-card-name">' + escHtml(view.name) + '</strong>'
+            +     '</div>'
+            +     '<span class="api-key-status-pill ' + statusPillClass + '">' + statusLabel + '</span>'
+            +   '</div>'
+            +   '<div class="api-key-card-scopes">' + scopeChips + '</div>'
+            +   '<dl class="api-key-card-meta">'
+            +     '<div class="api-key-card-meta-row">'
+            +       '<dt>Last used</dt>'
+            +       '<dd class="api-key-last-used">' + escHtml(view.last_used_display) + '</dd>'
+            +     '</div>'
+            +     '<div class="api-key-card-meta-row">'
+            +       '<dt>Created</dt>'
+            +       '<dd class="api-key-created">' + escHtml(view.created_display) + '</dd>'
+            +     '</div>'
+            +   '</dl>'
+            +   '<div class="api-key-reveal-row" data-api-key-id="' + view.id + '">'
+            +     '<input type="text" class="api-key-reveal-input" data-api-key-reveal-input value="••••••••••••••••••••••••••••••••" readonly aria-label="API key (hidden, click Show to reveal)">'
+            +     '<button type="button" class="btn btn-ghost btn-sm api-key-show-btn" data-api-key-id="' + view.id + '" data-api-key-name="' + escHtml(view.name) + '" title="Reveal the plaintext key">Show</button>'
+            +     '<button type="button" class="btn btn-ghost btn-sm api-key-copy-btn" data-api-key-id="' + view.id + '" data-api-key-name="' + escHtml(view.name) + '" title="Copy the plaintext key">Copy</button>'
+            +   '</div>'
+            +   '<div class="api-key-card-footer">'
+            +     '<label class="api-key-switch">'
+            +       '<input type="checkbox" class="api-key-enabled-toggle" data-api-key-id="' + view.id + '"' + (view.enabled ? ' checked' : '') + '>'
+            +       '<span class="api-key-switch-track"><span class="api-key-switch-thumb"></span></span>'
+            +       '<span class="api-key-switch-label">' + statusLabel + '</span>'
+            +     '</label>'
+            +   '</div>'
+            +   '<div class="api-key-card-actions">'
+            +     '<button type="button" class="btn btn-icon-danger api-key-delete-btn" data-api-key-id="' + view.id + '" data-api-key-name="' + escHtml(view.name) + '" title="Delete ' + escHtml(view.name) + '" aria-label="Delete ' + escHtml(view.name) + '">×</button>'
+            +   '</div>'
+            + '</article>';
+    }
+
+    function renderAddTile() {
+        return ''
+            + '<button type="button" class="api-key-card api-key-card-add" id="api-keys-create-btn">'
+            +   '<div class="api-key-card-add-icon">+</div>'
+            +   '<div class="api-key-card-add-label">Create API key</div>'
+            + '</button>';
+    }
+
+    function renderList(views) {
+        var listEl = document.getElementById('api-keys-list');
+        if (!listEl) return;
+        var cards = (views || []).map(renderCard).join('');
+        listEl.innerHTML = '<div class="api-key-card-grid">' + cards + renderAddTile() + '</div>';
+        wireListEvents();
+        wireCreateButton();
+    }
+
+    async function refreshList() {
+        try {
+            var res = await fetch('/api/api-keys', { credentials: 'same-origin' });
+            if (!res.ok) return;
+            var views = await res.json();
+            renderList(views);
+        } catch (_) {
+            // Best-effort refresh; a failure leaves the previous list
+            // visible rather than blanking the tab.
+        }
+    }
+
+    // Apply the admin-shadows-others rule. When admin is checked,
+    // every other scope tile is grayed out + uncheckable + their
+    // checkboxes are cleared (admin is universal-grant, so holding
+    // it makes the others meaningless). When admin is unchecked,
+    // the others re-enable and the user can click them again.
+    function syncScopeShadowing() {
+        var adminEl = document.querySelector(
+            '#api-keys-create-form input[name="scope"][value="admin"]'
+        );
+        var adminOn = adminEl ? adminEl.checked : false;
+        document
+            .querySelectorAll('#api-keys-create-form .api-keys-scope-tile')
+            .forEach(function (tile) {
+                var input = tile.querySelector('input[name="scope"]');
+                if (!input || input.value === 'admin') return;
+                tile.classList.toggle('api-keys-scope-tile-shadowed', adminOn);
+                if (adminOn && input.checked) {
+                    input.checked = false;
+                }
+            });
+    }
+
+    // Helper for setting the error text without clobbering the icon
+    // child element that lives alongside it inside the alert div.
+    function setCreateError(msg) {
+        var errEl = document.getElementById('api-keys-create-error');
+        if (!errEl) return;
+        if (!msg) {
+            errEl.hidden = true;
+            return;
+        }
+        var textEl = errEl.querySelector('.api-keys-form-error-text');
+        if (textEl) {
+            textEl.textContent = msg;
+        }
+        errEl.hidden = false;
+    }
+
+    function openCreateModal() {
+        var modal = document.getElementById('api-keys-create-modal');
+        if (!modal) return;
+        // Reset the form to step 1 every open so a previous create's
+        // plaintext doesn't persist.
+        var formStep = document.getElementById('api-keys-create-form-step');
+        var resultStep = document.getElementById('api-keys-create-result-step');
+        var nameEl = document.getElementById('api-keys-create-name');
+        if (formStep) formStep.hidden = false;
+        if (resultStep) resultStep.hidden = true;
+        setCreateError('');
+        if (nameEl) nameEl.value = '';
+        // Reset every scope checkbox so the user explicitly picks
+        // what their new key needs (no defaulted-to-calendar
+        // surprise that gets shipped as a feature inadvertently).
+        document
+            .querySelectorAll('#api-keys-create-form input[name="scope"]')
+            .forEach(function (el) { el.checked = false; });
+        // Clear any leftover admin-shadowed state from a previous
+        // open where admin was selected. With every checkbox
+        // unchecked above, admin is unchecked too, so this just
+        // strips the shadowed class off the other tiles.
+        syncScopeShadowing();
+        // Modal uses `style.display` (matches the notif/dc modal-backdrop
+        // pattern) rather than the `hidden` attribute, so a CSS rule on
+        // .modal-backdrop with `display: flex` for the open state isn't
+        // necessary — the inline style does the work.
+        modal.style.display = 'flex';
+        if (nameEl) nameEl.focus();
+    }
+
+    function closeCreateModal() {
+        var modal = document.getElementById('api-keys-create-modal');
+        if (modal) modal.style.display = 'none';
+    }
+
+    async function submitCreateForm(ev) {
+        ev.preventDefault();
+        var nameEl = document.getElementById('api-keys-create-name');
+        var submitBtn = document.getElementById('api-keys-create-submit');
+        if (!nameEl) return;
+
+        var scopes = Array
+            .from(document.querySelectorAll('#api-keys-create-form input[name="scope"]:checked'))
+            .map(function (el) { return el.value; })
+            .join(',');
+        var fd = new URLSearchParams();
+        fd.set('name', nameEl.value);
+        fd.set('scopes', scopes);
+
+        if (submitBtn) {
+            submitBtn.disabled = true;
+            submitBtn.textContent = 'Creating...';
+        }
+        setCreateError('');
+        try {
+            var res = await fetch('/api/api-keys', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: fd.toString(),
+            });
+            if (!res.ok) {
+                var msg = await res.text();
+                setCreateError(msg || ('Create failed (HTTP ' + res.status + ')'));
+                return;
+            }
+            var data = await res.json();
+            // Step 2: show plaintext.
+            var formStep = document.getElementById('api-keys-create-form-step');
+            var resultStep = document.getElementById('api-keys-create-result-step');
+            var plaintextEl = document.getElementById('api-keys-plaintext');
+            if (formStep) formStep.hidden = true;
+            if (resultStep) resultStep.hidden = false;
+            if (plaintextEl) {
+                plaintextEl.value = data.plaintext;
+                plaintextEl.select();
+            }
+        } catch (e) {
+            setCreateError('Network error: ' + e.message);
+        } finally {
+            if (submitBtn) {
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Create key';
+            }
+        }
+    }
+
+    async function copyPlaintext() {
+        var plaintextEl = document.getElementById('api-keys-plaintext');
+        var confirmEl = document.getElementById('api-keys-copy-confirm');
+        if (!plaintextEl) return;
+        try {
+            await navigator.clipboard.writeText(plaintextEl.value);
+            if (confirmEl) {
+                confirmEl.hidden = false;
+                setTimeout(function () { confirmEl.hidden = true; }, 2000);
+            }
+        } catch (_) {
+            // Fallback: select the input so the user can ctrl-C.
+            plaintextEl.select();
+            plaintextEl.setSelectionRange(0, 99999);
+        }
+    }
+
+    async function toggleKeyEnabled(id, enabled) {
+        try {
+            var fd = new URLSearchParams();
+            fd.set('enabled', enabled ? 'true' : 'false');
+            var res = await fetch('/api/api-keys/' + id + '/toggle', {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                body: fd.toString(),
+            });
+            if (!res.ok) return false;
+            var view = await res.json();
+            // Update the card's visual state in three places: the
+            // header status pill (top-right), the switch label
+            // (footer), and the .api-key-card-disabled class on the
+            // article (whole-card opacity hint). The switch checkbox
+            // itself already shows the right state — the user clicked
+            // it, the browser flipped it.
+            var card = document.querySelector('.api-key-card[data-api-key-id="' + id + '"]');
+            if (card) {
+                card.classList.toggle('api-key-card-disabled', !view.enabled);
+                var label = view.enabled ? 'Enabled' : 'Disabled';
+                var switchLabel = card.querySelector('.api-key-switch-label');
+                if (switchLabel) switchLabel.textContent = label;
+                var pill = card.querySelector('.api-key-status-pill');
+                if (pill) {
+                    pill.textContent = label;
+                    pill.classList.toggle('api-key-status-pill-on', view.enabled);
+                    pill.classList.toggle('api-key-status-pill-off', !view.enabled);
+                }
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async function deleteKey(id, name) {
+        // Use the in-app confirm modal (defined in base.js) instead of
+        // the browser's native `window.confirm` so the prompt looks
+        // consistent with the rest of Ryokan's destructive-action
+        // confirmations (Delete File, Cancel Pending, etc.). The
+        // `danger: true` flag turns the Yes button red.
+        if (!window.ryokanConfirm) {
+            // Fallback for the unlikely case base.js hasn't loaded.
+            if (!window.confirm('Delete API key "' + name + '"?')) return;
+        } else {
+            var res = await window.ryokanConfirm({
+                title: 'Delete API key',
+                body: 'Delete the "' + name + '" API key? Any integration using it will start receiving 401 errors immediately. This cannot be undone.',
+                yesLabel: 'Delete',
+                noLabel: 'Cancel',
+                danger: true,
+            });
+            if (!res || !res.ok) return;
+        }
+        try {
+            var deleteRes = await fetch('/api/api-keys/' + id + '/delete', {
+                method: 'POST',
+                credentials: 'same-origin',
+            });
+            if (!deleteRes.ok) {
+                if (window.ryokanToast) window.ryokanToast('Delete failed', 'error');
+                return;
+            }
+            // Remove the card immediately. Selector targets the card
+            // article (was tr in the legacy table layout). After
+            // removal the "+ Create" tile still sits in the grid so
+            // there's no need to render a separate empty state.
+            var card = document.querySelector('.api-key-card[data-api-key-id="' + id + '"]');
+            if (card) card.remove();
+        } catch (_) {
+            if (window.ryokanToast) window.ryokanToast('Network error', 'error');
+        }
+    }
+
+    async function fetchPlaintext(id) {
+        try {
+            var res = await fetch('/api/api-keys/' + id + '/reveal', {
+                credentials: 'same-origin',
+            });
+            if (!res.ok) {
+                var msg = await res.text();
+                if (window.ryokanToast) window.ryokanToast(msg || 'Reveal failed', 'error');
+                return null;
+            }
+            var data = await res.json();
+            return data.plaintext || null;
+        } catch (_) {
+            if (window.ryokanToast) window.ryokanToast('Network error', 'error');
+            return null;
+        }
+    }
+
+    async function showKey(id, btn) {
+        var card = document.querySelector('.api-key-reveal-row[data-api-key-id="' + id + '"]');
+        if (!card) return;
+        var input = card.querySelector('[data-api-key-reveal-input]');
+        if (!input) return;
+
+        // Toggle: if already revealed, re-mask. Hide → fetch + show.
+        if (input.dataset.revealed === '1') {
+            input.value = '••••••••••••••••••••••••••••••••';
+            input.classList.remove('api-key-reveal-input-revealed');
+            input.dataset.revealed = '0';
+            if (btn) btn.textContent = 'Show';
+            return;
+        }
+
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '…';
+        }
+        var plaintext = await fetchPlaintext(id);
+        if (btn) btn.disabled = false;
+        if (!plaintext) {
+            if (btn) btn.textContent = 'Show';
+            return;
+        }
+        input.value = plaintext;
+        input.classList.add('api-key-reveal-input-revealed');
+        input.dataset.revealed = '1';
+        input.select();
+        if (btn) btn.textContent = 'Hide';
+    }
+
+    async function copyKey(id, btn) {
+        // Copy without requiring a Show first — fetch on demand and
+        // write to clipboard. Saves a click in the common case where
+        // the user just wants the value pasted into an integration.
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '…';
+        }
+        var plaintext = await fetchPlaintext(id);
+        if (btn) btn.disabled = false;
+        if (!plaintext) {
+            if (btn) btn.textContent = 'Copy';
+            return;
+        }
+        try {
+            await navigator.clipboard.writeText(plaintext);
+            if (btn) {
+                btn.textContent = 'Copied';
+                setTimeout(function () { btn.textContent = 'Copy'; }, 1500);
+            }
+        } catch (_) {
+            // Clipboard API blocked (older browsers, insecure origin).
+            // Fall back: surface plaintext in the input and select it
+            // so the user can ctrl-C manually.
+            var input = document
+                .querySelector('.api-key-reveal-row[data-api-key-id="' + id + '"] [data-api-key-reveal-input]');
+            if (input) {
+                input.value = plaintext;
+                input.classList.add('api-key-reveal-input-revealed');
+                input.dataset.revealed = '1';
+                input.select();
+                input.setSelectionRange(0, 99999);
+            }
+            if (btn) btn.textContent = 'Copy';
+        }
+    }
+
+    function wireListEvents() {
+        document.querySelectorAll('.api-key-enabled-toggle').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('change', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                if (!id) return;
+                toggleKeyEnabled(id, el.checked).then(function (ok) {
+                    if (!ok) el.checked = !el.checked; // revert
+                });
+            });
+        });
+        document.querySelectorAll('.api-key-delete-btn').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('click', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                var name = el.dataset.apiKeyName || '';
+                if (id) deleteKey(id, name);
+            });
+        });
+        document.querySelectorAll('.api-key-show-btn').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('click', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                if (id) showKey(id, el);
+            });
+        });
+        document.querySelectorAll('.api-key-copy-btn').forEach(function (el) {
+            if (el.dataset.apiKeysWired === '1') return;
+            el.dataset.apiKeysWired = '1';
+            el.addEventListener('click', function () {
+                var id = parseInt(el.dataset.apiKeyId, 10);
+                if (id) copyKey(id, el);
+            });
+        });
+    }
+
+    // Extracted so renderList() can re-bind after replacing the DOM
+    // (the "+ Create API key" tile lives inside the grid that gets
+    // re-rendered, so its onclick listener has to follow). Idempotent
+    // via the dataset.apiKeysCreateWired guard so init() and renderList
+    // can both call it without stacking handlers.
+    function wireCreateButton() {
+        var createBtn = document.getElementById('api-keys-create-btn');
+        if (!createBtn || createBtn.dataset.apiKeysCreateWired === '1') return;
+        createBtn.dataset.apiKeysCreateWired = '1';
+        createBtn.addEventListener('click', openCreateModal);
+    }
+
+    function init() {
+        // Only wire when the api-keys tab is rendered. Selector doubles
+        // as a tab-presence check; a no-op on every other tab.
+        if (!document.getElementById('api-keys-tab')) return;
+        wireListEvents();
+        wireCreateButton();
+
+        var form = document.getElementById('api-keys-create-form');
+        if (form) {
+            form.addEventListener('submit', submitCreateForm);
+            // Delegated change listener — re-runs the shadow rule
+            // on any scope checkbox flip so admin-on/off updates
+            // the other tiles immediately.
+            form.addEventListener('change', function (ev) {
+                if (ev.target && ev.target.name === 'scope') {
+                    syncScopeShadowing();
+                }
+            });
+        }
+
+        var copyBtn = document.getElementById('api-keys-copy-btn');
+        if (copyBtn) copyBtn.addEventListener('click', copyPlaintext);
+
+        var savedBtn = document.getElementById('api-keys-saved-btn');
+        if (savedBtn) savedBtn.addEventListener('click', function () {
+            closeCreateModal();
+            refreshList();
+        });
+
+        // Generic modal-close handler for the overlay + cancel buttons.
+        document.querySelectorAll('[data-modal-close="api-keys-create-modal"]').forEach(function (el) {
+            el.addEventListener('click', closeCreateModal);
+        });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
