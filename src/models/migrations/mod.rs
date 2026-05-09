@@ -2649,21 +2649,27 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // Issue #114 — scoped API keys. `key_hash` stores the sha256 hex
-    // of the plaintext key (which is shown to the user exactly once
-    // at creation time and never recoverable, matching the GitHub PAT
-    // UX). `scopes` is a JSON array of scope strings (see
-    // `models::api_key::ALL_SCOPES`); stored as TEXT because the set
-    // is small enough that a real JSON1 query isn't worth the cost.
-    // `last_used_at` is best-effort — touched after a successful
-    // request match so users can identify abandoned keys for
-    // cleanup.
+    // Issue #114 — scoped API keys. `key` stores the plaintext
+    // (UNIQUE-indexed for both fast O(log N) auth-path lookup and
+    // collision dedup against 32-byte CSPRNG output). Plaintext
+    // matches the storage shape of every other Ryokan integration
+    // key (`config.sonarr_api_key`, `config.autobrr_api_key`,
+    // `config.jellyfin_api_key` — all TEXT plaintext). Encrypting
+    // just this one would be a defense-in-depth illusion when
+    // those plaintext keys live alongside it in the same DB.
+    //
+    // `scopes` is a JSON array of scope strings (see
+    // `models::api_key::ALL_SCOPES`); stored as TEXT because the
+    // set is small enough that a real JSON1 query isn't worth the
+    // cost. `last_used_at` is best-effort — touched after a
+    // successful request match so users can identify abandoned
+    // keys for cleanup.
     sqlx::query(
         r#"
         CREATE TABLE IF NOT EXISTS api_keys (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
-            key_hash TEXT NOT NULL UNIQUE,
+            key TEXT NOT NULL DEFAULT '' UNIQUE,
             scopes TEXT NOT NULL DEFAULT '[]',
             created_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
             last_used_at INTEGER,
@@ -2674,14 +2680,25 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // Lookup index on the hash so the per-request middleware path
-    // (sha256(plaintext) → SELECT WHERE key_hash = ?) is O(log N)
-    // even at hundreds of keys. UNIQUE on the column is enforced
-    // at create time too — duplicate plaintext between users is
-    // astronomically unlikely with 32-byte CSPRNG output, but the
-    // constraint also catches the post-rotate-on-collision case
-    // we'd otherwise have to handle in the model.
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_hash ON api_keys (key_hash)")
+    // Idempotency for upgraders from the earlier hash+encrypted
+    // schema. The new `key` column starts empty for those rows,
+    // which means pre-rewrite keys can't authenticate against the
+    // new code path — they're effectively invalidated and need to
+    // be deleted + recreated. Acceptable in unmerged-dev land;
+    // documented in the commit so any local tester knows to wipe
+    // their `api_keys` rows after upgrading.
+    sqlx::query("ALTER TABLE api_keys ADD COLUMN key TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+
+    // Lookup index on the plaintext key so the per-request
+    // middleware path (`SELECT ... WHERE key = ?`) is O(log N).
+    // The UNIQUE on the column already creates an index, so this
+    // CREATE INDEX is technically redundant — kept as a defensive
+    // statement in case a future schema change drops the UNIQUE
+    // constraint without remembering to add the index back.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys (key)")
         .execute(db)
         .await
         .ok();

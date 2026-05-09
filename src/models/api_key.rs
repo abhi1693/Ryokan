@@ -7,11 +7,13 @@
 //!
 //! ## Storage
 //!
-//! `api_keys.key_hash` is the sha256 hex of the plaintext key. The
-//! plaintext is shown to the user **exactly once** at creation time
-//! and never recoverable from the DB — same UX as GitHub PATs. A DB
-//! dump leaks hashes, not keys; an attacker would need to brute-force
-//! 32 bytes of CSPRNG to forge a valid request.
+//! `key` is the plaintext (UNIQUE-indexed) — same storage shape as
+//! every other Ryokan integration key (`config.sonarr_api_key`,
+//! `config.autobrr_api_key`, `config.jellyfin_api_key`). Encrypting
+//! just this one column would be a defense-in-depth illusion when
+//! those plaintext keys live alongside it in the same DB; consistency
+//! with the rest of the codebase wins over the GitHub-PAT pattern
+//! we briefly tried.
 //!
 //! ## Scopes
 //!
@@ -36,7 +38,6 @@
 //! cookie-OR-key composition problem until we have a dual-mode
 //! endpoint to design against.
 
-use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
 
 /// Every valid scope string. Source-of-truth for both the create-key
@@ -80,6 +81,33 @@ impl ApiKey {
         }
         self.scopes.iter().any(|s| s == "admin" || s == required)
     }
+
+    /// Format `created_at` for the Settings card. UTC, "MMM DD, YYYY
+    /// HH:MM" shape — readable without locale shenanigans, no
+    /// "Loading..." → JS-hydrate flash. Single-user self-hosted PVR;
+    /// the user knows their server's timezone.
+    pub fn created_at_display(&self) -> String {
+        format_unix_ts(self.created_at)
+    }
+
+    /// Same shape as [`created_at_display`] but with a `"never"`
+    /// fallback for keys that have never been used. Treats `Some(0)`
+    /// as "never" too — `touch_last_used` always writes a real epoch
+    /// timestamp, but a restored backup or a hand-edited row could
+    /// still produce that shape and "Jan 01, 1970 00:00" reads as a
+    /// glitch rather than the intended never-used state.
+    pub fn last_used_display(&self) -> String {
+        match self.last_used_at {
+            Some(ts) if ts > 0 => format_unix_ts(ts),
+            _ => "never".to_string(),
+        }
+    }
+}
+
+fn format_unix_ts(secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .map(|dt| dt.format("%b %d, %Y %H:%M").to_string())
+        .unwrap_or_default()
 }
 
 /// Generate a 32-byte CSPRNG plaintext key as a 64-char hex string.
@@ -92,20 +120,14 @@ pub fn generate_key() -> String {
     hex::encode(bytes)
 }
 
-/// Hash a plaintext key into the form stored in `api_keys.key_hash`.
-/// sha256-hex by convention; 32 bytes of CSPRNG input means the hash
-/// space is unique-by-construction (collision probability negligible)
-/// and an unsalted hash is fine — there's no rainbow table for
-/// 32-byte uniformly-random input.
-pub fn hash_key(plaintext: &str) -> String {
-    hex::encode(Sha256::digest(plaintext.as_bytes()))
-}
-
 /// Insert a new API key with the given name + scopes. Returns
-/// `(row_id, plaintext_key)`. The plaintext is the only place this
-/// value is ever surfaced; the caller is expected to render it to
-/// the user immediately. Duplicate-name is permitted (users may
-/// reasonably want two "iCal subscriber" keys for redundancy).
+/// `(row_id, plaintext_key)`. The plaintext is also persisted to
+/// the `key` column so the Settings UI's per-card Show button can
+/// surface it later; this matches the storage shape of every other
+/// Ryokan integration key. Duplicate-name is permitted (users may
+/// reasonably want two "iCal subscriber" keys for redundancy);
+/// duplicate plaintext is rejected by the UNIQUE constraint, but
+/// 32-byte CSPRNG output makes collisions astronomically unlikely.
 ///
 /// Scope strings are validated against [`ALL_SCOPES`]; an unknown
 /// scope returns an error rather than silently storing it (a typo
@@ -126,19 +148,32 @@ pub async fn create(
         }
     }
     let plaintext = generate_key();
-    let key_hash = hash_key(&plaintext);
     let scopes_json =
         serde_json::to_string(scopes).map_err(|e| format!("Failed to serialize scopes: {e}"))?;
-    let row: (i64,) = sqlx::query_as(
-        "INSERT INTO api_keys (name, key_hash, scopes) VALUES (?, ?, ?) RETURNING id",
-    )
-    .bind(trimmed_name)
-    .bind(&key_hash)
-    .bind(&scopes_json)
-    .fetch_one(db)
-    .await
-    .map_err(|e| format!("Failed to create API key: {e}"))?;
+    let row: (i64,) =
+        sqlx::query_as("INSERT INTO api_keys (name, key, scopes) VALUES (?, ?, ?) RETURNING id")
+            .bind(trimmed_name)
+            .bind(&plaintext)
+            .bind(&scopes_json)
+            .fetch_one(db)
+            .await
+            .map_err(|e| format!("Failed to create API key: {e}"))?;
     Ok((row.0, plaintext))
+}
+
+/// Read the plaintext key for a given row id. Used by the Settings
+/// UI's per-card Show button (cookie-auth gated through the regular
+/// `require_auth` middleware). Returns `Ok(None)` for a missing row
+/// OR a row with an empty `key` column (upgraders from the previous
+/// hash+encrypted schema have no plaintext available; they need to
+/// delete + recreate to recover the key value).
+pub async fn get_plaintext(db: &SqlitePool, id: i64) -> Result<Option<String>, String> {
+    let row: Option<(String,)> = sqlx::query_as("SELECT key FROM api_keys WHERE id = ?")
+        .bind(id)
+        .fetch_optional(db)
+        .await
+        .map_err(|e| format!("Lookup failed: {e}"))?;
+    Ok(row.and_then(|(k,)| if k.is_empty() { None } else { Some(k) }))
 }
 
 /// Read every row in the `api_keys` table, sorted newest-first. Used
@@ -158,23 +193,21 @@ pub async fn list(db: &SqlitePool) -> Result<Vec<ApiKey>, sqlx::Error> {
 
 /// Look up a key by its plaintext form. Returns `None` for a missing
 /// row or a row with `enabled = 0` (disabled keys behave identically
-/// to deleted keys from the request path's POV). The hash compare
-/// happens via SQL on a UNIQUE-indexed column — no constant-time
-/// concern because the hash itself is the unforgeable part: a timing
-/// oracle on the lookup leaks at most "this hash exists in the DB,"
-/// which is the same answer a successful-vs-failed response
-/// already conveys.
+/// to deleted keys from the request path's POV). The compare happens
+/// via SQL on a UNIQUE-indexed column — no constant-time concern
+/// because the key string is the unforgeable secret: a timing oracle
+/// on the lookup leaks at most "this key exists in the DB," which
+/// is the same answer a successful-vs-failed response conveys.
 pub async fn lookup_by_plaintext(
     db: &SqlitePool,
     plaintext: &str,
 ) -> Result<Option<ApiKey>, sqlx::Error> {
-    let key_hash = hash_key(plaintext);
     let row = sqlx::query(
         "SELECT id, name, scopes, created_at, last_used_at, enabled \
          FROM api_keys \
-         WHERE key_hash = ? AND enabled = 1",
+         WHERE key = ? AND enabled = 1",
     )
-    .bind(&key_hash)
+    .bind(plaintext)
     .fetch_optional(db)
     .await?;
     Ok(row.map(parse_row))
@@ -242,20 +275,57 @@ mod tests {
     use crate::test_support::in_memory_pool;
 
     #[tokio::test]
-    async fn create_returns_plaintext_and_persists_hash() {
+    async fn create_returns_plaintext_and_persists_it() {
         let pool = in_memory_pool().await;
         let (id, plaintext) = create(&pool, "Test", &["calendar".to_string()])
             .await
             .unwrap();
         assert!(id > 0);
         assert_eq!(plaintext.len(), 64, "32-byte hex = 64 chars");
-        // Hash matches what we'd recompute from the plaintext.
-        let stored: String = sqlx::query_scalar("SELECT key_hash FROM api_keys WHERE id = ?")
+        let stored: String = sqlx::query_scalar("SELECT key FROM api_keys WHERE id = ?")
             .bind(id)
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(stored, hash_key(&plaintext));
+        assert_eq!(stored, plaintext);
+    }
+
+    #[tokio::test]
+    async fn get_plaintext_returns_the_stored_key() {
+        let pool = in_memory_pool().await;
+        let (id, plaintext) = create(&pool, "Test", &["calendar".to_string()])
+            .await
+            .unwrap();
+        let revealed = get_plaintext(&pool, id).await.unwrap();
+        assert_eq!(revealed, Some(plaintext));
+    }
+
+    #[tokio::test]
+    async fn get_plaintext_returns_none_for_unknown_id() {
+        let pool = in_memory_pool().await;
+        let revealed = get_plaintext(&pool, 99_999).await.unwrap();
+        assert!(revealed.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_plaintext_returns_none_for_upgrader_row_with_empty_key() {
+        // Upgraders from the previous hash+encrypted schema get the
+        // new `key` column with the default empty string — there's
+        // no plaintext to recover for those rows. Pin that
+        // get_plaintext returns Ok(None), distinct from "row not
+        // found," so the handler can surface a "rotate to recover"
+        // message rather than a generic 404.
+        let pool = in_memory_pool().await;
+        let (id, _) = create(&pool, "Test", &["calendar".to_string()])
+            .await
+            .unwrap();
+        sqlx::query("UPDATE api_keys SET key = '' WHERE id = ?")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let revealed = get_plaintext(&pool, id).await.unwrap();
+        assert!(revealed.is_none());
     }
 
     #[tokio::test]
@@ -423,18 +493,6 @@ mod tests {
         assert_eq!(keys.len(), 2);
         assert_eq!(keys[0].id, b);
         assert_eq!(keys[1].id, a);
-    }
-
-    #[test]
-    fn hash_is_deterministic() {
-        // Same plaintext → same hash; different plaintext → different
-        // hash. Pinned because lookup_by_plaintext relies on this.
-        let h1 = hash_key("hello");
-        let h2 = hash_key("hello");
-        let h3 = hash_key("world");
-        assert_eq!(h1, h2);
-        assert_ne!(h1, h3);
-        assert_eq!(h1.len(), 64, "sha256 hex is 64 chars");
     }
 
     #[test]

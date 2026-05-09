@@ -38,6 +38,203 @@ fieldset legend {
     display: block;
 }
 
+/* Sidebar tab nav for the Settings page (replaces the horizontal
+   strip below 8 tabs — Connections, Download Clients, Indexers,
+   Quality, Custom Formats, Release Groups, General, API Keys, with
+   more queued for v1.8). Two-column grid: fixed-width sidebar on
+   the left, flexible content on the right. Below 900px the layout
+   collapses to a horizontal scroll strip identical in shape to the
+   prior `.system-tabs` mobile pattern, so mobile UX matches. */
+/* `.tabbed-page` breaks out of `.content`'s centered 1100px box
+   so the page header (Settings h2 + alerts) and the sidebar both
+   pin against the viewport's left edge. The h2 sits above the
+   sidebar in document flow with a matching left position so the
+   page reads as a single column rather than three different x
+   anchors. Below 900px the breakout resets so the page reverts to
+   `.content`'s normal centered single-block layout. */
+.tabbed-page {
+    /* Full-bleed escape from `.content`'s centered 1100px box.
+       `width: 100vw` forces the box to viewport-width; `position:
+       relative + left: 50% + margin-left: -50vw` re-anchors its
+       left edge to the viewport-left. More robust than the prior
+       `margin-left: calc(50% - 50vw)` shape, which depended on the
+       parent's content-box width matching the rendered width
+       (broke when `.content`'s padding wasn't accounted for). */
+    width: 100vw;
+    position: relative;
+    left: 50%;
+    margin-left: -50vw;
+    padding-left: 24px;
+    padding-right: 24px;
+    /* `.content` doesn't set overflow-x, so the negative margin
+       won't trigger horizontal scroll; the body's natural shape
+       already excludes overflow there. If a future change adds
+       overflow-x: hidden to body or `.content` and clips this
+       breakout, the fix is to lift overflow-x off them, not to
+       roll back this rule. */
+}
+
+.tabbed-page-header {
+    margin-bottom: 16px;
+}
+
+.tabbed-layout {
+    display: grid;
+    /* Three columns: sidebar | content | phantom mirror. The
+       phantom column matches the sidebar's width so the grid is
+       horizontally symmetric, which means the middle column's
+       center sits at the viewport's center. Content gets
+       `justify-self: center` below to pin its visible area to
+       that viewport-center while leaving whitespace on each side
+       of its 1052px reading-width box.
+
+       Without the phantom column, the middle 1fr column would
+       extend from sidebar-end to viewport-right and centering
+       content within it would yield "centered to the right of
+       the sidebar" rather than "centered in viewport like the
+       old `.content` was". */
+    grid-template-columns: 200px 1fr 200px;
+    gap: 32px;
+    align-items: start;
+}
+
+.tabbed-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    /* Stick to just below the topbar (56px tall) so a long
+       settings panel can scroll without losing the nav. */
+    position: sticky;
+    top: 72px;
+    border-right: 1px solid var(--border);
+    padding-right: 12px;
+}
+
+.tabbed-side-tab {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    color: var(--text-dim);
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 500;
+    border-radius: 6px;
+    transition: color 0.15s, background 0.15s;
+    /* Wrap multi-word labels (Preferred Quality & Releases, Download
+       Clients) cleanly within the 200px column. White-space:normal
+       beats horizontal-overflow on the long labels. */
+    white-space: normal;
+    line-height: 1.35;
+}
+
+.tabbed-side-tab svg {
+    /* Don't shrink when the label wraps to two lines and the flex
+       container starts squeezing children. The 14px icon is the
+       smallest stable size. */
+    flex-shrink: 0;
+}
+
+.tabbed-side-tab:hover {
+    color: var(--text);
+    background: var(--bg-elevated);
+}
+
+.tabbed-side-tab.active {
+    color: var(--accent);
+    background: rgba(203, 166, 247, 0.08);
+}
+
+.tabbed-side-tab:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.tabbed-content {
+    min-width: 0;
+    /* Pin to 100% so the content always fills its 1052px cap,
+       not the intrinsic width of its children. Without this,
+       `justify-self: center` below makes the box default to
+       max-content sizing — fine on tabs whose forms have
+       full-width inputs (Connections, Quality, General all hit
+       the 1052 cap intrinsically), broken on tabs with
+       narrower intrinsic content like the Custom Formats card
+       grid (~840px), which would render at that narrower width
+       and look noticeably thinner than its siblings. */
+    width: 100%;
+    max-width: 1052px;
+    /* Center within the wide middle column. Combined with the
+       symmetric 3-column grid above, this puts the content's
+       horizontal center at the viewport's center — matching the
+       prior `.content` centered layout exactly, while the sidebar
+       stays pinned to viewport-left. */
+    justify-self: center;
+}
+
+@media (max-width: 900px) {
+    .tabbed-page {
+        /* Reset the desktop viewport-breakout so the page reverts
+           to `.content`'s centered single-block layout on phones.
+           Without this the page header would sit further left
+           than every other page header on mobile. */
+        width: auto;
+        position: static;
+        left: auto;
+        margin-left: 0;
+        margin-right: 0;
+        padding-left: 0;
+        padding-right: 0;
+    }
+    .tabbed-layout {
+        /* Drop back to a single block flow on mobile — sidebar
+           renders as a horizontal scroll strip at the top, content
+           takes the full row beneath it. Without this reset the
+           desktop two-column grid stayed active and squeezed the
+           content into a half-width column on phones. */
+        display: block;
+    }
+    .tabbed-sidebar {
+        /* Cancel the desktop sticky-flow so the sidebar joins the
+           document flow as a horizontal scroll strip at the top of
+           the page (matches the prior `.system-tabs` mobile shape
+           — no behavior regression for phones). */
+        position: static;
+        flex-direction: row;
+        gap: 2px;
+        overflow-x: auto;
+        overflow-y: visible;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+        scroll-snap-type: x proximity;
+        width: auto;
+        max-height: none;
+        border-right: none;
+        border-bottom: 1px solid var(--border);
+        padding: 0 0 4px;
+        margin-bottom: 20px;
+        z-index: auto;
+    }
+    .tabbed-sidebar::-webkit-scrollbar {
+        display: none;
+    }
+    .tabbed-side-tab {
+        flex-shrink: 0;
+        scroll-snap-align: start;
+        padding: 10px 14px;
+        font-size: 13px;
+        border-radius: 0;
+        border-bottom: 2px solid transparent;
+        white-space: nowrap;
+    }
+    .tabbed-side-tab:hover {
+        background: transparent;
+    }
+    .tabbed-side-tab.active {
+        background: transparent;
+        border-bottom-color: var(--accent);
+    }
+}
+
 .settings-version {
     font-family: var(--font-mono);
     font-size: 13px;
@@ -888,8 +1085,18 @@ fieldset legend {
     /* Reserve space on the right for the corner × delete button so
        a long client name + status pill don't collide with the
        action area. The × is positioned absolutely (top:10px
-       right:10px), 20×20px; padding-right protects 30px of bleed. */
+       right:10px), 20×20px on desktop; padding-right protects
+       30px of bleed. Mobile bumps the button to a 44×44 touch
+       target (`forms.css` mobile @media), so the mobile reservation
+       below grows to ~60px to clear it. */
     padding-right: 30px;
+}
+
+@media (max-width: 640px) {
+    .dc-card-header {
+        /* 44px button + 10px right offset + ~6px breathing room. */
+        padding-right: 60px;
+    }
 }
 
 .dc-card-title {
@@ -1107,3 +1314,630 @@ fieldset legend {
 }
 
 
+
+/* ─── API Keys (issue #114) ──────────────────────────────────────
+   Card-grid layout matching the Download Clients + Notification
+   Provider cards. Each card shows a name + status pill, the scope
+   chips it grants, last-used / created meta, an enable/disable
+   switch, and a corner × delete. The "+ Create API key" tile at
+   the end opens the create modal. */
+.api-keys-section-header {
+    margin-bottom: 16px;
+}
+
+.api-keys-section-header .settings-section-hint {
+    margin: 4px 0 0;
+    color: var(--text-dim);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.api-keys-list {
+    margin-top: 4px;
+}
+
+.api-key-card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 14px;
+}
+
+.api-key-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px 14px;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.api-key-card-disabled {
+    /* Subtle desaturation hint; the explicit "Disabled" pill in the
+       header carries the load-bearing cue. */
+    opacity: 0.7;
+}
+
+.api-key-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    /* Reserve space for the corner × so a long key name + status
+       pill don't collide with the action area. The mobile @media
+       at the bottom of this block grows it for the 44×44 touch
+       target enlargement. */
+    padding-right: 30px;
+}
+
+@media (max-width: 640px) {
+    .api-key-card-header {
+        padding-right: 60px;
+    }
+}
+
+.api-key-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.api-key-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-bright);
+    /* Long names truncate rather than wrap into the corner × area. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.api-key-status-pill {
+    flex-shrink: 0;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    line-height: 1.4;
+}
+
+/* Match the notif/dc/indexer status pill palette so the page reads
+   as one family of cards. Catppuccin green (`--green: #a6e3a1`) on
+   a 0.18-alpha tint, with the dim variant for disabled. */
+.api-key-status-pill-on {
+    color: var(--green, #a6e3a1);
+    background: rgba(166, 227, 161, 0.18);
+}
+
+.api-key-status-pill-off {
+    color: var(--text-dim);
+    background: rgba(108, 112, 134, 0.18);
+}
+
+.api-key-card-scopes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.api-key-scope-chip {
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--accent);
+    background: rgba(203, 166, 247, 0.1);
+    border: 1px solid rgba(203, 166, 247, 0.2);
+}
+
+.api-key-card-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 0;
+    font-size: 13px;
+    margin-top: auto;
+}
+
+.api-key-card-meta-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+    min-width: 0;
+}
+
+.api-key-card-meta-row dt {
+    font-weight: 500;
+    color: var(--text-dim);
+    flex-shrink: 0;
+    min-width: 64px;
+}
+
+.api-key-card-meta-row dd {
+    margin: 0;
+    color: var(--text);
+    min-width: 0;
+}
+
+.api-key-card-footer {
+    display: flex;
+    justify-content: flex-start;
+    align-items: center;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+}
+
+/* Per-card Show/Copy reveal row. Hidden plaintext (••••• mask) by
+   default; clicking Show fetches /api/api-keys/{id}/reveal and
+   replaces the mask with the decrypted plaintext. Copy uses the
+   reveal endpoint too — no need to Show first if the user just
+   wants the value on the clipboard. */
+.api-key-reveal-row {
+    display: flex;
+    gap: 6px;
+    align-items: stretch;
+}
+
+.api-key-reveal-input {
+    flex: 1;
+    min-width: 0;
+    padding: 6px 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.api-key-reveal-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.api-key-reveal-input.api-key-reveal-input-revealed {
+    color: var(--accent);
+}
+
+.api-key-show-btn,
+.api-key-copy-btn {
+    flex-shrink: 0;
+    font-size: 12px;
+}
+
+.api-key-card-actions {
+    position: absolute;
+    top: 10px;
+    right: 10px;
+}
+
+/* Toggle switch (replaces the bare checkbox + text). Visual
+   sliding switch via :checked transitions on the track + thumb.
+   Hidden checkbox keeps native form/keyboard semantics. */
+.api-key-switch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.api-key-switch input {
+    /* Visually hidden but still in the tab order and focusable so
+       keyboard users can toggle the switch with Space. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.api-key-switch-track {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    transition: background 0.15s, border-color 0.15s;
+}
+
+.api-key-switch-thumb {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 14px;
+    height: 14px;
+    background: var(--text-dim);
+    border-radius: 999px;
+    transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), background 0.15s;
+}
+
+.api-key-switch input:checked + .api-key-switch-track {
+    background: rgba(203, 166, 247, 0.2);
+    border-color: var(--accent);
+}
+
+.api-key-switch input:checked + .api-key-switch-track .api-key-switch-thumb {
+    transform: translateX(14px);
+    background: var(--accent);
+}
+
+.api-key-switch input:focus-visible + .api-key-switch-track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+.api-key-switch-label {
+    font-size: 13px;
+    color: var(--text-dim);
+    font-weight: 500;
+}
+
+/* "+ Create API key" tile — same shape as `notif-card-add` /
+   `dc-card-add` so the page reads as one family of card grids. */
+.api-key-card-add {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 180px;
+    padding: 16px;
+    background: var(--bg-card);
+    border: 1px dashed var(--border);
+    border-radius: var(--radius-lg);
+    color: var(--text-dim);
+    cursor: pointer;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    /* Override <button> defaults so the tile renders as the
+       block-level card it visually is. */
+    font: inherit;
+    text-align: center;
+}
+
+.api-key-card-add:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.04);
+}
+
+.api-key-card-add-icon {
+    font-size: 28px;
+    line-height: 1;
+    font-weight: 300;
+}
+
+.api-key-card-add-label {
+    font-size: 13px;
+    font-weight: 500;
+}
+
+/* ─── Create-key modal contents ────────────────────────────────── */
+
+/* Both step containers (form / reveal) need to flex into the
+   parent .modal's flex column AND own their own scroll area, so a
+   long form (or a future reveal screen) doesn't push the
+   modal-footer off the bottom edge of the 80vh-capped modal.
+   `min-height: 0` is the load-bearing flex incantation that lets
+   the child shrink below its intrinsic content size; without it
+   `overflow-y: auto` does nothing because the child is sized to
+   fit content. */
+#api-keys-create-form-step,
+#api-keys-create-result-step {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    /* The sticky footer below uses var(--bg-card) as its
+       background; the step container inherits that from .modal
+       so the footer's sticky-overlap onto scrolling content
+       reads opaque. */
+    display: flex;
+    flex-direction: column;
+}
+
+#api-keys-create-form-step > form {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Sticky footer pattern: action buttons stay pinned at the bottom
+   of the scrollable area so they're always reachable. The
+   inline-styled `.modal-footer` in the template gets background +
+   sticky positioning here so we don't have to inline more attrs. */
+#api-keys-create-form-step .modal-footer,
+#api-keys-create-result-step .modal-footer {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg-card);
+    /* Push to the bottom of the form/reveal flex container if the
+       content is shorter than the available height. */
+    margin-top: auto;
+}
+
+.api-keys-form {
+    display: flex;
+    flex-direction: column;
+}
+
+.api-keys-form-row {
+    padding: 16px 24px;
+}
+
+.api-keys-form-row + .api-keys-form-row {
+    border-top: 1px solid var(--border);
+}
+
+.api-keys-form-label {
+    display: block;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+}
+
+.api-keys-form-hint {
+    /* Top margin separates the hint from whatever sits above (Name
+       input, or the Scopes label). Bottom margin separates from
+       what follows (form-row's last child, or the scope tiles).
+       Without the top margin the hint reads as flush-glued to the
+       input and the form-row looks cramped. */
+    margin: 8px 0 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.api-keys-form-input {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color 0.15s;
+}
+
+.api-keys-form-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+/* Validation error block above the modal footer. Lives outside the
+   form-row stack so it doesn't pick up form-row's 16px 24px
+   padding; explicit margins here mirror the form-row's 24px side
+   gutter so the message lines up with everything else in the
+   modal. */
+.api-keys-form-error {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 24px 12px;
+    padding: 10px 12px;
+    background: rgba(211, 125, 125, 0.08);
+    border: 1px solid rgba(211, 125, 125, 0.3);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    color: var(--red, #d37d7d);
+    font-size: 13px;
+    line-height: 1.4;
+}
+
+.api-keys-form-error svg {
+    flex-shrink: 0;
+}
+
+/* Scope tiles: clickable rows that wrap a hidden checkbox. The
+   :checked state highlights the tile so the visual matches the
+   form value. Larger click target than a bare checkbox row. */
+.api-keys-scope-tiles {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.api-keys-scope-tile {
+    position: relative;
+    display: block;
+    padding: 12px 14px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.api-keys-scope-tile:hover {
+    border-color: var(--border-accent, var(--accent));
+    background: rgba(203, 166, 247, 0.04);
+}
+
+/* When admin is checked, the other scope tiles render disabled
+   (admin is universal-grant; holding it implies holding every
+   other scope). Pointer-events:none stops the click-to-toggle
+   from re-checking them. */
+.api-keys-scope-tile.api-keys-scope-tile-shadowed {
+    opacity: 0.4;
+    pointer-events: none;
+}
+.api-keys-scope-tile.api-keys-scope-tile-shadowed:hover {
+    border-color: var(--border);
+    background: var(--bg-elevated);
+}
+
+.api-keys-scope-tile input {
+    /* Visually hide but keep focusable — same shape as the
+       toggle-switch's hidden checkbox. */
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.api-keys-scope-tile input:focus-visible + .api-keys-scope-tile-body {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+}
+
+.api-keys-scope-tile:has(input:checked) {
+    border-color: var(--accent);
+    background: rgba(203, 166, 247, 0.08);
+}
+
+.api-keys-scope-tile-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.api-keys-scope-tile-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.api-keys-scope-tile-header svg {
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+
+.api-keys-scope-tile:has(input:checked) .api-keys-scope-tile-header svg,
+.api-keys-scope-tile:has(input:checked) .api-keys-scope-tile-header code {
+    color: var(--accent);
+}
+
+.api-keys-scope-tile-header code {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    background: transparent;
+    padding: 0;
+}
+
+.api-keys-scope-tile-tag {
+    margin-left: auto;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-dim);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--border);
+}
+
+.api-keys-scope-tile-tag-live {
+    color: var(--green, #98c379);
+    background: rgba(152, 195, 121, 0.1);
+    border-color: rgba(152, 195, 121, 0.3);
+}
+
+.api-keys-scope-tile-tag-warn {
+    color: #e5c07b;
+    background: rgba(229, 192, 123, 0.1);
+    border-color: rgba(229, 192, 123, 0.3);
+}
+
+.api-keys-scope-tile-desc {
+    color: var(--text-dim);
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+/* ─── Plaintext reveal ─────────────────────────────────────────── */
+.api-keys-reveal {
+    padding: 20px 24px 16px;
+}
+
+.api-keys-reveal-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    background: rgba(229, 192, 123, 0.08);
+    border: 1px solid rgba(229, 192, 123, 0.3);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.api-keys-reveal-warning svg {
+    color: #e5c07b;
+    flex-shrink: 0;
+    margin-top: 2px;
+}
+
+.api-keys-reveal-key-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+
+.api-keys-reveal-key {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--accent);
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    /* Allow horizontal scrolling within the field rather than
+       wrapping the 64-char hex string. Selecting the field's
+       contents on focus gives the user a one-shot copy fallback
+       even if the JS Copy button fails. */
+    overflow-x: auto;
+    white-space: nowrap;
+}
+
+.api-keys-reveal-key:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.api-keys-reveal-copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.api-keys-reveal-copy-confirm {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 10px 0 0;
+    font-size: 12px;
+    color: var(--green, #98c379);
+}

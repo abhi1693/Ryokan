@@ -29,9 +29,10 @@ use crate::models::log::LogCategory;
 use crate::services::logger;
 
 /// Shape returned from list / create / toggle endpoints. Never carries
-/// the plaintext (which is one-time only) or the hash (which is
-/// internal). Timestamps are Unix epoch seconds — the JS layer
-/// formats them per the user's locale.
+/// the hash (internal). Pre-formatted display strings live alongside
+/// the raw Unix timestamps so the JS render path doesn't have to
+/// duplicate the chrono format and the cards don't flash a
+/// `"Loading..."` placeholder while waiting for JS hydration.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ApiKeyView {
     pub id: i64,
@@ -40,17 +41,27 @@ pub struct ApiKeyView {
     pub created_at: i64,
     pub last_used_at: Option<i64>,
     pub enabled: bool,
+    /// `MMM DD, YYYY HH:MM` UTC. Mirror of `ApiKey::created_at_display`
+    /// — the same string the server-side template renders, so the
+    /// JS-rendered cards (post-create, post-toggle) match the
+    /// server-rendered ones.
+    pub created_display: String,
+    /// Same shape, with a `"never"` fallback when the key has never
+    /// been used.
+    pub last_used_display: String,
 }
 
 impl From<ApiKey> for ApiKeyView {
     fn from(k: ApiKey) -> Self {
         ApiKeyView {
             id: k.id,
-            name: k.name,
-            scopes: k.scopes,
+            name: k.name.clone(),
+            scopes: k.scopes.clone(),
             created_at: k.created_at,
             last_used_at: k.last_used_at,
             enabled: k.enabled,
+            created_display: k.created_at_display(),
+            last_used_display: k.last_used_display(),
         }
     }
 }
@@ -211,6 +222,53 @@ pub async fn toggle(
     )
     .await;
     Ok(Json(ApiKeyView::from(row)))
+}
+
+/// `GET /api/api-keys/{id}/reveal` — return the plaintext for a
+/// given key. Cookie-auth gated through the regular `require_auth`
+/// middleware (Settings is web-UI only; scoped-key auth never
+/// reaches this handler).
+///
+/// Three response shapes:
+/// - 200 + `{plaintext}` — key found.
+/// - 404 — key id doesn't exist OR the row was created under the
+///   prior hash+encrypted schema and has no plaintext to surface
+///   (user must rotate).
+/// - 500 — DB error.
+///
+/// Not audit-logged. Reveal happens whenever the user clicks Show
+/// or Copy on the keys list, which means a single Settings visit
+/// can fire it many times — drowning the legitimate Auth-category
+/// log filter (failed scoped-key attempts, key create / delete /
+/// toggle events) in noise. The threat model doesn't pay back the
+/// volume: the user is already cookie-authed and already has the
+/// plaintext available client-side via the Show button. Other arr-
+/// stack apps (Sonarr, Jellyfin) don't log key reads either.
+#[utoipa::path(
+    get,
+    path = "/api/api-keys/{id}/reveal",
+    tag = "API Keys",
+    summary = "Reveal the plaintext for an API key",
+    params(("id" = i64, Path, description = "API key id")),
+    responses(
+        (status = 200, description = "Plaintext key", body = serde_json::Value),
+        (status = 404, description = "Key not found or has no recoverable plaintext"),
+    ),
+)]
+pub async fn reveal(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let plaintext = api_key::get_plaintext(&state.db, id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    let Some(plaintext) = plaintext else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            "Key not found, or its row predates the plaintext-storage rewrite. Delete and recreate the key to recover the plaintext.".to_string(),
+        ));
+    };
+    Ok(Json(serde_json::json!({ "plaintext": plaintext })))
 }
 
 /// `POST /api/api-keys/{id}/delete` — drop a key. Idempotent. POST

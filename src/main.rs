@@ -679,6 +679,7 @@ async fn main() {
             "/api/api-keys/{id}/toggle",
             post(handlers::api_keys::toggle),
         )
+        .route("/api/api-keys/{id}/reveal", get(handlers::api_keys::reveal))
         .route(
             "/api/api-keys/{id}/delete",
             post(handlers::api_keys::delete),

@@ -1,182 +1,258 @@
-{# Settings → API Keys (issue #114). Lists every scoped API key,
-   provides a Create button that opens a modal for name+scope, and
-   shows the plaintext exactly once after creation. CRUD goes
-   through JSON endpoints (`/api/api-keys/*`) rather than form-POST
-   so the create flow can render the plaintext inline without a
-   round-trip page reload. JS lives in static/js/settings.js under
-   the api-keys section. #}
+{# Settings → API Keys (issue #114). Card-grid pattern matching
+   `partials/system/notifications/list.html` and
+   `partials/settings/download_clients/list.html` so the visual
+   primitives carry over: name + status pill in the header, meta
+   rows below, corner × delete, "+ Add" tile at the end. CRUD
+   goes through JSON endpoints (`/api/api-keys/*`) since the
+   create flow needs to display the plaintext exactly once
+   without a round-trip page reload. JS lives in
+   `static/js/settings.js` under the api-keys section. #}
 <div class="api-keys-tab" id="api-keys-tab">
-    <div class="page-header-row">
+    <div class="api-keys-section-header">
         <div>
             <h3 class="settings-section-title">API Keys</h3>
             <p class="settings-section-hint">
-                Hand out narrow keys to integrations without sharing a
-                full admin key. Today only the calendar feed
-                (<code>/api/calendar.ics</code>) checks scoped keys; other
-                scopes are reserved for future use. Plaintext is shown
-                once at creation and never recoverable.
+                External applications are required to have an API key in
+                order to communicate with Ryokan. Each key is scoped to a
+                set of permissions; pick a name that identifies the
+                integration the key will live in.
             </p>
         </div>
-        <button type="button" class="btn btn-primary" id="api-keys-create-btn">
-            + Create key
-        </button>
     </div>
 
     {# Server-rendered list. JS re-renders this region after CRUD
        operations using the same row markup so server and client
        paths stay in sync. #}
-    <div id="api-keys-list">
-        {% if api_keys.is_empty() %}
-        <div class="empty-state">
-            <p>No API keys yet. Create one to get started.</p>
+    <div id="api-keys-list" class="api-keys-list">
+        <div class="api-key-card-grid">
+            {% for key in api_keys %}
+            <article class="api-key-card{% if !key.enabled %} api-key-card-disabled{% endif %}"
+                     data-api-key-id="{{ key.id }}">
+                <div class="api-key-card-header">
+                    <div class="api-key-card-title">
+                        <strong class="api-key-card-name">{{ key.name }}</strong>
+                    </div>
+                    <span class="api-key-status-pill {% if key.enabled %}api-key-status-pill-on{% else %}api-key-status-pill-off{% endif %}">
+                        {% if key.enabled %}Enabled{% else %}Disabled{% endif %}
+                    </span>
+                </div>
+                <div class="api-key-card-scopes">
+                    {% for scope in key.scopes %}
+                    <span class="api-key-scope-chip">{{ scope }}</span>
+                    {% endfor %}
+                </div>
+                <dl class="api-key-card-meta">
+                    <div class="api-key-card-meta-row">
+                        <dt>Last used</dt>
+                        <dd class="api-key-last-used">{{ key.last_used_display() }}</dd>
+                    </div>
+                    <div class="api-key-card-meta-row">
+                        <dt>Created</dt>
+                        <dd class="api-key-created">{{ key.created_at_display() }}</dd>
+                    </div>
+                </dl>
+                <div class="api-key-reveal-row" data-api-key-id="{{ key.id }}">
+                    <input type="text"
+                           class="api-key-reveal-input"
+                           data-api-key-reveal-input
+                           value="••••••••••••••••••••••••••••••••"
+                           readonly
+                           aria-label="API key (hidden, click Show to reveal)">
+                    <button type="button"
+                            class="btn btn-ghost btn-sm api-key-show-btn"
+                            data-api-key-id="{{ key.id }}"
+                            data-api-key-name="{{ key.name }}"
+                            title="Reveal the plaintext key">Show</button>
+                    <button type="button"
+                            class="btn btn-ghost btn-sm api-key-copy-btn"
+                            data-api-key-id="{{ key.id }}"
+                            data-api-key-name="{{ key.name }}"
+                            title="Copy the plaintext key">Copy</button>
+                </div>
+                <div class="api-key-card-footer">
+                    <label class="api-key-switch" title="{% if key.enabled %}Disable this key{% else %}Enable this key{% endif %}">
+                        <input type="checkbox"
+                               class="api-key-enabled-toggle"
+                               data-api-key-id="{{ key.id }}"
+                               {% if key.enabled %}checked{% endif %}>
+                        <span class="api-key-switch-track">
+                            <span class="api-key-switch-thumb"></span>
+                        </span>
+                        <span class="api-key-switch-label">{% if key.enabled %}Enabled{% else %}Disabled{% endif %}</span>
+                    </label>
+                </div>
+                {# Corner × delete — same primitive as dc-card / notif-card. #}
+                <div class="api-key-card-actions">
+                    <button type="button"
+                            class="btn btn-icon-danger api-key-delete-btn"
+                            data-api-key-id="{{ key.id }}"
+                            data-api-key-name="{{ key.name }}"
+                            title="Delete {{ key.name }}"
+                            aria-label="Delete {{ key.name }}">×</button>
+                </div>
+            </article>
+            {% endfor %}
+
+            {# "+ Create key" tile. Mirrors the notif "+ Add provider"
+               and dc "+ Add client" tiles so the page reads as one
+               family of card grids across Settings + System. #}
+            <button type="button"
+                    class="api-key-card api-key-card-add"
+                    id="api-keys-create-btn">
+                <div class="api-key-card-add-icon">+</div>
+                <div class="api-key-card-add-label">Create API key</div>
+            </button>
         </div>
-        {% else %}
-        <table class="settings-table api-keys-table">
-            <thead>
-                <tr>
-                    <th>Name</th>
-                    <th>Scopes</th>
-                    <th>Last used</th>
-                    <th>Created</th>
-                    <th>Enabled</th>
-                    <th></th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for key in api_keys %}
-                <tr data-api-key-id="{{ key.id }}">
-                    <td class="api-key-name">{{ key.name }}</td>
-                    <td>
-                        {% for scope in key.scopes %}
-                        <span class="badge api-key-scope-badge">{{ scope }}</span>
-                        {% endfor %}
-                    </td>
-                    <td class="api-key-last-used"
-                        data-api-key-last-used="{% if let Some(t) = key.last_used_at %}{{ t }}{% endif %}">
-                        {% if key.last_used_at.is_some() %}
-                        <span class="muted">Loading...</span>
-                        {% else %}
-                        <span class="muted">never</span>
-                        {% endif %}
-                    </td>
-                    <td class="api-key-created"
-                        data-api-key-created="{{ key.created_at }}">
-                        <span class="muted">Loading...</span>
-                    </td>
-                    <td>
-                        <label class="api-key-toggle">
-                            <input type="checkbox"
-                                   class="api-key-enabled-toggle"
-                                   data-api-key-id="{{ key.id }}"
-                                   {% if key.enabled %}checked{% endif %}>
-                            <span class="api-key-toggle-label">{% if key.enabled %}Enabled{% else %}Disabled{% endif %}</span>
-                        </label>
-                    </td>
-                    <td>
-                        <button type="button"
-                                class="btn btn-danger btn-sm api-key-delete-btn"
-                                data-api-key-id="{{ key.id }}"
-                                data-api-key-name="{{ key.name }}">
-                            Delete
-                        </button>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
     </div>
 </div>
 
-{# Create-key modal. Hidden by default; opened by JS on Create-button
-   click. After successful POST, the modal swaps to the "here is your
-   key, save it now" view. JS handles state transitions. #}
-<div class="modal" id="api-keys-create-modal" hidden>
-    <div class="modal-overlay" data-modal-close="api-keys-create-modal"></div>
-    <div class="modal-content">
+{# Create-key modal. Hidden by default; opened by JS on "+ Create"
+   tile click. After successful POST, the modal swaps to the
+   plaintext-reveal view. JS handles the state transitions. #}
+<div class="modal-backdrop" id="api-keys-create-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="api-keys-create-modal-title">
+    <div class="modal" style="max-width: 560px">
+        <div class="modal-header">
+            <h3 id="api-keys-create-modal-title">Create API key</h3>
+            <button class="btn-icon" type="button" data-modal-close="api-keys-create-modal" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+
         {# State 1: form for name + scopes #}
         <div id="api-keys-create-form-step">
-            <h3 class="modal-title">Create API key</h3>
-            <form id="api-keys-create-form" class="settings-form">
-                <label class="form-row">
-                    <span class="form-label">Name</span>
+            {# `hx-boost="false"` opts this form out of the body-wide
+               boost (templates/CLAUDE.md "Boot order" + "htmx:confirm
+               bridge"). Without it, htmx's body-level submit listener
+               fires first and boost-navigates to the form's
+               destination (current URL + form fields as query string,
+               which falls through to `tab=integrations` because no
+               explicit `tab=` param is sent) BEFORE the per-form
+               `submitCreateForm` listener can preventDefault. The
+               opt-out lets the JS-handled fetch path own the submit. #}
+            <form id="api-keys-create-form" class="api-keys-form" hx-boost="false">
+                <div class="api-keys-form-row">
+                    <label for="api-keys-create-name" class="api-keys-form-label">Name</label>
                     <input type="text"
                            name="name"
                            id="api-keys-create-name"
-                           class="form-input"
+                           class="api-keys-form-input"
                            placeholder="e.g. iCal subscriber"
                            required
                            maxlength="80"
                            autocomplete="off">
-                </label>
-                <fieldset class="form-row">
-                    <legend class="form-label">Scopes</legend>
-                    <p class="form-hint">
-                        Pick at least one. Today only <code>calendar</code>
-                        is wired (gates the iCal feed); other scopes are
-                        reserved.
-                    </p>
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="scope" value="calendar" checked>
-                        <span><code>calendar</code> &mdash; iCal feed (read-only)</span>
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="scope" value="search">
-                        <span><code>search</code> &mdash; manual search (reserved)</span>
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="scope" value="library:read">
-                        <span><code>library:read</code> &mdash; library state (reserved)</span>
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="scope" value="library:write">
-                        <span><code>library:write</code> &mdash; library mutation (reserved)</span>
-                    </label>
-                    <label class="checkbox-row">
-                        <input type="checkbox" name="scope" value="admin">
-                        <span><code>admin</code> &mdash; all-access</span>
-                    </label>
-                </fieldset>
-                <div class="modal-footer">
+                    <p class="api-keys-form-hint">Shown in the key list and in audit logs. Pick something that names the integration this key will live in.</p>
+                </div>
+
+                <div class="api-keys-form-row">
+                    <span class="api-keys-form-label">Scopes</span>
+                    <p class="api-keys-form-hint">Pick at least one. Click a tile to toggle.</p>
+                    <div class="api-keys-scope-tiles">
+                        {# Each scope is a clickable tile wrapping a hidden
+                           checkbox; the visual state follows :checked.
+                           "In use" tag flags the only currently-wired
+                           scope so users don't expect the others to do
+                           anything yet. #}
+                        <label class="api-keys-scope-tile">
+                            <input type="checkbox" name="scope" value="calendar">
+                            <span class="api-keys-scope-tile-body">
+                                <span class="api-keys-scope-tile-header">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+                                    <code>calendar</code>
+                                </span>
+                                <span class="api-keys-scope-tile-desc">Read-only access to the iCal feed.</span>
+                            </span>
+                        </label>
+                        <label class="api-keys-scope-tile">
+                            <input type="checkbox" name="scope" value="search">
+                            <span class="api-keys-scope-tile-body">
+                                <span class="api-keys-scope-tile-header">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                                    <code>search</code>
+                                </span>
+                                <span class="api-keys-scope-tile-desc">Read-only access to manual search.</span>
+                            </span>
+                        </label>
+                        <label class="api-keys-scope-tile">
+                            <input type="checkbox" name="scope" value="library:read">
+                            <span class="api-keys-scope-tile-body">
+                                <span class="api-keys-scope-tile-header">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg>
+                                    <code>library:read</code>
+                                </span>
+                                <span class="api-keys-scope-tile-desc">Read-only access to library state.</span>
+                            </span>
+                        </label>
+                        <label class="api-keys-scope-tile">
+                            <input type="checkbox" name="scope" value="library:write">
+                            <span class="api-keys-scope-tile-body">
+                                <span class="api-keys-scope-tile-header">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                                    <code>library:write</code>
+                                </span>
+                                <span class="api-keys-scope-tile-desc">Full library mutation.</span>
+                            </span>
+                        </label>
+                        <label class="api-keys-scope-tile api-keys-scope-tile-admin">
+                            <input type="checkbox" name="scope" value="admin">
+                            <span class="api-keys-scope-tile-body">
+                                <span class="api-keys-scope-tile-header">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                    <code>admin</code>
+                                    <span class="api-keys-scope-tile-tag api-keys-scope-tile-tag-warn">All-access</span>
+                                </span>
+                                <span class="api-keys-scope-tile-desc">Equivalent to holding every other scope.</span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="api-keys-form-error" id="api-keys-create-error" hidden role="alert">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                    <span class="api-keys-form-error-text"></span>
+                </div>
+                <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
                     <button type="button" class="btn btn-ghost" data-modal-close="api-keys-create-modal">
                         Cancel
                     </button>
                     <button type="submit" class="btn btn-primary" id="api-keys-create-submit">
-                        Create
+                        Create key
                     </button>
                 </div>
-                <p class="form-error" id="api-keys-create-error" hidden></p>
             </form>
         </div>
 
-        {# State 2: plaintext shown once. The JS swaps from step 1 to
-           this block after a successful create. The user copies the
-           key, then clicks "I've saved it" to close + refresh the
-           list. #}
+        {# State 2: post-create plaintext display. JS swaps from
+           step 1 after a successful create. The key is also visible
+           on its card via the per-row Show button, so this view is
+           a convenience for "copy the key now while you're already
+           in the create flow" rather than a one-shot reveal. #}
         <div id="api-keys-create-result-step" hidden>
-            <h3 class="modal-title">Save your key now</h3>
-            <p class="form-hint">
-                This is the only time the full key is shown. Copy it now
-                &mdash; once you close this dialog, the plaintext is
-                unrecoverable.
-            </p>
-            <div class="api-keys-plaintext-row">
-                <input type="text"
-                       id="api-keys-plaintext"
-                       class="form-input form-input-mono"
-                       readonly>
-                <button type="button"
-                        class="btn btn-secondary"
-                        id="api-keys-copy-btn">
-                    Copy
-                </button>
+            <div class="api-keys-reveal">
+                <p class="api-keys-form-hint" style="margin: 0 0 12px">
+                    Key created. Copy it now to drop into your integration, or use the per-card Show button on the keys list to reveal it later.
+                </p>
+                <div class="api-keys-reveal-key-row">
+                    <input type="text"
+                           id="api-keys-plaintext"
+                           class="api-keys-reveal-key"
+                           readonly
+                           aria-label="Generated API key">
+                    <button type="button"
+                            class="btn btn-secondary api-keys-reveal-copy-btn"
+                            id="api-keys-copy-btn">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        <span>Copy</span>
+                    </button>
+                </div>
+                <p class="api-keys-reveal-copy-confirm" id="api-keys-copy-confirm" hidden>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Copied to clipboard.
+                </p>
             </div>
-            <p class="form-hint" id="api-keys-copy-confirm" hidden>
-                Copied to clipboard.
-            </p>
-            <div class="modal-footer">
+            <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end">
                 <button type="button" class="btn btn-primary" id="api-keys-saved-btn">
-                    I've saved it
+                    Done
                 </button>
             </div>
         </div>
