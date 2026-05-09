@@ -16,14 +16,14 @@
         <link rel="prev" href="../configuration/">
       
       
-        <link rel="next" href="../download-clients/">
+        <link rel="next" href="../calendar/">
       
       
         
       
       
       <link rel="icon" href="../assets/images/favicon.png">
-      <meta name="generator" content="zensical-0.0.40">
+      <meta name="generator" content="zensical-0.0.41">
     
     
       
@@ -205,6 +205,9 @@
   
   
     
+      
+    
+    
     
       <li class="md-tabs__item">
         <a href="./.." class="md-tabs__link">
@@ -223,6 +226,9 @@
   
   
   
+    
+      
+    
     
     
       <li class="md-tabs__item">
@@ -244,6 +250,9 @@
     
   
   
+    
+      
+    
     
     
       <li class="md-tabs__item md-tabs__item--active">
@@ -862,6 +871,33 @@
   
   
     <li class="md-nav__item">
+      <a href="../calendar/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+  Calendar
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../download-clients/" class="md-nav__link">
         
   
@@ -1136,7 +1172,7 @@
 </ul>
 <p>The RSS poll cadence is set in <strong>Settings → General → RSS Sync Interval</strong>. Manual "Sync now" buttons live on each indexer / direct-feed row in <strong>Settings → Indexers</strong>.</p>
 <h2 id="scheduled-tasks">Scheduled Tasks<a class="headerlink" href="#scheduled-tasks" title="Anchor link">&para;</a></h2>
-<p>Status of Ryokan's background tasks: external_sync (watch-list sync), post_processing (move imported files into the library), grab_sweep (reconcile pending grabs against the download client's state), upgrade_search (look for better releases of already-grabbed episodes), library_classify, metadata_refresh, and a handful more.</p>
+<p>Status of Ryokan's background tasks: external_sync (watch-list sync), post_processing (move imported files into the library), grab_sweep (reconcile pending grabs against the download client's state), upgrade_search (look for better releases of already-grabbed episodes), library_classify, metadata_refresh, airing_refresh (refreshes the air times that show up on the <a href="../calendar/">Calendar</a>), and a handful more.</p>
 <p>Each row shows last-run time, status (ok / warn / error / running), restart count if the task crashed and got restarted, and current backoff if it's in a failure cycle.</p>
 <p>When to come here:</p>
 <ul>
