@@ -692,4 +692,20 @@ window.GRAB_PREVIEW_MODE = {% if grab_preview_mode == "never" %}"never"{% else %
 {% endblock %}
 
 {% block page_js %}<script src="/static/js/grab_picker.js" defer></script>
+{# Series page JS is split across multiple files. All seven load with
+   `defer` so they execute in document order after parsing, which
+   means cross-file global references (e.g. series_episode_modal.js
+   calling `updateEpisodeRow` defined in series.js) resolve at click
+   time, not at parse time. Per CLAUDE.md hx-boost quirks: every file
+   uses `var` at module scope so the re-execution on body swap doesn't
+   throw "redeclaration" SyntaxError.
+
+   Load order: helpers first; series.js last because it owns the
+   `if (SD.dbId)` boot that kicks off the download-progress poller. #}
+<script src="/static/js/series_helpers.js" defer></script>
+<script src="/static/js/series_config.js" defer></script>
+<script src="/static/js/series_episode_actions.js" defer></script>
+<script src="/static/js/series_episode_modal.js" defer></script>
+<script src="/static/js/series_interactive_search.js" defer></script>
+<script src="/static/js/series_lifecycle.js" defer></script>
 <script src="/static/js/series.js" defer></script>{% endblock %}
