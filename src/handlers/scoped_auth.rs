@@ -145,6 +145,14 @@ async fn check_scope(
 /// learn one shape. Query-string values are percent-decoded — the
 /// generated keys are 64 hex chars (no special characters), but a
 /// future format change shouldn't silently break user-pasted URLs.
+///
+/// Both branches reject empty values: the `WHERE key = ?` lookup
+/// would otherwise match any row whose `key` column is empty
+/// string (impossible for fresh installs because the column has
+/// UNIQUE + every row gets a 64-char hex value, but possible for
+/// upgraders from the previous hash+encrypted schema where the
+/// `key` column was added via ALTER with `DEFAULT ''` and SQLite
+/// can't add UNIQUE through ALTER). PR #165 review.
 fn extract_api_key(req: &Request<axum::body::Body>) -> Option<String> {
     if let Some(header_val) = req.headers().get("x-api-key")
         && let Ok(s) = header_val.to_str()
@@ -158,7 +166,12 @@ fn extract_api_key(req: &Request<axum::body::Body>) -> Option<String> {
             continue;
         };
         if key == "apikey" {
-            return urlencoding::decode(val).ok().map(|s| s.into_owned());
+            let decoded = urlencoding::decode(val).ok()?.into_owned();
+            return if decoded.is_empty() {
+                None
+            } else {
+                Some(decoded)
+            };
         }
     }
     None
@@ -211,6 +224,42 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .uri("/protected")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// PR #165 review — pin the empty-`?apikey=` rejection. Without
+    /// the `is_empty()` guard in `extract_api_key`'s query branch,
+    /// a request with `?apikey=` (no value) would hit
+    /// `lookup_by_plaintext` with an empty string and silently match
+    /// any row whose `key` column is empty (a real shape on dev-
+    /// branch upgraders from the previous hash+encrypted schema,
+    /// since SQLite can't add UNIQUE through ALTER ADD COLUMN).
+    #[tokio::test]
+    async fn empty_apikey_query_returns_401() {
+        let pool = crate::test_support::in_memory_pool().await;
+        // Insert a row with the upgrader-shape empty `key` column to
+        // model the worst case: bypass `create()` (which generates
+        // a 64-char hex plaintext) so the row's `key` is literally
+        // the empty string the empty-`?apikey=` value would match.
+        sqlx::query("INSERT INTO api_keys (name, key, scopes, enabled) VALUES (?, ?, ?, ?)")
+            .bind("legacy-upgrader")
+            .bind("")
+            .bind("[\"calendar\"]")
+            .bind(1_i64)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let state = crate::test_support::build_test_app_state(pool, None);
+        let app = router_with_calendar_guard(state);
+        let res = app
+            .oneshot(
+                HttpRequest::builder()
+                    .uri("/protected?apikey=")
                     .body(Body::empty())
                     .unwrap(),
             )
