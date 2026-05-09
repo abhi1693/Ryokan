@@ -5,6 +5,14 @@
    the bulk form because per-row delete forms can't nest inside
    the bulk POST). #}
 <div class="dc-page">
+    {# Per-tab toast — see settings.html comment for the rationale. #}
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Download Clients">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Download Clients">{{ err }}</div>
+    {% endif %}
+
     <p class="form-hint" style="margin-bottom: 16px;">
         Ryokan can route grabs to multiple download clients. Pin a specific client to an indexer on the
         <a href="/settings?tab=indexers" class="link-accent">Indexers</a> tab; the built-in Nyaa search uses the dropdown there too.

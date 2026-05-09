@@ -76,7 +76,7 @@ Axum 0.8 + Tokio · SQLite via sqlx 0.8 (`default-features = false` + `runtime-t
 
 ## Code Layout (`src/`)
 
-- **`handlers/`** — Axum route handlers. Page/feature modules: `library`, `search`, `downloads`, `settings`, `system`, `auth`, `media`, `help`, `progress`, `grab` (interactive file-picker — `/api/grab/{preview,confirm,heartbeat,cancel}`), `oauth` (AL+MAL link/submit/unlink/sync-now under `/settings/oauth/*`), `webhook/` (autobrr push at `/api/webhook/autobrr`), plus `sonarr_compat` / `radarr_compat` (the anibridge shims), `arr_auth` (shared API-key middleware), `arr_shared` (DTOs shared between shim sides). Auth deep dive: **`src/handlers/auth/CLAUDE.md`**.
+- **`handlers/`** — Axum route handlers. Page/feature modules: `library`, `search`, `downloads`, `settings`, `system`, `auth`, `media`, `help`, `progress`, `grab` (interactive file-picker — `/api/grab/{preview,confirm,heartbeat,cancel}`), `oauth` (AL+MAL link/submit/unlink/sync-now under `/settings/oauth/*`), `webhook/` (autobrr push at `/api/webhook/autobrr`), `calendar` (issues #115 + #116 — in-app `/calendar` page + iCal feed at `/api/calendar.ics`), `api_keys` (issue #114 scoped API keys CRUD), `scoped_auth` (`require_calendar_scope` and friends), `notifications` (issue #118 test-provider endpoint), plus `sonarr_compat` / `radarr_compat` (the anibridge shims), `arr_auth` (shared API-key middleware), `arr_shared` (DTOs shared between shim sides). Auth deep dive: **`src/handlers/auth/CLAUDE.md`**.
 - **`services/`** — Business logic + external API clients.
   - Metadata chain: `anilist/` → `jikan` → `kitsu`, plus `mal` (OAuth-authenticated, distinct from `jikan` which is the public-fallback path).
   - `download_client/` — trait + **5 client impls** (qBit / Deluge / Transmission / rtorrent / **sabnzbd**) + `DownloadClientPool` for multi-client routing. Wire quirks + pool: **`src/services/download_client/CLAUDE.md`**.
@@ -86,9 +86,11 @@ Axum 0.8 + Tokio · SQLite via sqlx 0.8 (`default-features = false` + `runtime-t
   - `crypto.rs` — AEAD wrapper for OAuth tokens. `oauth_state.rs` (PKCE verifier store), `user_score.rs`.
   - `nyaa/`, `seadex.rs`, `rss/`, `anibridge.rs`, `interactive_search_cache.rs`, `indexer_catalog.rs` (provisioning), `task_registry.rs` (in-memory supervised-task lifecycle).
   - `post_processing/` — moves/renames completed downloads (hardlink/copy/move). `nfo.rs`, `artwork.rs`, `media.rs`, `jellyfin.rs`.
-  - `monitoring.rs`, `progress.rs`, `library_link.rs`, `grab_commit.rs`, `grab_sweep.rs`, `metadata_sync.rs`, `html.rs`, `sanitize.rs`, `logger.rs`.
+  - `calendar.rs` (calendar reader — joins `episode_airings ⨝ series`), `airing_refresh.rs` (12h supervised stamper that walks AL `Page.airingSchedules` and writes `episode_airings`).
+  - `notifications/` — outbound providers (`webhook.rs`, `discord.rs`), `event.rs` event taxonomy, `store.rs` cache.
+  - `monitoring.rs`, `progress.rs`, `library_link.rs`, `grab_commit.rs`, `grab_sweep.rs`, `metadata_sync.rs`, `html.rs`, `sanitize.rs`, `logger.rs`, `relative_time.rs`.
   - AL deep dive: **`src/services/anilist/CLAUDE.md`**.
-- **`models/`** — DB access + schema. `migrations/` owns most `CREATE TABLE` / `ALTER TABLE`. A few tables own their `CREATE TABLE` next to their model module (`custom_formats`, `group_source_map` + `schema_migrations`, `media_probe_cache`, `nyaa_description_cache`). Notable additions beyond the obvious: `download_clients` (one row per configured client, keyed by id; `is_default` rows are scoped per-protocol — torrent vs usenet — both can coexist), `indexers` (torznab/newznab rows with caps cache + per-indexer `download_client_id` pin), `direct_rss_feeds` (per-feed configuration for direct sources like SubsPlease).
+- **`models/`** — DB access + schema. `migrations/` owns most `CREATE TABLE` / `ALTER TABLE`. A few tables own their `CREATE TABLE` next to their model module (`custom_formats`, `group_source_map` + `schema_migrations`, `media_probe_cache`, `nyaa_description_cache`). Notable additions beyond the obvious: `download_clients` (one row per configured client, keyed by id; `is_default` rows are scoped per-protocol — torrent vs usenet — both can coexist), `indexers` (torznab/newznab rows with caps cache + per-indexer `download_client_id` pin), `direct_rss_feeds` (per-feed configuration for direct sources like SubsPlease), `episode_airings` (#115/#116 — local cache of AL airing schedules; FK on `series_id` is `ON DELETE CASCADE`, range-scan index on `airing_at`; the calendar reader joins this against `series` instead of round-tripping to AL per-request).
 - **`templates/`** — Askama templates. HTMX patterns + per-page JS lifecycle: **`templates/CLAUDE.md`**.
 - **`static/`** — Modular CSS (`base.css`, `topbar.css`, `forms.css`, `badges.css`, `modals.css` loaded everywhere + per-page `pages/<name>.css`) and per-page `static/js/*.js`. No bundler. Non-CSS/JS assets: `static/default_custom_formats.json` (embedded via `include_str!` at compile time), `static/fonts/` (Murecho woff2 subsets — Latin + Japanese, weights 500-800), `static/licenses/` (third-party LICENSE texts surfaced in System → About), `static/vendor/` (HTMX bundles).
 - **`tests/`** — Integration tests (binary crates importing `ryokan` as a lib). Browser-e2e harness for HTMX UI assertions. **`tests/CLAUDE.md`**.
@@ -109,6 +111,8 @@ Defined in `src/lib.rs`. Fields:
 - `oauth_state: OAuthStateStore` — in-memory store for pending MAL OAuth attempts (PKCE verifier between `/start` and `/submit`). 10-minute TTL. AL has no entry — implicit grant, no per-attempt server state.
 - `start_time: chrono::DateTime<Utc>` — wall-clock timestamp captured at boot. Used by Sonarr/Radarr `system_status` so Seerr's UI pill reports actual liveness; the prior hardcoded `2024-01-01T00:00:00Z` claimed the indexer had been up over a year regardless of when Ryokan restarted.
 - `tasks: TaskRegistry = Arc<RwLock<HashMap<&'static str, Arc<TaskState>>>>` — supervised-task lifecycle metadata. Each `supervise()` loop registers itself once at startup, mutates atomics on its `Arc<TaskState>` on every iteration (no further locking until a snapshot read). Distinct from the DB-backed `scheduled_task_runs` table — `tasks` is the in-memory live status view (running / backoff, restart count, last exit kind, current backoff) served at `/api/system/tasks` for the System page.
+- `dc_status_cache: DcStatusCache = Arc<Mutex<HashMap<i64, (Instant, DcStatusEntry)>>>` — per-download-client probe-result cache, **10-min TTL** (`DC_STATUS_CACHE_TTL`). Without it, every page load and every hx-boost re-entry into Settings → Download Clients re-runs the network probe (50-500ms healthy / up to 5s unreachable) and the "Probing…" pills flash to real status at staggered times. Wiped per-id on every `download_clients` row CRUD so a credential edit re-probes immediately rather than masking failures for the full TTL.
+- `notification_providers: NotificationProviders` — issue #118 swap-on-write cache for outbound notification providers (webhook / Discord). Same `Arc<RwLock<Arc<Vec<_>>>>` shape as `custom_formats` / `indexers` — read lock releases before the per-provider fan-out begins. `services::notifications::dispatch` early-returns on empty so every hook point is a no-op until at least one provider is configured.
 
 ## Download-client routing (multi-client pool)
 
@@ -131,11 +135,12 @@ Defined in `src/lib.rs`. Fields:
 
 ## Background tasks
 
-Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`. The supervised list (10 tasks: `progress_sweep`, `rss_sync`, `post_processing`, `grab_sweep`, `external_sync`, `cleanup`, `library_classify`, `metadata_refresh`, `upgrade_search`, `anibridge_refresh`) and intervals are inline in `main.rs` — grep `supervise(&` for the canonical names. Non-obvious bits the code doesn't explain on its own:
+Each runs as a `tokio::spawn` loop in `main.rs` wrapped in `supervise()`. The supervised list (11 tasks: `progress_sweep`, `rss_sync`, `post_processing`, `grab_sweep`, `external_sync`, `cleanup`, `library_classify`, `metadata_refresh`, `upgrade_search`, `anibridge_refresh`, `airing_refresh`) and intervals are inline in `main.rs` — grep `supervise(&` for the canonical names. Non-obvious bits the code doesn't explain on its own:
 
 - **Restart policy is exponential backoff**, not flat 5s: `MIN_BACKOFF = 5s`, `MAX_BACKOFF = 30 min`, `HEALTHY_RUNTIME = 60s`. Healthy ≥60s run resets to 5s; <60s exit doubles up to 30 min.
 - **Two layers of status tracking** — `scheduled_task_runs` DB table is the historical record (System page per-task history pane); `AppState.tasks: TaskRegistry` is the in-memory live status served at `/api/system/tasks` (lock-free atomics, snapshot-on-read).
 - **`external_sync` quirks**: 1-min outer tick re-reads `config.external_sync_interval_minutes` (Settings change takes effect within 60s); `consecutive_errors`-driven exponential skip (2^errors intervals, capped at 5 → 32× multiplier, with 24h ceiling so a 7-day cadence can't get pushed seven months by five errors); `has_linked_account` early-out so no `scheduled_task_runs` row burns when no account is linked.
+- **`airing_refresh` shape (#115/#116)**: 12h supervised tick + manual trigger at `POST /api/tasks/airing-refresh`; both share `services::airing_refresh::AIRING_REFRESH_LOCK` (`tokio::sync::Mutex<()>`) so a manual click during the scheduled tick returns "already running" rather than queuing. Library add path also calls `refresh_for_series` inline (fire-and-forget) so freshly-added series show up in the calendar without waiting for the next 12h tick. Past-window prune retains 14 days. Mirrors Sonarr's `Episode.AirDateUtc` shape — stamp once, serve from DB on the calendar's hot path; the calendar reader has no in-process cache because the indexed range-scan is cheap enough on its own.
 
 ## Cross-cutting conventions
 
@@ -179,6 +184,7 @@ Static `LazyLock`s crossing request boundaries — inventory:
 - `services::rss::RSS_SYNC_LOCK` — `try_lock` + readable error so manual run during a tick doesn't queue.
 - `services::external_sync::EXTERNAL_SYNC_LOCK` — same shape; Sync-now click during the supervised loop returns "already running."
 - `services::upgrade::UPGRADE_LOCK` — same `try_lock` shape; manual upgrade-search button returns "already running" rather than queuing during the supervised tick.
+- `services::airing_refresh::AIRING_REFRESH_LOCK` — same `try_lock` shape (#115/#116); the 12h supervised tick and the `POST /api/tasks/airing-refresh` manual trigger share this lock so a click during the scheduled tick returns "already running" rather than double-stamping the AL budget.
 - `services::nyaa::NYAA_CONCURRENCY` (`Semaphore`) — bounds Nyaa fan-out concurrency so a wide auto-search target list can't burst-attack the scraper.
 - `services::crypto::ENCRYPTION_KEY` — the AEAD key. Crashing at LazyLock force is intentional.
 - `handlers::settings::CONFIG_WRITE_LOCK` (`tokio::sync::Mutex<()>`) — serializes handler-level read-modify-write of `Config`. Multi-process deployment (which Ryokan doesn't support) would need DB-level locking instead.
@@ -195,12 +201,13 @@ Static `LazyLock`s crossing request boundaries — inventory:
 
 ## Routes
 
-Five route groups in `main.rs`, each with a different auth layer — pick the right group when adding a new route:
+Six route groups in `main.rs`, each with a different auth layer — pick the right group when adding a new route:
 
 - **`public_routes`** — unauthenticated; wrapped in `csrf_public` so POSTs still enforce Origin/Referer (`/login`, `/setup`, `/forgot-password`).
 - **`protected_routes`** — behind `require_auth` cookie middleware. Default for all UI routes and web-UI-facing API endpoints.
 - **`sonarr_routes`** and **`radarr_routes`** — merged *outside* the cookie-auth layer; use `arr_auth::check_api_key` instead. Two separate routers because Seerr only allows two Sonarr + two Radarr indexer slots and both shims must coexist on one host/port.
 - **`webhook_routes`** — outside cookie-auth; each receiver carries its own API-key middleware.
+- **`calendar_routes`** — outside cookie-auth; carries `require_calendar_scope` (scoped-API-key middleware from #114) so iCal subscribers (Apple Calendar / Google Calendar / Thunderbird, which can't carry cookies) can reach `/api/calendar.ics`. Same scoped-key shape as the future `search`-scoped surfaces planned on top of #114.
 
 There is no `/healthz`. **The Docker healthcheck deliberately probes `/login`** (200 with no auth, no config dependency, no side effects) rather than the auth-gated `/api/health`.
 

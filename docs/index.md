@@ -13,6 +13,7 @@ If you've used Sonarr for TV, the shape is the same. Ryokan is just the anime-tu
 - **Search multiple sources at once.** Built-in [Nyaa](https://nyaa.si) search, torznab and newznab indexers via Prowlarr or Jackett, direct RSS feeds, and autobrr webhooks all merge into one ranked result list.
 - **Pick the best release automatically.** A quality profile, [TRaSH-Guides](https://trash-guides.info)-compatible Custom Formats (the same scoring rules Sonarr uses), and optional [SeaDex](https://releases.moe) picks (a community-curated list of best anime releases) decide what gets grabbed.
 - **Re-grab when something better lands.** Set a quality cutoff once; Ryokan watches for upgrades and replaces older grabs as higher-scoring releases show up.
+- **See what's airing this week.** A built-in [Calendar](calendar.md) shows upcoming episodes for the shows in your library, as a list or a month grid. You can also subscribe to it from your phone or laptop's calendar app.
 - **Use the download client you already have.** qBittorrent, Deluge, Transmission, rTorrent, or SABnzbd. Run more than one at once and Ryokan routes per-grab.
 - **Land files in your library automatically.** Hardlink (default; keeps the torrent seeding), copy, or move.
 - **Plug into Seerr.** Ryokan exposes a Sonarr/Radarr-compatible API so Seerr requests anime the same way it asks Sonarr for TV.
@@ -39,4 +40,4 @@ If you'd rather build the stack yourself, work through these in order:
 
 ---
 
-*Last updated: 2026-05-07.*
+*Last updated: 2026-05-09.*

@@ -1,3 +1,14 @@
+    {# Per-tab toast. Page-level alert was dropped from
+       settings.html so every tab anchors its alerts inside
+       `.tabbed-content` rather than spanning the breakout
+       `.tabbed-page` width across the sidebar. #}
+    {% if let Some(msg) = message %}
+    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Custom Formats">{{ msg }}</div>
+    {% endif %}
+    {% if let Some(err) = error %}
+    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Custom Formats">{{ err }}</div>
+    {% endif %}
+
     <p class="cf-section-desc" style="max-width: 820px; margin-bottom: 20px;">
         Sonarr v4-compatible Custom Formats. Every matching spec contributes its score to the release total during auto-search. Paste JSON exports from Sonarr or <a href="https://trash-guides.info" target="_blank" rel="noopener">Trash Guides</a>, or build your own from scratch.
     </p>

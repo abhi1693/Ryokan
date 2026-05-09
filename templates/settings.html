@@ -14,16 +14,15 @@
     <h2>Settings</h2>
 </div>
 
-{% if let Some(msg) = message %}
-    {# Auto-escape — never |safe. msg can come from `?msg=` query string
-       (settings_page) and from POST notice strings (settings_submit, which
-       interpolates user-controlled fields like media_root into format!()).
-       Either path is reflected/stored XSS without escaping. #}
-    <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg }}</div>
-{% endif %}
-{% if let Some(err) = error %}
-    <div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Settings error">{{ err }}</div>
-{% endif %}
+{# Toast/alert rendering is per-tab partial, not page-level.
+   Page-level placement spans the viewport-breakout `.tabbed-page`
+   width — it visually overlaps the sidebar column on a desktop
+   layout. Each partial owns its own `{% if let Some(msg) %}…`
+   block at its top so the alert lands inside `.tabbed-content`'s
+   centered column, matching the *_form.html partials that
+   already do this (integrations / quality / general). XSS escaping
+   is unchanged — the partials use `{{ msg }}` (auto-escape), never
+   `|safe`. #}
 
 <div class="tabbed-layout">
 <nav class="tabbed-sidebar" aria-label="Settings sections">
@@ -68,13 +67,13 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         <span>Release Groups</span>
     </a>
-    <a href="/settings?tab=general" class="tabbed-side-tab {% if tab == "general" %}active{% endif %}">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
-        <span>General</span>
-    </a>
     <a href="/settings?tab=api_keys" class="tabbed-side-tab {% if tab == "api_keys" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.85 12.15 19 4"/><path d="m18 5 2 2"/><path d="m15 8 2 2"/></svg>
         <span>API Keys</span>
+    </a>
+    <a href="/settings?tab=general" class="tabbed-side-tab {% if tab == "general" %}active{% endif %}">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+        <span>General</span>
     </a>
 </nav>
 <div class="tabbed-content">
@@ -164,6 +163,7 @@
 {%~ include "partials/settings/api_keys.html" ~%}
 </div>
 {% endif %}
+
 
 </div>{# /.tabbed-content #}
 </div>{# /.tabbed-layout #}

@@ -9,7 +9,7 @@ Changes apply on save; no restart needed.
 Third-party services Ryokan talks to.
 
 - **AniList / MyAnimeList accounts**: OAuth-linked for watch-list sync. When linked, anime you mark "watching" (or "planning", "completed", etc.) on AniList or MAL get auto-added to your Ryokan library on the next sync tick. Setup walkthrough: [External accounts](external-accounts.md).
-- **Sync interval (minutes)**: how often the watch-list sync runs. Default 30 minutes; minimum 15, maximum 10080 (7 days). Values below 15 round up automatically on save.
+- **Sync interval (minutes)**: how often the watch-list sync runs. Default 30 minutes; minimum 15, maximum 10080 (7 days). The form won't let you type anything below 15. If a value somehow ends up outside that range, it falls back to 30.
 - **Jellyfin**: server URL and API key. Lets Ryokan trigger a Jellyfin library refresh after each import and validate that imported files actually landed on disk. URL is `http://jellyfin:8096` when Ryokan and Jellyfin share a Docker compose; if they're on different hosts or in separate composes, use your host's LAN IP and the host-mapped port.
 - **Sonarr / Radarr API shim (anibridge)**: exposes a Sonarr-compatible and Radarr-compatible API so request frontends like Seerr can ask Ryokan for anime the same way they'd ask Sonarr for TV. The Sonarr side lives at `/api/v3/...`, the Radarr side at `/radarr/api/v3/...`. Each has its own API key.
 - **autobrr webhook**: accepts inbound webhooks at `/api/webhook/autobrr`. [autobrr](https://autobrr.com) is a separate self-hosted tool that watches IRC announce channels for new releases and pushes matches as HTTP webhooks; this is the receiving side. The webhook has its own API key with a dedicated regenerate button, so an accidental tab POST can't silently rotate or wipe it.
@@ -55,6 +55,13 @@ A per-group reputation map. Tells the classifier things like "VCB-Studio always 
 
 The mapping auto-populates as Ryokan observes grabs (it learns from the filenames a group tends to use); manual overrides take precedence.
 
+## API Keys
+
+Issue API keys for outside tools that need to talk to Ryokan. Each key gets a name, a list of permissions ("scopes") that decide what the key can do, and shows you the key text once when you create it. Save it then; if you lose it, regenerate.
+
+- **calendar**: lets the key read the iCal subscription feed. Calendar apps (Apple Calendar, Google Calendar, Thunderbird) can't log in like a browser, so the subscription URL carries the key in the URL itself. The [Calendar](calendar.md) page has a button that builds the full URL for you.
+- **admin**: covers everything. Use it sparingly; prefer narrower scopes when one fits.
+
 ## General
 
 Day-to-day knobs.
@@ -76,4 +83,4 @@ A few runtime toggles live on the **System** page rather than under Settings, in
 
 ---
 
-*Last updated: 2026-05-07.*
+*Last updated: 2026-05-09.*

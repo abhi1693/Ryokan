@@ -142,6 +142,30 @@ pub async fn add_series(
             }
         });
 
+        // Stamp upcoming episode air dates inline so the
+        // calendar's local-DB read returns this series on the very
+        // next request rather than waiting for the next 12h
+        // `airing_refresh` tick. One AL roundtrip (single
+        // mediaId_in element) — negligible against the 30/min
+        // budget. Quiet on failure; the supervised task will pick
+        // it up later.
+        let airing_db = state.db.clone();
+        let airing_title = tracked.title.clone();
+        let airing_id = id;
+        tokio::spawn(async move {
+            if let Err(err) =
+                crate::services::airing_refresh::refresh_for_series(&airing_db, airing_id).await
+            {
+                logger::warn(
+                    &airing_db,
+                    LogCategory::AniList,
+                    &format!("Failed to stamp airings for {}", airing_title),
+                    &err,
+                )
+                .await;
+            }
+        });
+
         // Issue #53: kick off a one-shot classification scan for just
         // this series. If the user's media root already has files for
         // this show (pre-existing rip, manual drop, migration from

@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod calendar;
 pub mod downloads;
 pub mod grab;
 pub mod help;

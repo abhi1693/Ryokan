@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{# Per-page CSS now bundled in base.html — see comment there. #}
+
+{% block title %} - Calendar{% endblock %}
+
+{% block content %}
+<div class="page-header calendar-page-header">
+    <h2>Calendar</h2>
+    {# Sonarr-style "iCal Link" icon button. Opens a modal with the
+       subscription URL helper. Hidden when no calendar-scoped key
+       exists (the create-key prompt lives inside the modal anyway,
+       but if the user has zero keys total there's nothing to
+       compose, so the button just routes them to the API Keys
+       tab). #}
+    <button type="button"
+            class="btn btn-ghost calendar-ical-btn"
+            id="calendar-ical-btn"
+            title="Get the iCal subscription URL for this calendar"
+            aria-label="iCal Link">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
+        <span>iCal Link</span>
+    </button>
+</div>
+
+<div class="calendar-toolbar">
+    {# HTMX-driven range toggle. Each tab's hx-get fetches the
+       partial (handler branches on HxRequest) and swaps it into
+       #calendar-list. `hx-push-url=true` keeps the URL bar and
+       browser-history honest so back/forward and paste-link both
+       work. The bare `href` is the no-JS fallback; same URL,
+       triggers a full-page nav. #}
+    <div class="calendar-range-tabs" role="tablist" aria-label="Calendar range">
+        <a href="/calendar?range=this_week{% if monitored_only %}&monitored=true{% endif %}"
+           hx-get="/calendar?range=this_week{% if monitored_only %}&monitored=true{% endif %}"
+           hx-target="#calendar-list"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           class="calendar-range-tab {% if range == "this_week" %}active{% endif %}"
+           role="tab"
+           data-range="this_week"
+           aria-selected="{% if range == "this_week" %}true{% else %}false{% endif %}">This week</a>
+        <a href="/calendar?range=next_week{% if monitored_only %}&monitored=true{% endif %}"
+           hx-get="/calendar?range=next_week{% if monitored_only %}&monitored=true{% endif %}"
+           hx-target="#calendar-list"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           class="calendar-range-tab {% if range == "next_week" %}active{% endif %}"
+           role="tab"
+           data-range="next_week"
+           aria-selected="{% if range == "next_week" %}true{% else %}false{% endif %}">Next week</a>
+        <a href="/calendar?range=month{% if monitored_only %}&monitored=true{% endif %}"
+           hx-get="/calendar?range=month{% if monitored_only %}&monitored=true{% endif %}"
+           hx-target="#calendar-list"
+           hx-swap="innerHTML"
+           hx-push-url="true"
+           class="calendar-range-tab {% if range == "month" %}active{% endif %}"
+           role="tab"
+           data-range="month"
+           aria-selected="{% if range == "month" %}true{% else %}false{% endif %}">This month</a>
+    </div>
+
+    <div class="calendar-filters">
+        {# Sonarr-shaped local search: filters the already-rendered
+           card list in place rather than refetching, so typing
+           feels instant. JS in calendar.js wires the input to a
+           class-toggle on each .calendar-episode. #}
+        <input type="search"
+               id="calendar-series-search"
+               class="calendar-series-search"
+               placeholder="Filter by series…"
+               aria-label="Filter by series name"
+               autocomplete="off">
+
+        <label class="calendar-toggle-filter">
+            <input type="checkbox"
+                   id="calendar-monitored-toggle"
+                   {% if monitored_only %}checked{% endif %}>
+            <span>Monitored only</span>
+        </label>
+    </div>
+</div>
+
+{# Body container — `#calendar-list` is the HTMX swap target for
+   range tab clicks + the monitored-only toggle. The handler
+   branches on view_mode and returns either the day-grouped list
+   partial (week ranges) or the calendar-month grid (month range).
+   Keeping both paths anchored at the same target means the JS
+   afterSwap hook hydrates whichever shape just landed. #}
+<div class="calendar-list" id="calendar-list" data-view-mode="{{ view_mode }}">
+{% if view_mode == "grid" %}
+{%~ include "partials/calendar/grid.html" ~%}
+{% else %}
+{%~ include "partials/calendar/list.html" ~%}
+{% endif %}
+</div>
+
+{# Subscribe modal — opened by the "iCal Link" button in the
+   page header. Sonarr-style: the URL helper is one click away
+   from the calendar surface but doesn't take vertical space on
+   the page when not needed. #}
+<div class="modal-backdrop" id="calendar-subscribe-modal" style="display:none"
+     role="dialog" aria-modal="true" aria-labelledby="calendar-subscribe-modal-title">
+    <div class="modal" style="max-width: 560px">
+        <div class="modal-header">
+            <h3 id="calendar-subscribe-modal-title">iCal subscription</h3>
+            <button class="btn-icon" type="button" data-modal-close="calendar-subscribe-modal" aria-label="Close">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+            </button>
+        </div>
+        <div class="api-keys-form" style="padding: 4px 0 12px">
+            {% if calendar_keys.is_empty() %}
+            <div class="api-keys-form-row">
+                <p class="form-hint">
+                    No <code>calendar</code>-scoped API keys configured. Create one on the
+                    <a class="link-accent" href="/settings?tab=api_keys">API Keys tab</a>
+                    to subscribe.
+                </p>
+            </div>
+            {% else %}
+            <div class="api-keys-form-row">
+                <label for="calendar-subscribe-key" class="api-keys-form-label">API key</label>
+                <select id="calendar-subscribe-key" class="api-keys-form-input">
+                    {% for key in calendar_keys %}
+                    <option value="{{ key.id }}">{{ key.name }}</option>
+                    {% endfor %}
+                </select>
+                <p class="api-keys-form-hint">
+                    The key's plaintext is embedded in the URL below; treat the URL as a secret.
+                </p>
+            </div>
+            <div class="api-keys-form-row">
+                <label for="calendar-subscribe-url" class="api-keys-form-label">Subscription URL</label>
+                <div class="api-keys-reveal-key-row">
+                    <input type="text"
+                           id="calendar-subscribe-url"
+                           class="api-keys-reveal-key"
+                           readonly
+                           aria-label="iCal subscription URL"
+                           value="Loading...">
+                    <button type="button"
+                            class="btn btn-secondary api-keys-reveal-copy-btn"
+                            id="calendar-subscribe-copy-btn">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                        <span>Copy</span>
+                    </button>
+                </div>
+                <p class="api-keys-reveal-copy-confirm" id="calendar-subscribe-copy-confirm" hidden>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
+                    Copied to clipboard.
+                </p>
+                <p class="api-keys-form-hint">
+                    Paste this URL into Google Calendar (Other calendars → + → From URL), Apple Calendar (File → New Calendar Subscription), or Thunderbird (New Calendar → On the Network → iCalendar).
+                </p>
+                <p class="api-keys-form-hint">
+                    Append <code>?monitored=true</code> for monitored only, or <code>?days=N</code> to change the window (capped at 90).
+                </p>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block page_js %}<script src="/static/js/calendar.js" defer></script>{% endblock %}

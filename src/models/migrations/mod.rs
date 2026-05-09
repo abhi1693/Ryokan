@@ -2703,6 +2703,40 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Issue #115/#116 follow-up — local cache of AniList airing
+    // schedules. Sonarr stamps episode air dates on its local
+    // `Episode.AirDateUtc` column at series-refresh time and serves
+    // the calendar from a plain SQL range scan, never hitting the
+    // upstream metadata provider on the hot path. We mirror that:
+    // a 12h `airing_refresh` supervised task pulls AL's
+    // `Page.airingSchedules` for every positive-AL-id series and
+    // writes upcoming episodes here. The calendar then reads from
+    // this table joined against `series` instead of round-tripping
+    // to AL per-request, preserving the 30/min degraded budget.
+    //
+    // Series removal cascades (FK) so deleted series automatically
+    // drop their stamped airings.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS episode_airings (
+            series_id        INTEGER NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+            episode          INTEGER NOT NULL,
+            airing_at        INTEGER NOT NULL,
+            duration_minutes INTEGER NOT NULL DEFAULT 24,
+            refreshed_at     INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            PRIMARY KEY (series_id, episode)
+        )",
+    )
+    .execute(db)
+    .await
+    .ok();
+    // Range-scan index for the calendar's primary `WHERE airing_at
+    // BETWEEN @from AND @to` query. Mirrors Sonarr's
+    // `idx_episodes_air_date_utc`.
+    sqlx::query("CREATE INDEX IF NOT EXISTS idx_episode_airings_at ON episode_airings (airing_at)")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

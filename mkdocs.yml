@@ -73,6 +73,7 @@ nav:
   - Guides:
     - Configuration: configuration.md
     - Configuration (cont.): system.md
+    - Calendar: calendar.md
     - Download clients: download-clients.md
     - External accounts: external-accounts.md
   - Troubleshooting: troubleshooting.md

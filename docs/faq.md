@@ -33,6 +33,7 @@ Yes. Ryokan exposes a Swagger UI at `/api-docs` and the OpenAPI JSON at `/api-do
 
 - **Cookie auth** for the web-UI-facing endpoints (whatever the browser uses; you log in with username + password).
 - **API-key auth** for the Sonarr / Radarr-compatible shim that Seerr and friends call (`X-Api-Key` header or `?apikey=` query string, configured in **Settings → Connections**).
+- **Per-tool API keys** for narrower jobs. Right now the calendar subscription feed at `/api/calendar.ics` is the main one. Create a key with the `calendar` permission on **Settings → API Keys** and the [Calendar](calendar.md) page builds the subscription URL for you.
 
 ## How do I back up?
 
@@ -44,4 +45,4 @@ If you're using the [quick start's](quick-start.md) `/srv/docker/ryokan` bind-mo
 
 ---
 
-*Last updated: 2026-05-07.*
+*Last updated: 2026-05-09.*

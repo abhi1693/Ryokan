@@ -82,11 +82,6 @@
                 <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" tabindex="-1" aria-hidden="true">Clear</a>
                 {% endif %}
             </form>
-            {# Reserved width pushes the right group's left edge back
-               toward where it sat before the Needs Review button
-               was removed. Successively trimmed as the row grew —
-               first for the always-reserved Clear slot, then for
-               the height-matched (and so wider) dropdowns + search. #}
             <button class="btn btn-primary" style="margin-left: 32px;" onclick="openAddModal()">+ Add Series</button>
         </div>
     </div>

@@ -29,7 +29,7 @@ The RSS poll cadence is set in **Settings → General → RSS Sync Interval**. M
 
 ## Scheduled Tasks
 
-Status of Ryokan's background tasks: external_sync (watch-list sync), post_processing (move imported files into the library), grab_sweep (reconcile pending grabs against the download client's state), upgrade_search (look for better releases of already-grabbed episodes), library_classify, metadata_refresh, and a handful more.
+Status of Ryokan's background tasks: external_sync (watch-list sync), post_processing (move imported files into the library), grab_sweep (reconcile pending grabs against the download client's state), upgrade_search (look for better releases of already-grabbed episodes), library_classify, metadata_refresh, airing_refresh (refreshes the air times that show up on the [Calendar](calendar.md)), and a handful more.
 
 Each row shows last-run time, status (ok / warn / error / running), restart count if the task crashed and got restarted, and current backoff if it's in a failure cycle.
 

@@ -246,6 +246,7 @@ function forceRunTask(btn, taskKey) {
     const endpoints = {
         rss_sync: '/api/rss/sync',
         metadata_refresh: '/api/tasks/metadata-refresh',
+        airing_refresh: '/api/tasks/airing-refresh',
         // The rebuild handler `api_rebuild_cached_metadata` writes a
         // `metadata_rebuild` scheduled-tasks row, so once the user has
         // ever clicked Rebuild on the Debug tab the task shows up in

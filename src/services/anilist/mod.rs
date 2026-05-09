@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use crate::services::jikan;
 
+pub mod airing_schedules;
 mod rate_limit;
 #[cfg(any(test, feature = "test-support"))]
 pub use rate_limit::reset_state_for_tests;

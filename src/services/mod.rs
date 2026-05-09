@@ -1,4 +1,6 @@
+pub mod airing_refresh;
 pub mod anilist;
+pub mod calendar;
 pub mod crypto;
 pub mod download_client;
 pub mod external_sync;

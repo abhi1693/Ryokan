@@ -114,6 +114,7 @@ use services::{
         handlers::system::api_rss_sync,
         handlers::system::api_rss_clear_history,
         handlers::system::api_force_metadata_refresh,
+        handlers::system::api_force_airing_refresh,
         handlers::system::api_force_cleanup,
         handlers::system::api_force_post_processing,
         handlers::system::api_force_library_classify,
@@ -370,9 +371,9 @@ async fn main() {
     });
 
     // WAL mode lets readers run concurrently with a writer, which matters a
-    // lot here: seven background tasks (rss_sync, post_processing, cleanup,
-    // library_classify, metadata_refresh, upgrade_search, anibridge_refresh)
-    // all share this pool with the request path. In the default DELETE
+    // lot here: every supervised background task (grep `supervise(&` for the
+    // canonical names — currently 11) shares this pool with the request
+    // path. In the default DELETE
     // journal mode every writer takes a whole-database lock and stalls the
     // next page load behind whatever scheduled_tasks row update or log insert
     // happens to be running. `synchronous=NORMAL` is safe under WAL (durable
@@ -1009,6 +1010,10 @@ async fn main() {
             post(handlers::system::api_force_metadata_refresh),
         )
         .route(
+            "/api/tasks/airing-refresh",
+            post(handlers::system::api_force_airing_refresh),
+        )
+        .route(
             "/api/tasks/cleanup",
             post(handlers::system::api_force_cleanup),
         )
@@ -1038,6 +1043,14 @@ async fn main() {
         )
         .route("/api/system/tasks", get(handlers::system::api_system_tasks))
         .route("/help", get(handlers::help::help_page))
+        // Issue #116 — in-app calendar page. Cookie-auth gated
+        // (rest of protected_routes); the iCal feed at
+        // /api/calendar.ics is the parallel scoped-key surface
+        // wired via `calendar_routes` further down. The same
+        // handler serves full-page renders and HTMX partial
+        // swaps (it branches on HxRequest), so there's no
+        // separate JSON route.
+        .route("/calendar", get(handlers::calendar::page))
         .route("/api/logs/poll", get(handlers::system::api_logs_poll))
         .route("/api/logs/clear", post(handlers::system::api_logs_clear))
         .route("/api/logs/export", get(handlers::system::api_logs_export))
@@ -1186,6 +1199,19 @@ async fn main() {
         )
         .with_state(state.clone());
 
+    // Issue #115 — iCal calendar feed. Lives in its own router
+    // group so it can carry the `require_calendar_scope`
+    // middleware (scoped-API-key auth from #114) instead of
+    // cookie-auth — calendar subscribers (Google Calendar / Apple
+    // Calendar / Thunderbird) can't carry cookies.
+    let calendar_routes = Router::new()
+        .route("/api/calendar.ics", get(handlers::calendar::ical_feed))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            handlers::scoped_auth::require_calendar_scope,
+        ))
+        .with_state(state.clone());
+
     // Brotli/gzip compression. The series detail template is ~80KB of HTML
     // and style.css is ~64KB — both highly compressible (lots of repeated
     // tokens, whitespace), and they ship on every page navigation. Axum
@@ -1212,6 +1238,7 @@ async fn main() {
         .merge(protected_routes)
         .merge(sonarr_routes)
         .merge(radarr_routes)
+        .merge(calendar_routes)
         .merge(webhook_routes)
         .nest_service(
             "/static",
@@ -1288,6 +1315,14 @@ async fn main() {
         "anibridge_refresh",
         "Anibridge mappings refresh",
         "Every 24 hours",
+        true,
+    )
+    .await;
+    let _ = models::scheduled_tasks::touch_definition(
+        &db,
+        "airing_refresh",
+        "Episode air-date refresh",
+        "Every 12 hours",
         true,
     )
     .await;
@@ -1466,6 +1501,76 @@ async fn main() {
                     }
                 },
             )
+            .await;
+        });
+    }
+
+    // Background task: refresh stamped episode air dates every 12
+    // hours so the calendar reads from a freshly-warmed local table
+    // instead of round-tripping to AniList per-request. Mirrors
+    // Sonarr's `Episode.AirDateUtc` shape — one stamp at refresh
+    // time, then the calendar's hot path is a plain SQL range scan
+    // against `idx_episode_airings_at`. The refresh service holds
+    // its own lock so a manual-trigger handler can't race the
+    // scheduled tick. Startup delay is computed from
+    // `scheduled_task_runs.last_finished_at` so a process restart
+    // mid-window doesn't re-fire the sweep.
+    {
+        let airing_db = db.clone();
+        let task_registry_airing = state.tasks.clone();
+        tokio::spawn(async move {
+            supervise(&task_registry_airing, "airing_refresh", move || {
+                let db = airing_db.clone();
+                async move {
+                    let period = services::airing_refresh::REFRESH_INTERVAL;
+                    let delay = models::scheduled_tasks::duration_until_next_run(
+                        &db,
+                        "airing_refresh",
+                        period,
+                    )
+                    .await;
+                    tokio::time::sleep(delay).await;
+                    loop {
+                        // Hold the process-wide lock for the duration
+                        // of the run so a manual-trigger doesn't
+                        // double up.
+                        let _guard = services::airing_refresh::AIRING_REFRESH_LOCK.lock().await;
+                        let _ = models::scheduled_tasks::mark_started(
+                            &db,
+                            "airing_refresh",
+                            "Refreshing episode air dates",
+                        )
+                        .await;
+                        match services::airing_refresh::refresh_all(&db).await {
+                            Ok(summary) => {
+                                let status = if summary.al_failures > 0 {
+                                    "warn"
+                                } else {
+                                    "ok"
+                                };
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &db,
+                                    "airing_refresh",
+                                    status,
+                                    &summary.detail(),
+                                )
+                                .await;
+                            }
+                            Err(err) => {
+                                let _ = models::scheduled_tasks::mark_finished(
+                                    &db,
+                                    "airing_refresh",
+                                    "error",
+                                    &err,
+                                )
+                                .await;
+                            }
+                        }
+                        drop(_guard);
+                        tokio::time::sleep(period).await;
+                    }
+                }
+            })
             .await;
         });
     }
