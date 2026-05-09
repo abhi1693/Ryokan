@@ -1119,7 +1119,11 @@ pub async fn api_force_airing_refresh(
         .await;
         let (status, message, detail) = match airing_refresh::refresh_all(&state.db).await {
             Ok(summary) => {
-                let s = if summary.al_failures > 0 { "warn" } else { "ok" };
+                let s = if summary.al_failures > 0 {
+                    "warn"
+                } else {
+                    "ok"
+                };
                 let msg = format!(
                     "Airing refresh complete. Series: {}. Upserted: {}. Pruned: {}.",
                     summary.series_scanned, summary.airings_upserted, summary.airings_pruned,
@@ -1128,8 +1132,7 @@ pub async fn api_force_airing_refresh(
             }
             Err(err) => ("error", format!("Airing refresh failed: {err}"), err),
         };
-        let _ =
-            scheduled_tasks::mark_finished(&state.db, "airing_refresh", status, &detail).await;
+        let _ = scheduled_tasks::mark_finished(&state.db, "airing_refresh", status, &detail).await;
         Ok::<_, (StatusCode, String)>(Json(serde_json::json!({
             "ok": status != "error",
             "message": message,
