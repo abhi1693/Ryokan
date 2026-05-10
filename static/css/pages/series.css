@@ -1146,6 +1146,15 @@
     animation: spin-ring 0.7s linear infinite;
 }
 
+/* Empty-state copy ("No results found." / "No batch releases found.")
+   for the interactive-search modal body. Matches the centering +
+   muted color the previous JS string template used inline. */
+.isearch-empty {
+    text-align: center;
+    color: var(--text-dim);
+    padding: 32px;
+}
+
 .interactive-search-table {
     width: 100%;
     border-collapse: collapse;

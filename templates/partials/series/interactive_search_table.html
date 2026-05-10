@@ -1,0 +1,72 @@
+{# Interactive-search results table — shared between the per-episode and
+   batch flows on the series page. Issue #166 migration replaced the JS
+   template-literal block in `static/js/series_interactive_search.js`
+   (renderInteractiveResults / renderInteractiveBatchResults) with this
+   server-rendered partial. The full SearchResult is JSON-serialized into
+   each row's `data-result` attribute so `grabInteractiveResult` /
+   `grabInteractiveBatchResult` can read it on click without keeping a
+   `_isearchResults` JS array in lockstep with the rendered DOM. #}
+{% if rows.is_empty() %}
+<div class="isearch-empty">{{ empty_message }}</div>
+{% else %}
+<table class="interactive-search-table">
+    <thead>
+        <tr>
+            <th class="col-score">Score</th>
+            <th>Release</th>
+            <th class="col-indexer">Indexer</th>
+            <th>Group</th>
+            <th class="col-quality">Quality</th>
+            <th class="col-size">Size</th>
+            <th class="col-seeds">Seeds</th>
+            <th class="col-grab">Grab</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for r in rows %}
+        <tr>
+            <td class="col-score">
+                <details class="score-details" name="isearch-score-breakdown">
+                    <summary class="score-badge {{ r.score_class }}" title="Click to see breakdown">{{ r.result.score }}</summary>
+                    <div class="score-components">
+                        <div class="score-components-title">Score breakdown</div>
+                        {% if r.result.score_breakdown.is_empty() %}
+                        <div class="form-hint">No components fired.</div>
+                        {% else %}
+                        <ul>
+                            {% for c in r.result.score_breakdown %}
+                            <li>
+                                <span class="sc-delta {% if c.delta > 0 %}sc-delta-pos{% else %}sc-delta-neg{% endif %}">{% if c.delta > 0 %}+{% endif %}{{ c.delta }}</span>
+                                <span class="sc-label">{{ c.label }}</span>
+                                {% if let Some(detail) = c.detail %}<span class="sc-detail">{{ detail }}</span>{% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                    </div>
+                </details>
+            </td>
+            <td>
+                <a class="isearch-release-link" href="{{ r.result.link }}" target="_blank" rel="noopener">{{ r.result.title }}</a>
+                {% if r.result.is_batch %}<span class="tag tag-batch" style="margin-left:4px">batch</span>{% endif %}
+                {% if r.result.is_trusted %}<span class="tag tag-trusted" style="margin-left:4px">trusted</span>{% endif %}
+            </td>
+            <td class="col-indexer" style="color:var(--text-dim)">{{ r.indexer_display }}</td>
+            <td style="color:var(--text-dim)">{{ r.result.group }}</td>
+            <td class="col-quality">{{ r.result.quality_label }}</td>
+            <td class="col-size" style="color:var(--text-dim)">{{ r.result.size }}</td>
+            <td class="col-seeds">
+                <span class="seed-count">{{ r.result.seeders }}</span><span class="peer-sep">/</span><span class="leech-count">{{ r.result.leechers }}</span>
+            </td>
+            <td class="col-grab">
+                {% if let Some(ep) = grab_episode_number %}
+                <button class="btn-grab" type="button" data-result="{{ r.data_result_json }}" onclick="grabInteractiveResult({{ ep }}, this)">Grab</button>
+                {% else %}
+                <button class="btn-grab" type="button" data-result="{{ r.data_result_json }}" onclick="grabInteractiveBatchResult(this)">Grab</button>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
