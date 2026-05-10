@@ -627,9 +627,30 @@
             </div>
         </div>
         <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end;flex-wrap:wrap">
-            <button class="btn btn-secondary" type="button" onclick="reclassifyEpisode(this)" title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
-            <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
-            <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
+            {# Issue #166 — Re-classify renders the verdict pill into
+               `#override-status` and schedules a 600ms delayed reload
+               via `hx-on::after-request` so the user can read the new
+               tag before the page refreshes. `hx-vals='js:'` reads the
+               current episode from the module-scope tracker that
+               openManualOverride sets. #}
+            <button class="btn btn-secondary" type="button"
+                hx-post="/api/library/reclassify-episode"
+                hx-vals='js:manualOverrideReclassifyVals()'
+                hx-target="#override-status"
+                hx-swap="innerHTML"
+                hx-on::after-request="if (event.detail.successful) setTimeout(function(){ window.location.reload(); }, 600)"
+                title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
+            {# Clear + Apply both POST to manual-override; the server
+               returns `HX-Refresh: true` so htmx triggers a full page
+               reload, equivalent to the prior JS `location.reload()`. #}
+            <button class="btn btn-secondary" type="button"
+                hx-post="/api/library/manual-override"
+                hx-vals='js:manualOverrideClearVals()'
+                hx-swap="none">Clear override</button>
+            <button class="btn btn-primary" type="button"
+                hx-post="/api/library/manual-override"
+                hx-vals='js:manualOverrideApplyVals()'
+                hx-swap="none">Apply</button>
         </div>
     </div>
 </div>

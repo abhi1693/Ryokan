@@ -123,10 +123,21 @@ function closeManualOverride(event) {
     if (modal) modal.style.display = 'none';
 }
 
-function applyManualOverride() {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
+// Issue #166 — applyManualOverride / clearManualOverride / reclassifyEpisode
+// moved to declarative `hx-post` on the modal-footer buttons in
+// `templates/series.html`. The three helpers below build the form-
+// values payload at click time via `hx-vals='js:'`. The composite
+// dropdown key (`bluray_remux`, etc.) is unpacked here via
+// OVERRIDE_SOURCE_MAP rather than server-side so the existing source-
+// map (which doubles as the dropdown ↔ wire-shape mapping) doesn't
+// need a parallel Rust port.
+//
+// `overrideTargetEpisode` is set when the modal opens via
+// `openManualOverride` above. The helpers read it from module scope —
+// the modal closes before the request lands, so a stale value can't
+// race a fresh open: each open assigns the new value before the new
+// click could fire.
+function manualOverrideApplyVals() {
     const key = document.getElementById('override-source').value;
     // Defensive fallback: the dropdown can only produce keys that
     // exist in OVERRIDE_SOURCE_MAP, but a future refactor could pass
@@ -134,103 +145,34 @@ function applyManualOverride() {
     // default that actually exists) instead of `unknown` — the latter
     // would build `{source: 'Unknown'}` which the handler 400s on.
     const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.bluray;
-    const resolution = document.getElementById('override-resolution').value;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Saving…';
-    fetch('/api/library/manual-override', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-            source: mapped.source,
-            resolution: resolution,
-            is_remux: mapped.is_remux,
-            is_bdmv: mapped.is_bdmv,
-            web_kind: mapped.web_kind,
-        })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to apply override');
-        return data;
-    })
-    .then(_ => { location.reload(); })
-    .catch(err => { if (status) status.textContent = err.message || 'Failed to apply override'; });
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+        source: mapped.source,
+        resolution: document.getElementById('override-resolution').value,
+        is_remux: mapped.is_remux,
+        is_bdmv: mapped.is_bdmv,
+        web_kind: mapped.web_kind,
+    };
 }
 
-function clearManualOverride() {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Clearing…';
-    fetch('/api/library/manual-override', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-            source: '',
-            resolution: '',
-            is_remux: false,
-            is_bdmv: false,
-            web_kind: '',
-        })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to clear override');
-        return data;
-    })
-    .then(_ => { location.reload(); })
-    .catch(err => { if (status) status.textContent = err.message || 'Failed to clear override'; });
+function manualOverrideClearVals() {
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+        source: '',
+        resolution: '',
+        is_remux: false,
+        is_bdmv: false,
+        web_kind: '',
+    };
 }
 
-// Ad-hoc trigger for the per-episode full-pipeline classifier.
-// Targets the same episode the modal is currently editing. Useful
-// after the user edits Release Groups or a custom format and wants
-// to see the new verdict without waiting up to 6h for the next
-// library-classify sweep.
-function reclassifyEpisode(btn) {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Re-classifying…';
-    if (btn) btn.disabled = true;
-    fetch('/api/library/reclassify-episode', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-        })
-    })
-    .then(async r => {
-        let text = await r.text();
-        // The endpoint returns plain-text error bodies from Axum's
-        // `Err((StatusCode, String))` shape, so surface the body
-        // verbatim rather than trying to JSON-parse a 409.
-        let data = {};
-        try { data = JSON.parse(text); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || text || `Re-classify failed (HTTP ${r.status})`);
-        return data;
-    })
-    .then(data => {
-        if (status) {
-            status.textContent = `→ ${data.quality_tag || 'unknown'} (conf ${Number(data.confidence || 0).toFixed(2)}${data.needs_review ? ', needs review' : ''})`;
-        }
-        // Reload so the episode row picks up the new tag everywhere it
-        // renders (quality badge, override modal pre-selection, etc.).
-        setTimeout(() => { location.reload(); }, 600);
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Re-classify failed';
-        if (btn) btn.disabled = false;
-    });
+function manualOverrideReclassifyVals() {
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+    };
 }
 
 // Issue #166 — `setAllowUpgrades`, `setAllowPtUpgrades`, and

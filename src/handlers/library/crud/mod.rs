@@ -897,8 +897,9 @@ pub async fn set_search_overrides(
 )]
 pub async fn set_manual_override(
     State(state): State<AppState>,
-    Json(form): Json<SetManualOverrideForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetManualOverrideForm>,
+) -> Result<Response, (StatusCode, String)> {
     use crate::services::source::{Resolution, Source, WebKind};
 
     // Validate + canonicalize the form fields *before* writing.
@@ -908,14 +909,14 @@ pub async fn set_manual_override(
         let parsed_source = Source::from_str(&form.source);
         if parsed_source == Source::Unknown {
             return Err((
-                axum::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 format!("invalid source: {:?}", form.source),
             ));
         }
         let parsed_resolution = Resolution::from_str(&form.resolution);
         if parsed_resolution == Resolution::Unknown {
             return Err((
-                axum::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 format!("invalid resolution: {:?}", form.resolution),
             ));
         }
@@ -938,7 +939,7 @@ pub async fn set_manual_override(
         &web_kind_str,
     )
     .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let action = if source_str.is_empty() {
         "cleared".to_string()
@@ -956,6 +957,23 @@ pub async fn set_manual_override(
     )
     .await;
 
+    // HTMX path returns empty 200 + `HX-Refresh: true` so htmx triggers
+    // a full `window.location.reload()`. Matches the prior JS behavior
+    // (location.reload() on success in `series_config.js`) without the
+    // imperative fetch wrapper. The override modal is decorative once
+    // the override lands — the row's quality tag re-renders from the
+    // refreshed page state.
+    if is_htmx {
+        return Ok((
+            [(
+                axum::http::header::HeaderName::from_static("hx-refresh"),
+                "true",
+            )],
+            StatusCode::OK,
+        )
+            .into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -963,7 +981,8 @@ pub async fn set_manual_override(
         "source": source_str,
         "resolution": resolution_str,
         "is_remux": form.is_remux,
-    })))
+    }))
+    .into_response())
 }
 
 /// Batch apply manual overrides. The bulk-actions UI on `/library/review`
@@ -1112,8 +1131,9 @@ pub async fn bulk_manual_override(
 )]
 pub async fn reclassify_episode(
     State(state): State<AppState>,
-    Json(form): Json<ReclassifyEpisodeForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<ReclassifyEpisodeForm>,
+) -> Result<Response, (StatusCode, String)> {
     use crate::services::source::{self, SeriesContext};
     use std::path::Path;
 
@@ -1313,6 +1333,31 @@ pub async fn reclassify_episode(
     )
     .await;
 
+    if is_htmx {
+        // Render the verdict into the save-status pill so the user sees
+        // the new tag + confidence before the page reloads. The 600ms
+        // delay before reload (set in the template's hx-on::after-request)
+        // gives them time to read it. Pill copy mirrors the prior JS
+        // text at series_config.js::reclassifyEpisode.
+        let pill_message = format!(
+            "→ {} (conf {:.2}{})",
+            label,
+            result.confidence,
+            if result.needs_review {
+                ", needs review"
+            } else {
+                ""
+            }
+        );
+        let html = SaveStatusPillPartial {
+            ok: true,
+            message: pill_message,
+        }
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Html(html).into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -1325,7 +1370,8 @@ pub async fn reclassify_episode(
         "web_kind": result.web_kind.as_str(),
         "confidence": result.confidence,
         "needs_review": result.needs_review,
-    })))
+    }))
+    .into_response())
 }
 
 #[utoipa::path(

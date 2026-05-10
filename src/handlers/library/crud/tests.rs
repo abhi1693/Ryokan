@@ -575,8 +575,10 @@ mod crud_ci {
             is_bdmv: false,
             web_kind: String::new(),
         };
-        let body: serde_json::Value =
-            ok_json(set_manual_override(State(state), AxumJson(form)).await).await;
+        let resp = set_manual_override(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["source"], "BluRay");
         assert_eq!(body["resolution"], "1080p");
         assert_eq!(body["is_remux"], true);
@@ -596,7 +598,7 @@ mod crud_ci {
             is_bdmv: false,
             web_kind: String::new(),
         };
-        let err = set_manual_override(State(state), AxumJson(form))
+        let err = set_manual_override(State(state), axum_htmx::HxRequest(false), axum::Form(form))
             .await
             .expect_err("invalid source should 400");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
@@ -621,7 +623,7 @@ mod crud_ci {
             is_bdmv: false,
             web_kind: String::new(),
         };
-        let err = set_manual_override(State(state), AxumJson(form))
+        let err = set_manual_override(State(state), axum_htmx::HxRequest(false), axum::Form(form))
             .await
             .expect_err("invalid resolution should 400");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
@@ -645,8 +647,10 @@ mod crud_ci {
             is_bdmv: false,
             web_kind: "garbage".to_string(),
         };
-        let body: serde_json::Value =
-            ok_json(set_manual_override(State(state), AxumJson(form)).await).await;
+        let resp = set_manual_override(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["source"], "");
         assert_eq!(body["resolution"], "");
     }

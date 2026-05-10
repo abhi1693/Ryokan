@@ -5,7 +5,7 @@
    variant inside the same shape, so the swap target's structure
    doesn't change between success and failure. #}
 {% if ok %}
-<span class="save-status-pill save-status-pill-ok">Saved</span>
+<span class="save-status-pill save-status-pill-ok">{% if message.is_empty() %}Saved{% else %}{{ message }}{% endif %}</span>
 {% else %}
 <span class="save-status-pill save-status-pill-err">{{ message }}</span>
 {% endif %}
