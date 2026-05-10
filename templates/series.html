@@ -178,7 +178,18 @@
         <div class="monitoring-row">
             <span class="folder-label">Monitoring:</span>
             <div class="monitoring-controls">
-                <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
+                {# Issue #166 — declarative HTMX. `change` triggers the
+                   POST; the server returns `HX-Refresh: true` for the
+                   HTMX branch so the page reloads (equivalent to the
+                   prior `location.reload()` in JS). The non-HTMX path
+                   still returns JSON for `toggleMonitorAll` callers
+                   in series_episode_actions.js. #}
+                <select id="monitor-mode" class="folder-select monitoring-select"
+                    name="monitor_mode"
+                    hx-post="/api/library/monitoring"
+                    hx-trigger="change"
+                    hx-vals='js:{series_id: parseInt(SD.dbId)}'
+                    hx-swap="none">
                     <option value="all" {% if monitor_mode_select_value == "all" %}selected{% endif %}>All Episodes</option>
                     <option value="future" {% if monitor_mode_select_value == "future" %}selected{% endif %}>Future Episodes</option>
                     <option value="missing" {% if monitor_mode_select_value == "missing" %}selected{% endif %}>Missing Episodes</option>

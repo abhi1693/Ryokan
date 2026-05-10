@@ -203,18 +203,19 @@ function selectMonitorMode(btn) {
     _selectedMonitorMode = btn.dataset.mode;
 }
 
-function confirmMonitoring() {
-    if (!_pendingSeriesId) { location.reload(); return; }
-    const confirmBtn = document.getElementById('monitor-confirm-btn');
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = '...';
-    fetch('/api/library/monitoring', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: _pendingSeriesId, monitor_mode: _selectedMonitorMode, auto_grab: true })
-    })
-    .then(() => location.reload())
-    .catch(() => location.reload());
+// Issue #166 — confirmMonitoring moved to declarative hx-post on the
+// monitor-confirm-btn in templates/index.html. The button reads its
+// payload from `confirmMonitoringVals()` via `hx-vals='js:'`, and the
+// server returns `HX-Refresh: true` so htmx reloads the page on
+// success. The pre-migration fallback `if (!_pendingSeriesId)
+// location.reload()` is preserved by `hx-on::response-error="window.
+// location.reload()"` plus the 400 the handler issues on missing id.
+function confirmMonitoringVals() {
+    return {
+        series_id: _pendingSeriesId,
+        monitor_mode: _selectedMonitorMode,
+        auto_grab: true,
+    };
 }
 
 // ── Bulk select (issue #125) ────────────────────────────────────────

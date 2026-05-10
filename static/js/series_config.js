@@ -1,39 +1,13 @@
-// Series-level configuration controls: monitor mode, manual
-// classification override, allow-upgrades, allow-pt-upgrades,
-// per-series search overrides. Each is a small fetch wrapper around
-// the corresponding `/api/library/...` endpoint with optimistic UI
-// state + revert-on-error.
-
-function setMonitoring(mode) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const select = document.getElementById('monitor-mode');
-    const summary = document.getElementById('monitor-summary');
-    if (select) select.disabled = true;
-    if (summary) summary.textContent = 'Updating monitoring…';
-
-    fetch('/api/library/monitoring', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, monitor_mode: mode })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update monitoring');
-        return data;
-    })
-    .then(data => {
-        if (summary) summary.textContent = `${data.monitor_mode_label || mode} · ${data.monitored_count || 0} monitored`;
-        if (select) select.disabled = false;
-        // Reload to reflect per-episode monitoring changes since they depend on server-side logic
-        location.reload();
-    })
-    .catch(err => {
-        if (summary) summary.textContent = err.message || 'Failed to update monitoring';
-        if (select) select.disabled = false;
-    });
-}
+// Series-level configuration controls: manual classification override,
+// allow-upgrades, allow-pt-upgrades, per-series search overrides. Each
+// is a thin helper that builds the `hx-vals` payload for a declarative
+// `hx-post` on the corresponding `/api/library/...` endpoint.
+//
+// Issue #166 — `setMonitoring` was here too; it moved to declarative
+// `hx-post` + `hx-trigger="change"` on the `#monitor-mode` dropdown in
+// `templates/series.html`. The server returns `HX-Refresh: true` for
+// the HTMX branch so the page reloads after a mode change, equivalent
+// to the prior `location.reload()` call.
 
 var overrideTargetEpisode = null;
 

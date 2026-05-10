@@ -110,8 +110,10 @@ mod crud_ci {
             monitor_mode: "all".to_string(),
             auto_grab: Some(false),
         };
-        let body: serde_json::Value =
-            ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+        let resp = set_monitoring(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["ok"], true);
         assert_eq!(body["monitor_mode"], "all");
     }
@@ -130,8 +132,10 @@ mod crud_ci {
             monitor_mode: "none".to_string(),
             auto_grab: Some(true),
         };
-        let body: serde_json::Value =
-            ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+        let resp = set_monitoring(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["monitor_mode"], "none");
         assert_eq!(body["monitored_count"], 0);
     }
@@ -152,8 +156,10 @@ mod crud_ci {
             monitor_mode: "definitely-not-a-mode".to_string(),
             auto_grab: None,
         };
-        let body: serde_json::Value =
-            ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+        let resp = set_monitoring(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["monitor_mode"], "future");
     }
 
@@ -170,8 +176,10 @@ mod crud_ci {
             monitor_mode: "all".to_string(),
             auto_grab: None,
         };
-        let body: serde_json::Value =
-            ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+        let resp = set_monitoring(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["monitor_mode"], "all");
         assert_eq!(body["monitor_mode_manual_override"], true);
 
@@ -223,8 +231,10 @@ mod crud_ci {
             monitor_mode: "sync".to_string(),
             auto_grab: None,
         };
-        let body: serde_json::Value =
-            ok_json(set_monitoring(State(state), AxumJson(form)).await).await;
+        let resp = set_monitoring(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+            .await
+            .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["monitor_mode_manual_override"], false);
 
         let row = series::get_by_id(&db, series_id).await.unwrap().unwrap();

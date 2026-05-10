@@ -531,8 +531,9 @@ pub(crate) async fn apply_monitor_mode(
 )]
 pub async fn set_monitoring(
     State(state): State<AppState>,
-    Json(form): Json<SetMonitoringForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetMonitoringForm>,
+) -> Result<Response, (StatusCode, String)> {
     let series_id = form.series_id;
 
     // "sync" sentinel: clear the manual-override flag, leave the
@@ -542,10 +543,10 @@ pub async fn set_monitoring(
     if form.monitor_mode == MONITOR_MODE_SYNC_SENTINEL {
         series::update_monitor_mode_manual_override(&state.db, series_id, false)
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         logger::info(
             &state.db,
             LogCategory::Library,
@@ -553,14 +554,17 @@ pub async fn set_monitoring(
             "next sync tick will apply the AL/MAL-derived monitor_mode",
         )
         .await;
-        return Ok(Json(serde_json::json!({
-            "ok": true,
-            "monitor_mode": summary.mode.as_str(),
-            "monitor_mode_label": summary.mode.label(),
-            "monitor_mode_manual_override": false,
-            "monitored_count": summary.monitored_count,
-            "total_count": summary.total_count,
-        })));
+        return Ok(monitoring_response(
+            is_htmx,
+            serde_json::json!({
+                "ok": true,
+                "monitor_mode": summary.mode.as_str(),
+                "monitor_mode_label": summary.mode.label(),
+                "monitor_mode_manual_override": false,
+                "monitored_count": summary.monitored_count,
+                "total_count": summary.total_count,
+            }),
+        ));
     }
 
     let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
@@ -572,10 +576,10 @@ pub async fn set_monitoring(
     // episode_monitor_state; running it twice is harmless.
     series::update_monitor_mode_with_override(&state.db, series_id, mode.as_str(), true)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     logger::info(
         &state.db,
@@ -641,14 +645,38 @@ pub async fn set_monitoring(
         }
     }
 
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "monitor_mode": summary.mode.as_str(),
-        "monitor_mode_label": summary.mode.label(),
-        "monitor_mode_manual_override": true,
-        "monitored_count": summary.monitored_count,
-        "total_count": summary.total_count,
-    })))
+    Ok(monitoring_response(
+        is_htmx,
+        serde_json::json!({
+            "ok": true,
+            "monitor_mode": summary.mode.as_str(),
+            "monitor_mode_label": summary.mode.label(),
+            "monitor_mode_manual_override": true,
+            "monitored_count": summary.monitored_count,
+            "total_count": summary.total_count,
+        }),
+    ))
+}
+
+/// HTMX path returns empty 200 + `HX-Refresh: true` so htmx triggers
+/// a real `window.location.reload()` — equivalent to the prior JS
+/// `location.reload()` in setMonitoring + confirmMonitoring without
+/// the imperative fetch wrapper. Non-HTMX callers (`toggleMonitorAll`
+/// in `series_episode_actions.js` which updates many DOM elements
+/// imperatively) keep getting the JSON summary they consume.
+fn monitoring_response(is_htmx: bool, body: serde_json::Value) -> Response {
+    if is_htmx {
+        (
+            [(
+                axum::http::header::HeaderName::from_static("hx-refresh"),
+                "true",
+            )],
+            StatusCode::OK,
+        )
+            .into_response()
+    } else {
+        Json(body).into_response()
+    }
 }
 
 #[utoipa::path(

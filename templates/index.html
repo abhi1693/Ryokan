@@ -331,7 +331,20 @@
                 </button>
             </div>
             <div style="display:flex;gap:8px;margin-top:20px;justify-content:flex-end">
-                <button class="btn btn-primary" id="monitor-confirm-btn" onclick="confirmMonitoring()">Confirm</button>
+                {# Issue #166 — `hx-vals='js:'` reads the module-scope
+                   selection state captured by selectMonitorMode +
+                   addSeries. Server returns `HX-Refresh: true` so
+                   htmx reloads the page, equivalent to the prior
+                   JS `location.reload()`. The `_pendingSeriesId == null`
+                   guard from the JS path moves into the helper:
+                   if no series is pending, the helper returns a no-op
+                   payload that the server 400s on, and the htmx error
+                   handler reloads to recover. #}
+                <button class="btn btn-primary" id="monitor-confirm-btn"
+                    hx-post="/api/library/monitoring"
+                    hx-vals='js:confirmMonitoringVals()'
+                    hx-swap="none"
+                    hx-on::response-error="window.location.reload()">Confirm</button>
             </div>
         </div>
     </div>

@@ -13,10 +13,18 @@ function toggleMonitorAll(dbId, currentlyAllMonitored) {
     const newMode = currentlyAllMonitored ? 'none' : 'all';
     if (btn) btn.disabled = true;
     if (summary) summary.textContent = 'Updating…';
+    // Issue #166 — `/api/library/monitoring` switched from a Json<>
+    // extractor to Form<> when the dropdown + add-modal callers
+    // migrated to declarative HTMX. This call site keeps imperative
+    // DOM updates (the bookmark toggle changes many .ep-mon-btn
+    // elements at once, which doesn't fit HTMX's per-element swap),
+    // so we send URL-encoded form data and read JSON back from the
+    // handler's non-HTMX path. No `HX-Request` header → server picks
+    // the JSON branch unchanged.
     fetch('/api/library/monitoring', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, monitor_mode: newMode })
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: new URLSearchParams({ series_id: dbId, monitor_mode: newMode }),
     })
     .then(async r => {
         let data = {};
