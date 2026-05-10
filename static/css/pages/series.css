@@ -1155,6 +1155,36 @@
     padding: 32px;
 }
 
+/* Inline save-status pill returned by the HTMX-aware
+   `set_search_overrides` handler. Replaces the JS-driven status text
+   that lived at `series_config.js::saveSeriesSearchOverrides`. The OK
+   variant auto-fades after a beat so a stale "Saved" doesn't sit on
+   the page indefinitely; the error variant stays visible until the
+   user retries (the next swap replaces it). */
+.save-status-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.save-status-pill-ok {
+    background: rgba(125, 211, 137, 0.15);
+    color: var(--green);
+    animation: save-status-pill-fade 2.5s linear forwards;
+}
+
+.save-status-pill-err {
+    background: rgba(211, 125, 125, 0.15);
+    color: var(--red);
+}
+
+@keyframes save-status-pill-fade {
+    0%, 60% { opacity: 1; }
+    100% { opacity: 0; }
+}
+
 .interactive-search-table {
     width: 100%;
     border-collapse: collapse;

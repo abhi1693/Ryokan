@@ -310,17 +310,17 @@ mod crud_ci {
         let state = build_test_app_state(db.clone(), None);
 
         // Flip off.
-        let body: serde_json::Value = ok_json(
-            set_allow_upgrades(
-                State(state.clone()),
-                AxumJson(super::super::SetAllowUpgradesForm {
-                    series_id,
-                    allow: false,
-                }),
-            )
-            .await,
+        let resp = set_allow_upgrades(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowUpgradesForm {
+                series_id,
+                allow: false,
+            }),
         )
-        .await;
+        .await
+        .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["allow_upgrades"], false);
         let stored: i64 = sqlx::query_scalar("SELECT allow_upgrades FROM series WHERE id = ?")
             .bind(series_id)
@@ -330,17 +330,17 @@ mod crud_ci {
         assert_eq!(stored, 0, "allow=false must persist as 0");
 
         // Flip back on.
-        let body: serde_json::Value = ok_json(
-            set_allow_upgrades(
-                State(state),
-                AxumJson(super::super::SetAllowUpgradesForm {
-                    series_id,
-                    allow: true,
-                }),
-            )
-            .await,
+        let resp = set_allow_upgrades(
+            State(state),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowUpgradesForm {
+                series_id,
+                allow: true,
+            }),
         )
-        .await;
+        .await
+        .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["allow_upgrades"], true);
     }
 
@@ -364,17 +364,17 @@ mod crud_ci {
         assert_eq!(stored, 0, "PT upgrade opt-in must default OFF");
 
         // Flip on.
-        let body: serde_json::Value = ok_json(
-            set_allow_pt_upgrades(
-                State(state.clone()),
-                AxumJson(super::super::SetAllowPtUpgradesForm {
-                    series_id,
-                    allow: true,
-                }),
-            )
-            .await,
+        let resp = set_allow_pt_upgrades(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowPtUpgradesForm {
+                series_id,
+                allow: true,
+            }),
         )
-        .await;
+        .await
+        .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["allow_pt_upgrades"], true);
         let stored: i64 = sqlx::query_scalar("SELECT allow_pt_upgrades FROM series WHERE id = ?")
             .bind(series_id)
@@ -384,17 +384,17 @@ mod crud_ci {
         assert_eq!(stored, 1);
 
         // Flip off.
-        let body: serde_json::Value = ok_json(
-            set_allow_pt_upgrades(
-                State(state),
-                AxumJson(super::super::SetAllowPtUpgradesForm {
-                    series_id,
-                    allow: false,
-                }),
-            )
-            .await,
+        let resp = set_allow_pt_upgrades(
+            State(state),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowPtUpgradesForm {
+                series_id,
+                allow: false,
+            }),
         )
-        .await;
+        .await
+        .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["allow_pt_upgrades"], false);
         let stored: i64 = sqlx::query_scalar("SELECT allow_pt_upgrades FROM series WHERE id = ?")
             .bind(series_id)
@@ -415,41 +415,38 @@ mod crud_ci {
         let state = build_test_app_state(db.clone(), None);
 
         // allow_upgrades on, allow_pt_upgrades on.
-        ok_json(
-            set_allow_upgrades(
-                State(state.clone()),
-                AxumJson(super::super::SetAllowUpgradesForm {
-                    series_id,
-                    allow: true,
-                }),
-            )
-            .await,
+        set_allow_upgrades(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowUpgradesForm {
+                series_id,
+                allow: true,
+            }),
         )
-        .await;
-        ok_json(
-            set_allow_pt_upgrades(
-                State(state.clone()),
-                AxumJson(super::super::SetAllowPtUpgradesForm {
-                    series_id,
-                    allow: true,
-                }),
-            )
-            .await,
+        .await
+        .expect("set_allow_upgrades returns Ok");
+        set_allow_pt_upgrades(
+            State(state.clone()),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowPtUpgradesForm {
+                series_id,
+                allow: true,
+            }),
         )
-        .await;
+        .await
+        .expect("set_allow_pt_upgrades returns Ok");
         // Now flip allow_upgrades off; allow_pt_upgrades must
         // stay on.
-        ok_json(
-            set_allow_upgrades(
-                State(state),
-                AxumJson(super::super::SetAllowUpgradesForm {
-                    series_id,
-                    allow: false,
-                }),
-            )
-            .await,
+        set_allow_upgrades(
+            State(state),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetAllowUpgradesForm {
+                series_id,
+                allow: false,
+            }),
         )
-        .await;
+        .await
+        .expect("set_allow_upgrades returns Ok");
         let row: (i64, i64) =
             sqlx::query_as("SELECT allow_upgrades, allow_pt_upgrades FROM series WHERE id = ?")
                 .bind(series_id)
@@ -471,8 +468,11 @@ mod crud_ci {
             custom_query_tokens: "  1080p BD  ".to_string(),
             restrict_to_uploader: "TrustedUser".to_string(),
         };
-        let body: serde_json::Value =
-            ok_json(set_search_overrides(State(state), AxumJson(form)).await).await;
+        let resp =
+            set_search_overrides(State(state), axum_htmx::HxRequest(false), axum::Form(form))
+                .await
+                .expect("non-HTMX call returns Ok");
+        let body = response_json(resp).await;
         // Response trims whitespace for display.
         assert_eq!(body["custom_query_tokens"], "1080p BD");
         assert_eq!(body["restrict_to_uploader"], "TrustedUser");
@@ -496,29 +496,67 @@ mod crud_ci {
         // Set a value.
         let _ = set_search_overrides(
             State(state.clone()),
-            AxumJson(super::super::SetSearchOverridesForm {
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetSearchOverridesForm {
                 series_id,
                 custom_query_tokens: "initial".to_string(),
                 restrict_to_uploader: "User".to_string(),
             }),
         )
-        .await;
+        .await
+        .expect("seed call returns Ok");
         // Clear with empty strings — per the form docstring, empty
         // resets to global defaults.
-        let body: serde_json::Value = ok_json(
-            set_search_overrides(
-                State(state),
-                AxumJson(super::super::SetSearchOverridesForm {
-                    series_id,
-                    custom_query_tokens: String::new(),
-                    restrict_to_uploader: String::new(),
-                }),
-            )
-            .await,
+        let resp = set_search_overrides(
+            State(state),
+            axum_htmx::HxRequest(false),
+            axum::Form(super::super::SetSearchOverridesForm {
+                series_id,
+                custom_query_tokens: String::new(),
+                restrict_to_uploader: String::new(),
+            }),
         )
-        .await;
+        .await
+        .expect("clear call returns Ok");
+        let body = response_json(resp).await;
         assert_eq!(body["custom_query_tokens"], "");
         assert_eq!(body["restrict_to_uploader"], "");
+    }
+
+    /// Issue #166: HxRequest=true returns the rendered save-status
+    /// pill, not JSON. The pill contains the "Saved" text so the
+    /// inline-swap target replaces in place. Mutation-tested by
+    /// hand: temporarily inverting the `ok` branch in the partial
+    /// flips the assertion below to fail with a clear "expected
+    /// 'Saved'" diagnostic.
+    #[tokio::test]
+    async fn set_search_overrides_htmx_returns_status_pill_partial() {
+        let db = in_memory_pool().await;
+        let series_id = seed_series(&db, 52, "Show").await;
+        let state = build_test_app_state(db, None);
+        let resp = set_search_overrides(
+            State(state),
+            axum_htmx::HxRequest(true),
+            axum::Form(super::super::SetSearchOverridesForm {
+                series_id,
+                custom_query_tokens: "bd 1080p".to_string(),
+                restrict_to_uploader: String::new(),
+            }),
+        )
+        .await
+        .expect("HTMX call returns Ok");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let html = String::from_utf8(bytes.to_vec()).expect("body is utf-8");
+        assert!(
+            html.contains("save-status-pill-ok"),
+            "HxRequest=true must render the success pill class; got:\n{html}"
+        );
+        assert!(
+            html.contains("Saved"),
+            "success pill must contain the 'Saved' label; got:\n{html}"
+        );
     }
 
     // ─── set_manual_override ─────────────────────────────────

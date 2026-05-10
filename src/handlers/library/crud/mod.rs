@@ -39,6 +39,19 @@ struct EpisodeMonitorButtonContext {
     monitored: bool,
 }
 
+/// Inline save-status pill returned by `set_search_overrides` and any
+/// future series-page "POST a value, show a status pill" handler that
+/// fits the same shape. Issue #166 — replaces the JS-driven status
+/// label that lived at `static/js/series_config.js::saveSeriesSearchOverrides`.
+/// `ok=true` renders the success variant (CSS auto-fades after 2s);
+/// `ok=false` renders the message inline so the failure stays visible.
+#[derive(Template)]
+#[template(path = "partials/series/save_status_pill.html")]
+struct SaveStatusPillPartial {
+    ok: bool,
+    message: String,
+}
+
 use super::reconcile::reconcile_all_fallback_entries;
 use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
@@ -706,11 +719,12 @@ pub async fn set_episode_monitoring(
 )]
 pub async fn set_allow_upgrades(
     State(state): State<AppState>,
-    Json(form): Json<SetAllowUpgradesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetAllowUpgradesForm>,
+) -> Result<Response, (StatusCode, String)> {
     series::update_allow_upgrades(&state.db, form.series_id, form.allow)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -721,11 +735,19 @@ pub async fn set_allow_upgrades(
         "",
     )
     .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "series_id": form.series_id,
-        "allow_upgrades": form.allow,
-    })))
+    // HTMX checkboxes (#166): the visual state is already what the
+    // user clicked; just acknowledge with empty 200 + `hx-swap="none"`
+    // on the input. Reserve the JSON path for programmatic callers.
+    if is_htmx {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "series_id": form.series_id,
+            "allow_upgrades": form.allow,
+        }))
+        .into_response())
+    }
 }
 
 /// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
@@ -746,11 +768,12 @@ pub async fn set_allow_upgrades(
 )]
 pub async fn set_allow_pt_upgrades(
     State(state): State<AppState>,
-    Json(form): Json<SetAllowPtUpgradesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetAllowPtUpgradesForm>,
+) -> Result<Response, (StatusCode, String)> {
     series::update_allow_pt_upgrades(&state.db, form.series_id, form.allow)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -761,11 +784,16 @@ pub async fn set_allow_pt_upgrades(
         "",
     )
     .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "series_id": form.series_id,
-        "allow_pt_upgrades": form.allow,
-    })))
+    if is_htmx {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "series_id": form.series_id,
+            "allow_pt_upgrades": form.allow,
+        }))
+        .into_response())
+    }
 }
 
 /// #23 — Update the per-series search overrides (custom Nyaa tokens +
@@ -785,16 +813,52 @@ pub async fn set_allow_pt_upgrades(
 )]
 pub async fn set_search_overrides(
     State(state): State<AppState>,
-    Json(form): Json<SetSearchOverridesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    series::update_search_overrides(
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetSearchOverridesForm>,
+) -> Result<Response, (StatusCode, String)> {
+    let result = series::update_search_overrides(
         &state.db,
         form.series_id,
         &form.custom_query_tokens,
         &form.restrict_to_uploader,
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await;
+
+    // HTMX inline-result swap — per templates/CLAUDE.md, always-200
+    // so the partial replaces the status-pill slot regardless of
+    // success/failure. Error pill renders the message instead of
+    // dropping the swap (which would leave a stuck "Saving…" string).
+    if is_htmx {
+        if let Err(e) = result {
+            let html = SaveStatusPillPartial {
+                ok: false,
+                message: format!("Failed to save overrides: {e}"),
+            }
+            .render()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(Html(html).into_response());
+        }
+        logger::info(
+            &state.db,
+            LogCategory::Library,
+            &format!("Search overrides updated for series {}", form.series_id),
+            &format!(
+                "tokens={:?} restrict_to={:?}",
+                form.custom_query_tokens.trim(),
+                form.restrict_to_uploader.trim(),
+            ),
+        )
+        .await;
+        let html = SaveStatusPillPartial {
+            ok: true,
+            message: String::new(),
+        }
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Html(html).into_response());
+    }
+
+    result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -811,7 +875,8 @@ pub async fn set_search_overrides(
         "series_id": form.series_id,
         "custom_query_tokens": form.custom_query_tokens.trim(),
         "restrict_to_uploader": form.restrict_to_uploader.trim(),
-    })))
+    }))
+    .into_response())
 }
 
 /// Apply (or clear) a user's manual source/resolution override for a single

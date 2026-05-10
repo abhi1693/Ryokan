@@ -202,8 +202,22 @@
         <div class="monitoring-row">
             <span class="folder-label">Upgrades:</span>
             <div class="monitoring-controls">
+                {# Issue #166 — HTMX-driven series-level toggles. The
+                   server takes form data (series_id, allow) and acks
+                   with an empty 200 for the HTMX branch. `hx-swap=none`
+                   keeps the rendered checkbox as the source of truth
+                   for the visual state; the `hx-on::response-error`
+                   handler reverts the click + toasts when the server
+                   rejects (4xx/5xx). `htmx.config.responseHandling`
+                   already skips the swap on error, so the visual
+                   revert is the only client work needed. #}
                 <label class="checkbox-label">
-                    <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
+                    <input type="checkbox" id="allow-upgrades"
+                        {% if allow_upgrades %}checked{% endif %}
+                        hx-post="/api/library/allow-upgrades"
+                        hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
+                        hx-swap="none"
+                        hx-on::response-error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'Upgrades toggle failed', body: 'Failed to update upgrades toggle', log: true})">
                     Allow automatic upgrades when a higher-quality release is found
                 </label>
                 {# Issue #28 PR E — PT upgrade opt-in. Indented under the
@@ -212,7 +226,10 @@
                 <label class="checkbox-label" style="margin-top:6px;margin-left:20px">
                     <input type="checkbox" id="allow-pt-upgrades"
                         {% if allow_pt_upgrades %}checked{% endif %}
-                        onchange="setAllowPtUpgrades(this.checked)">
+                        hx-post="/api/library/allow-pt-upgrades"
+                        hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
+                        hx-swap="none"
+                        hx-on::response-error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'PT-upgrades toggle failed', body: 'Failed to update PT-upgrades toggle', log: true})">
                     Allow upgrades from private trackers
                 </label>
             </div>
@@ -223,24 +240,35 @@
         <div class="monitoring-divider"></div>
         <details class="monitoring-row" id="advanced-search-panel">
             <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
-            <div class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px">
+            {# Issue #166 — HTMX-driven save. The form posts to
+               `/api/library/search-overrides` with `series_id` as a
+               hidden field; the server returns a rendered
+               `partials/series/save_status_pill.html` partial that
+               swaps into `#series-search-overrides-status`. The CSS
+               on `.save-status-pill-ok` auto-fades the "Saved" pill
+               after 2s, replacing the prior JS setTimeout dance. #}
+            <form class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px"
+                hx-post="/api/library/search-overrides"
+                hx-target="#series-search-overrides-status"
+                hx-swap="innerHTML">
+                <input type="hidden" name="series_id" value="{% if let Some(db_id_val) = db_id %}{{ db_id_val }}{% endif %}">
                 <div class="form-group" style="margin:0">
                     <label for="series-custom-query-tokens">Custom query tokens</label>
-                    <input type="text" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
+                    <input type="text" name="custom_query_tokens" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
                         placeholder="{% if !default_custom_query_tokens.is_empty() %}global: {{ default_custom_query_tokens }}{% else %}e.g. bd 1080p{% endif %}">
                     <span class="form-hint">Extra keywords appended to every search for this series (Nyaa and configured torznab / newznab indexers). Leave blank to inherit the global default.</span>
                 </div>
                 <div class="form-group" style="margin:0">
                     <label for="series-restrict-to-group">Restrict to Nyaa uploader <span class="form-hint" style="font-weight:normal">(Nyaa only)</span></label>
-                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
+                    <input type="text" name="restrict_to_uploader" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
                         placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
                     <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Torznab / newznab indexers ignore this. Leave blank to inherit the global default.</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
-                    <button type="button" class="btn btn-primary" onclick="saveSeriesSearchOverrides(this)">Save</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
                     <span class="form-hint" id="series-search-overrides-status"></span>
                 </div>
-            </div>
+            </form>
         </details>
     </div>
 </div>

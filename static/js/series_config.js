@@ -233,112 +233,13 @@ function reclassifyEpisode(btn) {
     });
 }
 
-function setAllowUpgrades(allow) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const checkbox = document.getElementById('allow-upgrades');
-    if (checkbox) checkbox.disabled = true;
-
-    fetch('/api/library/allow-upgrades', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, allow: allow })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update upgrades toggle');
-        return data;
-    })
-    .then(_ => {
-        if (checkbox) checkbox.disabled = false;
-    })
-    .catch(err => {
-        if (checkbox) {
-            checkbox.checked = !allow;
-            checkbox.disabled = false;
-        }
-        if (window.ryokanToast) window.ryokanToast({
-            kind: 'error',
-            category: 'library',
-            title: 'Upgrades toggle failed',
-            body: err && err.message ? err.message : 'Failed to update upgrades toggle',
-        });
-    });
-}
-
-// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
-// Mirror of setAllowUpgrades; hits the parallel /api/library/allow-pt-upgrades
-// endpoint and reverts the checkbox state on failure so the UI
-// never lies about what's persisted. Server-side persists a Library
-// log row on success; an error toast covers the failure path.
-function setAllowPtUpgrades(allow) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const checkbox = document.getElementById('allow-pt-upgrades');
-    if (checkbox) checkbox.disabled = true;
-
-    fetch('/api/library/allow-pt-upgrades', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, allow: allow })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update PT-upgrades toggle');
-        return data;
-    })
-    .then(_ => {
-        if (checkbox) checkbox.disabled = false;
-    })
-    .catch(err => {
-        if (checkbox) {
-            checkbox.checked = !allow;
-            checkbox.disabled = false;
-        }
-        if (window.ryokanToast) window.ryokanToast({
-            kind: 'error',
-            category: 'library',
-            title: 'PT-upgrades toggle failed',
-            body: err && err.message ? err.message : 'Failed to update PT-upgrades toggle',
-        });
-    });
-}
-
-// #23 — Save per-series search overrides (Nyaa uploader + custom tokens).
-// Empty inputs clear the override server-side so the series falls back
-// to the global default in Settings → Quality.
-function saveSeriesSearchOverrides(btn) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const tokens = (document.getElementById('series-custom-query-tokens')?.value || '').trim();
-    const restrict = (document.getElementById('series-restrict-to-group')?.value || '').trim();
-    const status = document.getElementById('series-search-overrides-status');
-    btn.disabled = true;
-    if (status) status.textContent = 'Saving…';
-
-    fetch('/api/library/search-overrides', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            custom_query_tokens: tokens,
-            restrict_to_uploader: restrict,
-        }),
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to save overrides');
-        return data;
-    })
-    .then(_ => {
-        if (status) status.textContent = 'Saved';
-        btn.disabled = false;
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to save overrides';
-        btn.disabled = false;
-    });
-}
+// Issue #166 — `setAllowUpgrades`, `setAllowPtUpgrades`, and
+// `saveSeriesSearchOverrides` moved to declarative HTMX attributes
+// on the inputs/form in `templates/series.html`. The checkbox toggles
+// post against `/api/library/allow-upgrades` and
+// `/api/library/allow-pt-upgrades` with `hx-swap="none"`; an
+// `hx-on::response-error` handler reverts the checkbox and fires a
+// toast on 4xx/5xx. The search-overrides form posts to
+// `/api/library/search-overrides` and swaps the rendered
+// `partials/series/save_status_pill.html` into
+// `#series-search-overrides-status`.
