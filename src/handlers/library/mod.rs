@@ -249,6 +249,13 @@ pub struct AnilistSearchQuery {
     /// AL-first with MAL only on AL failure.
     #[serde(default)]
     pub source: Option<String>,
+    /// Title-language hint for the HTMX partial response. The browser
+    /// reads `localStorage.titleLanguage` (set by the title-switcher) and
+    /// forwards it via `hx-vals` so the server-rendered card picks the
+    /// same title the rest of the page is using; `None` falls back to
+    /// the config-level `title_language`. Ignored on the JSON path.
+    #[serde(default)]
+    pub lang: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]

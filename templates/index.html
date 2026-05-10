@@ -275,9 +275,24 @@
             </button>
         </div>
         <div class="modal-body">
-            <div class="search-bar" style="margin-bottom:16px">
-                <input type="text" id="anilist-query" placeholder="Search AniList / MAL..." onkeydown="if(event.key==='Enter'){event.preventDefault();searchAnilist()}" autofocus>
-                <button class="btn btn-primary" onclick="searchAnilist()">Search</button>
+            {# Issue #166 — search-as-you-type. The input fires `hx-get`
+               with a 400ms debounce; the source toggle reuses the same
+               handler by triggering a synthetic `ryokan:search` event
+               on the input from `setSearchSource`. `hx-vals='js:'` pulls
+               the user's localStorage `titleLanguage` so the server
+               renders titles in the same language the rest of the page
+               is using (the JSON path ignores it for back-compat). #}
+            <div class="search-bar anilist-search-bar" style="margin-bottom:16px">
+                <input type="text" id="anilist-query" name="q"
+                    placeholder="Search AniList / MAL..."
+                    autofocus
+                    hx-get="/api/anilist/search"
+                    hx-trigger="keyup changed delay:400ms, ryokan:search"
+                    hx-target="#anilist-results"
+                    hx-swap="innerHTML"
+                    hx-vals='js:{source: window.currentSearchSource || "al", lang: localStorage.getItem("titleLanguage") || ""}'
+                    hx-indicator="#anilist-search-indicator">
+                <span id="anilist-search-indicator" class="anilist-search-spinner htmx-indicator" aria-hidden="true"></span>
             </div>
             <div class="search-source-toggle" role="group" aria-label="Search source" style="display:flex;gap:6px;margin-bottom:16px;font-size:12px;align-items:center">
                 <span style="color:var(--text-dim)">Source:</span>

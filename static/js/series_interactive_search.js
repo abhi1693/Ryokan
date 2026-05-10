@@ -248,7 +248,7 @@ function openInteractiveSearch(epNum, btn) {
     const titleEl = document.getElementById('isearch-title');
     const body = document.getElementById('isearch-body');
     titleEl.textContent = `Interactive Search — Episode ${epNum}`;
-    body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">Searching…</div>';
+    body.innerHTML = '<div class="isearch-loading"><span class="isearch-loading-spinner" aria-hidden="true"></span><span>Searching indexers for episode ' + epNum + '</span></div>';
     modal.style.display = 'flex';
 
     fetch(`/api/series/${SD.id}/interactive-search/${epNum}`)
@@ -406,7 +406,7 @@ function openInteractiveBatchSearch(btn) {
     const titleEl = document.getElementById('isearch-title');
     const body = document.getElementById('isearch-body');
     titleEl.textContent = 'Interactive Batch Search';
-    body.innerHTML = '<div style="text-align:center;color:var(--text-dim);padding:32px">Searching batch releases…</div>';
+    body.innerHTML = '<div class="isearch-loading"><span class="isearch-loading-spinner" aria-hidden="true"></span><span>Searching indexers for batch releases</span></div>';
     modal.style.display = 'flex';
 
     fetch(`/api/series/${SD.id}/interactive-search-batch`)

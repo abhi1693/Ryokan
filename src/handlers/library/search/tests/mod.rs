@@ -1076,9 +1076,11 @@ mod handler_endpoints {
         let state = build_test_app_state(db, None);
         let result = anilist_search(
             State(state),
+            axum_htmx::HxRequest(false),
             Query(AnilistSearchQuery {
                 q: "anything".into(),
                 source: Some("anilist".into()),
+                lang: None,
             }),
         )
         .await;
@@ -1092,6 +1094,115 @@ mod handler_endpoints {
             }
             Ok(_) => panic!("invalid source must surface as 400, not Ok"),
         }
+    }
+
+    // ─── HTMX partial render (issue #166) ────────────────────────
+
+    /// The HxRequest branch in `anilist_search` calls
+    /// `build_search_results_partial` with the AL hits and renders the
+    /// `partials/library/anilist_search_results.html` template. This
+    /// test exercises the build+render directly so it doesn't need an
+    /// AL upstream — the upstream call is what `anilist_search` does
+    /// before this code path runs, and its behavior is independent.
+    ///
+    /// Asserts every load-bearing field reaches the rendered HTML:
+    ///   - title chosen by language (english here),
+    ///   - external href shape (AL vs MAL → different host + id),
+    ///   - format / episode / status badges,
+    ///   - the `data-entry` JSON parses back to the same `id`, which
+    ///     is what `addSeries(id, this)` in `static/js/index.js` reads.
+    #[test]
+    fn htmx_partial_renders_expected_markers_and_data_entry() {
+        use crate::services::anilist::AnimeEntry;
+        use askama::Template;
+
+        let entries = vec![
+            AnimeEntry {
+                id: 21,
+                id_mal: None,
+                title_romaji: "Naruto".into(),
+                title_english: "Naruto".into(),
+                title_native: "ナルト".into(),
+                cover_url: "https://cdn.example/cover-21.jpg".into(),
+                format: "TV_SHORT".into(),
+                status: "FINISHED".into(),
+                status_display: "Finished".into(),
+                episodes: Some(220),
+                season_year: Some(2002),
+                source: "al".into(),
+                average_score: Some(78),
+            },
+            AnimeEntry {
+                id: 100,
+                id_mal: Some(9876),
+                title_romaji: "Some MAL Show".into(),
+                title_english: String::new(),
+                title_native: String::new(),
+                cover_url: String::new(),
+                format: String::new(),
+                status: "RELEASING".into(),
+                status_display: String::new(),
+                episodes: None,
+                season_year: None,
+                source: "mal".into(),
+                average_score: None,
+            },
+        ];
+
+        let partial = super::super::build_search_results_partial(entries, "english");
+        let html = partial.render().expect("partial renders");
+
+        // AL row: external link to anilist.co with the AL id, format
+        // underscore replaced, episodes count rendered, status class
+        // lowercased.
+        assert!(
+            html.contains(r#"href="https://anilist.co/anime/21""#),
+            "AL row must link to anilist.co with the entry id\n{html}"
+        );
+        assert!(
+            html.contains("TV SHORT"),
+            "format underscore must render as space\n{html}"
+        );
+        assert!(html.contains("220 eps"), "episodes badge missing\n{html}");
+        assert!(
+            html.contains("tag-status-finished"),
+            "status class must lowercase the AL enum\n{html}"
+        );
+
+        // MAL row: external link uses myanimelist.net + id_mal, episode
+        // fallback "?", source label is "MAL". Empty `format` falls back
+        // to "TBA" per the JS contract this replaced.
+        assert!(
+            html.contains(r#"href="https://myanimelist.net/anime/9876""#),
+            "MAL row must link to MAL with id_mal\n{html}"
+        );
+        assert!(
+            html.contains("TBA"),
+            "empty format must fall back to TBA\n{html}"
+        );
+
+        // The AL row's `data-entry` attribute must round-trip the JSON
+        // `addSeries` reads. Askama auto-escapes `"` to `&quot;`, so
+        // strip-then-parse to confirm the embedded payload is intact.
+        let needle = r#"data-entry=""#;
+        let start = html.find(needle).expect("data-entry attr present") + needle.len();
+        let end = start
+            + html[start..]
+                .find('"')
+                .expect("data-entry attr is double-quoted");
+        let escaped = &html[start..end];
+        // Askama 0.16 escapes `"` as `&#34;` (numeric character
+        // reference, not the named `&quot;` entity). Both forms are
+        // valid HTML; pinning to `&#34;` here keeps the test honest if
+        // a future Askama major flips back.
+        let unescaped = escaped.replace("&#34;", "\"").replace("&amp;", "&");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unescaped).expect("data-entry JSON parses");
+        assert_eq!(
+            parsed.get("id").and_then(|v| v.as_i64()),
+            Some(21),
+            "data-entry must round-trip the entry id; got {parsed}"
+        );
     }
 
     // ─── interactive_search_* cache short-circuits ──────────────

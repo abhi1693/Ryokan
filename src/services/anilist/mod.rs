@@ -111,6 +111,18 @@ fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
 }
 
 fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
+    // Skip caching empty results. The four call sites that feed this all
+    // produce empty Vecs under user-visible failure modes — AL in cooldown
+    // with Jikan also empty, AL network error, AL 403/429/5xx, and the
+    // "AL HTTP 200 with `data.Page.media: []`" branch which is the real
+    // foot gun: during an AniList search-index outage every query returns
+    // an empty success body. Caching it pinned the empty result for the
+    // full TTL even after AL recovered, so the next legitimate retry hit
+    // a stale 0 silently. A non-cached miss makes the user retype-loop
+    // self-healing as soon as upstream comes back.
+    if results.is_empty() {
+        return;
+    }
     if let Ok(mut cache) = SEARCH_CACHE.lock() {
         // Bound the cache. Simple heuristic — if we're >200 entries, drop expired
         // ones; if still too big, just clear. Search queries are long-tail anyway.

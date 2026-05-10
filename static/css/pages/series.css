@@ -939,8 +939,8 @@
     display: inline-block;
     width: 12px;
     height: 12px;
-    border: 2px solid rgba(125, 174, 211, 0.25);
-    border-top-color: var(--blue);
+    border: 2px solid rgba(203, 166, 247, 0.25);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin-ring 0.7s linear infinite;
 }
@@ -1121,6 +1121,30 @@
 .btn-mark-failed:hover { background: rgba(211, 125, 125, 0.2); }
 
 .btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
+
+/* Centered spinner + hint text for the interactive-search modal's two
+   loading states (per-episode search at series_interactive_search.js
+   ::openInteractiveSearch, batch at ::openInteractiveBatchSearch).
+   Larger spinner than the per-row `.ep-search-spinner` since this
+   replaces the whole modal body. */
+.isearch-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 48px 24px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.isearch-loading-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(203, 166, 247, 0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin-ring 0.7s linear infinite;
+}
 
 .interactive-search-table {
     width: 100%;

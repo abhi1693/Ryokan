@@ -890,3 +890,43 @@
         background: var(--bg-elevated);
     }
 }
+
+/* ── AL search spinner (issue #166) ──────────────────────────────── */
+
+/* The spinner overlays the input's right padding so a short result
+   delay doesn't reflow the bar. The base `.search-bar` rule in
+   forms.css owns layout (flex, gap, margin) + the input styling
+   (background, border, focus); this only adds spinner positioning. */
+.anilist-search-bar {
+    position: relative;
+}
+
+.anilist-search-bar input[type="text"] {
+    padding-right: 36px;
+}
+
+/* `.htmx-indicator` opacity flips 0 → 1 when the request element gains
+   the `htmx-request` class (htmx 2.x default). The 120ms fade-in keeps
+   sub-200ms cache hits from flashing the spinner. `spin-ring` keyframe
+   lives in base.css. */
+.anilist-search-spinner {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    width: 14px;
+    height: 14px;
+    margin-top: -7px;
+    border: 2px solid rgba(203, 166, 247, 0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity 0.12s linear;
+    pointer-events: none;
+}
+
+.anilist-search-spinner.htmx-request,
+.htmx-request .anilist-search-spinner,
+.htmx-request.anilist-search-spinner {
+    opacity: 1;
+    animation: spin-ring 0.7s linear infinite;
+}

@@ -18,10 +18,13 @@
 //! - `tests` — the auto-expand cumulative-offset / sibling-routing
 //!   suite.
 
+use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    response::Json,
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
 };
+use axum_htmx::HxRequest;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -52,6 +55,133 @@ pub use interactive::{
     search_batch_releases,
 };
 
+/// Pre-computed display fields for one search result row. Built by
+/// `build_search_results_partial` from a raw `AnimeEntry` so the Askama
+/// template stays simple — title-language picking, status-class
+/// flattening, external-link selection, and the JSON-in-attribute
+/// `data-entry` payload that `addSeries(...)` reads all happen in Rust.
+struct SearchResultRow {
+    entry: anilist::AnimeEntry,
+    title: String,
+    subtitle: String,
+    format_display: String,
+    episodes_display: String,
+    status_class: String,
+    status_label: String,
+    external_href: Option<String>,
+    source_label: &'static str,
+    /// Pre-serialized JSON of `entry`. Embedded into the `data-entry`
+    /// attribute on the Add button; `static/js/index.js::addSeries`
+    /// reads it back via `JSON.parse(btn.dataset.entry)` to seed the
+    /// monitor-mode modal without re-querying.
+    data_entry_json: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/library/anilist_search_results.html")]
+struct AnilistSearchResultsPartial {
+    entries: Vec<SearchResultRow>,
+}
+
+/// Pick the user-facing title for a result given a language hint. Mirrors
+/// `getTitleByLang` in `static/js/index.js`: native and romaji fall back
+/// through the same chain JS used; anything unknown coerces to english.
+fn pick_title<'a>(entry: &'a anilist::AnimeEntry, lang: &str) -> &'a str {
+    let pick_first_non_empty = |a: &'a str, b: &'a str, c: &'a str| -> &'a str {
+        if !a.is_empty() {
+            a
+        } else if !b.is_empty() {
+            b
+        } else {
+            c
+        }
+    };
+    match lang {
+        "native" => pick_first_non_empty(
+            &entry.title_native,
+            &entry.title_romaji,
+            &entry.title_english,
+        ),
+        "romaji" => pick_first_non_empty(
+            &entry.title_romaji,
+            &entry.title_english,
+            &entry.title_native,
+        ),
+        _ => pick_first_non_empty(
+            &entry.title_english,
+            &entry.title_romaji,
+            &entry.title_native,
+        ),
+    }
+}
+
+fn build_search_results_partial(
+    entries: Vec<anilist::AnimeEntry>,
+    lang: &str,
+) -> AnilistSearchResultsPartial {
+    let rows = entries
+        .into_iter()
+        .map(|entry| {
+            let title = pick_title(&entry, lang).to_string();
+            let subtitle = if lang == "english" {
+                if !entry.title_romaji.is_empty() {
+                    entry.title_romaji.clone()
+                } else {
+                    entry.title_native.clone()
+                }
+            } else if !entry.title_english.is_empty() {
+                entry.title_english.clone()
+            } else if !entry.title_romaji.is_empty() {
+                entry.title_romaji.clone()
+            } else {
+                entry.title_native.clone()
+            };
+            let format_display = if entry.format.is_empty() {
+                "TBA".to_string()
+            } else {
+                entry.format.replace('_', " ")
+            };
+            let episodes_display = match entry.episodes {
+                Some(n) => format!("{n} eps"),
+                None => "?".to_string(),
+            };
+            let status_class = entry.status.to_lowercase();
+            let status_label = if !entry.status_display.is_empty() {
+                entry.status_display.replace('_', " ")
+            } else {
+                entry.status.replace('_', " ")
+            };
+            let is_mal = entry.source == "mal";
+            let external_href = if is_mal {
+                entry
+                    .id_mal
+                    .map(|id| format!("https://myanimelist.net/anime/{id}"))
+            } else {
+                Some(format!("https://anilist.co/anime/{}", entry.id))
+            };
+            let source_label = if is_mal { "MAL" } else { "AniList" };
+            // Pre-serialize so the template can inline it as the
+            // `data-entry` attribute. Askama's auto-escape turns `"`
+            // into `&quot;`, which the browser parses back to a literal
+            // `"` inside the attribute — no manual escAttr needed.
+            let data_entry_json = serde_json::to_string(&entry).unwrap_or_else(|_| "{}".into());
+            SearchResultRow {
+                entry,
+                title,
+                subtitle,
+                format_display,
+                episodes_display,
+                status_class,
+                status_label,
+                external_href,
+                source_label,
+                data_entry_json,
+            }
+        })
+        .collect();
+    AnilistSearchResultsPartial { entries: rows }
+}
+
 #[utoipa::path(
     get,
     path = "/api/anilist/search",
@@ -60,14 +190,15 @@ pub use interactive::{
     description = "Search for anime by title. Uses AniList as primary source with MAL/Jikan and Kitsu as fallbacks.",
     params(AnilistSearchQuery),
     responses(
-        (status = 200, description = "Search results", body = Vec<anilist::AnimeEntry>),
+        (status = 200, description = "Search results (JSON for plain callers, rendered HTML partial when called via HX-Request)", body = Vec<anilist::AnimeEntry>),
         (status = 500, description = "Search failed"),
     ),
 )]
 pub async fn anilist_search(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Query(params): Query<AnilistSearchQuery>,
-) -> Result<Json<Vec<anilist::AnimeEntry>>, (axum::http::StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     // Per-search override (?source=al|mal) takes precedence over the
     // ambient config flag. Only `al`, `mal`, or omitted are valid —
     // surface a 400 on anything else so a client with a typo in its
@@ -111,7 +242,16 @@ pub async fn anilist_search(
     )
     .await;
 
-    Ok(Json(results))
+    if is_htmx {
+        let lang = params.lang.as_deref().unwrap_or("english");
+        let partial = build_search_results_partial(results, lang);
+        let html = partial
+            .render()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Html(html).into_response())
+    } else {
+        Ok(Json(results).into_response())
+    }
 }
 
 #[utoipa::path(
