@@ -1,6 +1,6 @@
 //! hx-boost rollout — Phase A browser-e2e coverage.
 //!
-//! Phase A scope per /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md:
+//! Phase A scope per the hx-boost rollout plan:
 //!   - `htmx-ext-head-support` vendored + loaded
 //!   - `<body hx-ext="head-support">` in base.html
 //!   - `<nav class="mobile-tabbar" hx-boost="true">` — narrowest possible

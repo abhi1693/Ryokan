@@ -1,6 +1,6 @@
 //! hx-boost rollout — Phase D browser-e2e coverage.
 //!
-//! Phase D scope per /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md:
+//! Phase D scope per the hx-boost rollout plan:
 //!   - `<body hx-boost="true">` covers every plain `<a>` and `<form>`
 //!     site-wide
 //!   - `<a href="/logout" hx-boost="false">` opt-out

@@ -1,8 +1,7 @@
 //! Interactive file-picker endpoints (issue #83).
 //!
 //! The five endpoints here implement the modal lifecycle documented
-//! in `models::pending_grabs` and the plan doc at
-//! `/home/john/Documents/ryokan-roadmap/issue-83-interactive-file-picker-plan.md`.
+//! in `models::pending_grabs` and issue #83's interactive file-picker plan.
 //!
 //! | Method | Path                               | Purpose                              |
 //! |--------|------------------------------------|--------------------------------------|

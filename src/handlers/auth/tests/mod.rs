@@ -2,8 +2,8 @@
 //! plan (PR 1). The split lets each file stay under ~500 LoC and
 //! keeps test failures localized to the behavior area they defend.
 //!
-//! Layout mirrors the decision categories in
-//! `/home/john/Documents/ryokan-roadmap/test-coverage-expansion-plan.md`:
+//! Layout mirrors the decision categories in the test-coverage
+//! expansion plan:
 //!
 //!   * `throttle.rs` — `LoginCheck` tiers, failure recording, sweep,
 //!     per-key isolation. Uses unique per-test keys to avoid
