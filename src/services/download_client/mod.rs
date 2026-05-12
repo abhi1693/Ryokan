@@ -726,9 +726,9 @@ pub async fn wait_for_files(
 /// Returns an empty string if `files` is empty (metadata not yet
 /// known) — caller should check and retry.
 ///
-/// Phase 1: unused (qBit impl uses its native `content_path` field).
-/// Phase 2+ impls will call this to produce a client-agnostic path.
-#[allow(dead_code)]
+/// qBit uses its native `content_path` field; the Deluge and
+/// Transmission impls call this to derive the equivalent
+/// client-agnostic path from `save_path` + the file list.
 pub fn compute_content_path(save_path: &str, files: &[DownloadFile]) -> String {
     if files.is_empty() {
         return String::new();

@@ -516,7 +516,6 @@ fn all_buckets_are_custom_lists(lists: &[serde_json::Value]) -> bool {
 }
 
 /// Search AniList for anime by title, falling back to MAL/Jikan if AniList 403s.
-#[allow(dead_code)]
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
     search_anime_with_options(query, false).await
 }
