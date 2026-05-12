@@ -58,9 +58,6 @@ function toggleMonitorAll(dbId, currentlyAllMonitored) {
     });
 }
 
-// Legacy alias used in older code paths.
-function monitorAll(dbId) { toggleMonitorAll(dbId, false); }
-
 // HTMX migration (issue #129) — toggleEpisodeMonitor() removed; the
 // per-episode monitor button now uses `hx-post` directly. The handler
 // at `/api/library/episode-monitoring` returns the swapped button HTML

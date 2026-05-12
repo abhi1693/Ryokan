@@ -733,7 +733,7 @@ mod tests {
     // ── trash-guides anime fixture set (plan §9, Gap E) ──────────────────
     //
     // Twenty-eight real trash-guides anime CF JSON files are vendored at
-    // `fixtures/trash-guides-anime/`. Each fixture is pulled into the
+    // `tests/fixtures/trash-guides-anime/`. Each fixture is pulled into the
     // binary via `include_str!` so the test needs no filesystem access
     // and no network at build time. These are the **actual** JSON shapes
     // trash-guides ships (object-form `fields`, `trash_id`, `trash_scores`,
@@ -742,122 +742,122 @@ mod tests {
     // `fields` bug that Gap E was created to catch — if either exporter
     // shape stops parsing, every entry in this array breaks at once.
     //
-    // Extending the set: add a new file under `fixtures/trash-guides-anime/`
+    // Extending the set: add a new file under `tests/fixtures/trash-guides-anime/`
     // and a new `include_str!` line below. Any CF with a `required=true`
     // LanguageSpecification will fail the parse guard on purpose — that is
     // not a bug, that is Ryokan refusing to silently drop a gating spec.
     const TRASH_ANIME_FIXTURES: &[(&str, &str)] = &[
         (
             "10bit",
-            include_str!("../../../fixtures/trash-guides-anime/10bit.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/10bit.json"),
         ),
         (
             "anime-bd-tier-01",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-01.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-01.json"),
         ),
         (
             "anime-bd-tier-02",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-02.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-02.json"),
         ),
         (
             "anime-bd-tier-03",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-03.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-03.json"),
         ),
         (
             "anime-bd-tier-04",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-04.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-04.json"),
         ),
         (
             "anime-bd-tier-05",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-05.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-05.json"),
         ),
         (
             "anime-bd-tier-06",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-06.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-06.json"),
         ),
         (
             "anime-bd-tier-07",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-07.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-07.json"),
         ),
         (
             "anime-bd-tier-08",
-            include_str!("../../../fixtures/trash-guides-anime/anime-bd-tier-08.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-bd-tier-08.json"),
         ),
         (
             "anime-dual-audio",
-            include_str!("../../../fixtures/trash-guides-anime/anime-dual-audio.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-dual-audio.json"),
         ),
         (
             "anime-lq-groups",
-            include_str!("../../../fixtures/trash-guides-anime/anime-lq-groups.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-lq-groups.json"),
         ),
         (
             "anime-raws",
-            include_str!("../../../fixtures/trash-guides-anime/anime-raws.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-raws.json"),
         ),
         (
             "anime-web-tier-01",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-01.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-01.json"),
         ),
         (
             "anime-web-tier-02",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-02.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-02.json"),
         ),
         (
             "anime-web-tier-03",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-03.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-03.json"),
         ),
         (
             "anime-web-tier-04",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-04.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-04.json"),
         ),
         (
             "anime-web-tier-05",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-05.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-05.json"),
         ),
         (
             "anime-web-tier-06",
-            include_str!("../../../fixtures/trash-guides-anime/anime-web-tier-06.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/anime-web-tier-06.json"),
         ),
         (
             "bad-dual-groups",
-            include_str!("../../../fixtures/trash-guides-anime/bad-dual-groups.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/bad-dual-groups.json"),
         ),
         (
             "dubs-only",
-            include_str!("../../../fixtures/trash-guides-anime/dubs-only.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/dubs-only.json"),
         ),
         (
             "fansub",
-            include_str!("../../../fixtures/trash-guides-anime/fansub.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/fansub.json"),
         ),
         (
             "fastsub",
-            include_str!("../../../fixtures/trash-guides-anime/fastsub.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/fastsub.json"),
         ),
         (
             "uncensored",
-            include_str!("../../../fixtures/trash-guides-anime/uncensored.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/uncensored.json"),
         ),
         (
             "v0",
-            include_str!("../../../fixtures/trash-guides-anime/v0.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/v0.json"),
         ),
         (
             "v1",
-            include_str!("../../../fixtures/trash-guides-anime/v1.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/v1.json"),
         ),
         (
             "v2",
-            include_str!("../../../fixtures/trash-guides-anime/v2.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/v2.json"),
         ),
         (
             "v3",
-            include_str!("../../../fixtures/trash-guides-anime/v3.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/v3.json"),
         ),
         (
             "v4",
-            include_str!("../../../fixtures/trash-guides-anime/v4.json"),
+            include_str!("../../../tests/fixtures/trash-guides-anime/v4.json"),
         ),
     ];
 

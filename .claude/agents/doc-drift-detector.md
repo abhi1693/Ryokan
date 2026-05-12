@@ -37,8 +37,8 @@ For each verifiable claim in the doc you're auditing, decide which of these cate
 These have bitten the docs before:
 
 - **`build_download_client` style orphans** — old single-slot helpers replaced by the `DownloadClientPool` pattern. Grep for the function name + caller count.
-- **"Vendored X" claims** — Ryokan vendors HTMX (`static/vendor/`) and TRaSH-Guides CFs (`fixtures/trash-guides-anime/`). It does NOT vendor `anitomy` (a regular crates.io dep whose `-sys` companion compiles bundled C++ via `cc`), and does NOT vendor SQLite (sqlx's `sqlite` feature bundles it). If the doc says "vendored anitomy" or similar, flag it.
-- **TRaSH-Guides fixture role** — the 28 JSONs in `fixtures/trash-guides-anime/` are a **test corpus only** (consumed by `services/custom_formats/parser.rs` test module via `include_str!`). User-facing CF defaults live in `static/default_custom_formats.json` (a single consolidated file). Don't conflate.
+- **"Vendored X" claims** — Ryokan vendors HTMX (`static/vendor/`) and TRaSH-Guides CFs (`tests/fixtures/trash-guides-anime/`). It does NOT vendor `anitomy` (a regular crates.io dep whose `-sys` companion compiles bundled C++ via `cc`), and does NOT vendor SQLite (sqlx's `sqlite` feature bundles it). If the doc says "vendored anitomy" or similar, flag it.
+- **TRaSH-Guides fixture role** — the 29 JSONs in `tests/fixtures/trash-guides-anime/` are a **test corpus only** (consumed by `services/custom_formats/parser.rs` test module via `include_str!`). User-facing CF defaults live in `static/default_custom_formats.json` (a single consolidated file). Don't conflate.
 - **AppState shape** — `download_clients: DownloadClientsCache` is a multi-client `DownloadClientPool`, NOT a single-slot `Option<Arc<dyn DownloadClient>>`. Old docs claimed the latter shape long after the refactor.
 - **DownloadClient impl count** — five (qBit / Deluge / Transmission / rTorrent / SABnzbd). Check for "four clients" claims.
 - **HTMX `historyEnableCache`** — set via `<meta name="htmx-config">` in `<head>`, NOT via inline script. Phase D moved this.

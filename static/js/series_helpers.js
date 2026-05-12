@@ -69,13 +69,3 @@ function formatBytes(bytes) {
     return Math.round(mb) + ' MiB';
 }
 
-// Throughput renderer for the download-progress poller — called per
-// row per 5s tick when a torrent is actively downloading. Lives here
-// (not series.js) so the inevitable "show throughput in interactive
-// search rows" feature has it on hand without yet another duplicate.
-function formatDlSpeed(bps) {
-    if (bps <= 0) return '';
-    const units = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
-    const i = Math.floor(Math.log(bps) / Math.log(1024));
-    return (bps / Math.pow(1024, i)).toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
-}
