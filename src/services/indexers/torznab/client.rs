@@ -25,7 +25,7 @@ use crate::models::indexers as model;
 pub struct TorznabIndexer {
     id: i64,
     name: String,
-    /// multi-rss PR 4 — protocol kind of the source row
+    /// Multi-RSS — protocol kind of the source row
     /// ("torznab" / "newznab"). Surfaced via the trait's `kind()`
     /// method so the RSS fan-out can stamp the right
     /// `RssSource::Indexer { kind }` on each item for the

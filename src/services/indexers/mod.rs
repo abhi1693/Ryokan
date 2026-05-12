@@ -476,7 +476,7 @@ impl Release {
     /// Nyaa-description-body layer is unavailable for indexer
     /// results, but the other four are load-bearing).
     ///
-    /// multi-rss PR 4 — convert this indexer-sourced release into
+    /// Multi-RSS — convert this indexer-sourced release into
     /// an `RssItem` for the RSS sync fan-out (Option B). Carries
     /// `RssSource::Indexer { id, name, kind }` so the grab path
     /// can route through the indexer's `download_client_id`
@@ -682,7 +682,7 @@ fn format_publish_date(unix_ts: i64) -> String {
     format!("{:04}-{:02}-{:02} {:02}:{:02}", y, m, d, hour, minute)
 }
 
-/// multi-rss PR 4 — fetch the indexer's "recent items" feed for
+/// Multi-RSS — fetch the indexer's "recent items" feed for
 /// the RSS sync fan-out (Option B). Issues an empty-`q` torznab
 /// search, which Prowlarr / Jackett / native indexers all treat
 /// as "return the most recent N items" — the same shape an RSS

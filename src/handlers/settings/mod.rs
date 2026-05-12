@@ -197,7 +197,7 @@ struct SettingsTemplate {
     /// paths (full page + section partial) populate from the same
     /// process-wide cache so they stay in sync.
     cached_status: std::collections::HashMap<i64, crate::DcStatusEntry>,
-    /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
+    /// Multi-RSS — user-supplied direct RSS feeds (e.g.
     /// SubsPlease per-quality feeds) rendered on the Indexers tab
     /// alongside the torznab/newznab indexer rows. Empty until the
     /// user adds one via the bottom-of-tab form.

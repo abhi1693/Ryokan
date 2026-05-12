@@ -50,7 +50,7 @@ pub struct Indexer {
     /// `download_clients` this indexer routes to. `None` means
     /// "fall through to the default client" at grab time.
     pub download_client_id: Option<i64>,
-    /// multi-rss PR 1 — when true, this indexer participates in the
+    /// Multi-RSS — when true, this indexer participates in the
     /// 60s RSS sync fan-out via its torznab/newznab `?t=tvsearch`
     /// endpoint (Option B). Default false so the existing search-
     /// only fan-out is unaffected; users opt in per-row in
@@ -97,7 +97,7 @@ pub struct IndexerForm<'a> {
     /// Multi-client routing pin. `None` = use the default
     /// download client at grab time.
     pub download_client_id: Option<i64>,
-    /// multi-rss PR 1 — opt this indexer into the per-tick RSS
+    /// Multi-RSS — opt this indexer into the per-tick RSS
     /// fan-out via its `?t=tvsearch` (torznab) or `?t=search` /
     /// `?t=tvsearch` (newznab) endpoint. Default false.
     pub rss_enabled: bool,
@@ -176,7 +176,7 @@ pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> 
 }
 
 pub async fn list_rss_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
-    // multi-rss PR 1 — indexers opted into the RSS sync fan-out.
+    // Multi-RSS — indexers opted into the RSS sync fan-out.
     // Both `enabled` and `rss_enabled` must be true: a user can
     // pause an indexer entirely (enabled=0) without losing the
     // RSS opt-in, and a user can keep an indexer search-only
@@ -440,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_rss_enabled_requires_both_enabled_and_rss_enabled() {
-        // multi-rss PR 1: the RSS fan-out filter is conjunctive —
+        // Multi-RSS: the RSS fan-out filter is conjunctive —
         // an indexer must have BOTH enabled=1 AND rss_enabled=1 to
         // contribute to the per-tick fan-out. A user who paused an
         // indexer entirely (enabled=0) shouldn't see its feed

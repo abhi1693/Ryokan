@@ -167,7 +167,7 @@ pub struct IndexerUpsertForm {
     /// `download_clients` this indexer routes to. Empty
     /// string = NULL (use the default client at grab time).
     pub download_client_id: Option<String>,
-    /// multi-rss PR 1 — opt this indexer into the RSS sync
+    /// Multi-RSS — opt this indexer into the RSS sync
     /// fan-out. Checkbox; presence-equivalent to true.
     pub rss_enabled: Option<String>,
 }

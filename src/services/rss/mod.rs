@@ -193,7 +193,7 @@ static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     ]
 });
 
-/// multi-rss PR 2 — provenance attribution for each item the sync
+/// Multi-RSS — provenance attribution for each item the sync
 /// loop sees. Carried alongside the item through dedup, scoring, and
 /// grab so logs / grab-row routing can answer "which feed produced
 /// this release". Also drives per-source download-client pin
@@ -244,7 +244,7 @@ pub struct RssItem {
     pub group: String,
     pub resolution: String,
     pub is_batch: bool,
-    /// multi-rss PR 2 — which feed produced this item. The legacy
+    /// Multi-RSS — which feed produced this item. The legacy
     /// Nyaa-only sync writes `RssSource::Nyaa` everywhere; the
     /// multi-source fan-out (PR 5) populates this distinctly per
     /// feed.

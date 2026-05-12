@@ -194,7 +194,7 @@ pub(crate) async fn read_capped_body(resp: reqwest::Response) -> Result<String, 
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// multi-rss PR 3 — generic RSS fetch for user-configured feeds
+/// Multi-RSS — generic RSS fetch for user-configured feeds
 /// from `models::rss_feeds`. Reuses the same XML parser the
 /// Nyaa-direct path uses, but feeds it the caller's `source` so
 /// every item carries the right `RssSource::UserFeed { id, name

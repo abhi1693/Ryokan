@@ -2409,7 +2409,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
-    // multi-rss PR 1 — user-configured RSS feeds (Option A). Custom
+    // Multi-RSS — user-configured RSS feeds (Option A). Custom
     // feeds beyond Nyaa-direct: per-uploader Nyaa filters, SubsPlease's
     // direct per-quality feeds, indexer-of-the-week aggregators, etc.
     // The sync loop fetches every enabled row each tick and merges
@@ -2434,7 +2434,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // multi-rss PR 1 — Option B: let an enabled torznab/newznab indexer
+    // Multi-RSS — Option B: let an enabled torznab/newznab indexer
     // contribute its `?t=tvsearch&extended=1` (or `&t=search` newznab
     // RSS) endpoint to the per-tick fan-out. Default 0 (off) so the
     // existing search-only indexer fan-out is unaffected; users opt
