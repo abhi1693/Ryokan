@@ -646,7 +646,7 @@
                openManualOverride sets. #}
             <button class="btn btn-secondary" type="button"
                 hx-post="/api/library/reclassify-episode"
-                hx-vals='js:manualOverrideReclassifyVals()'
+                hx-vals='js:{...manualOverrideReclassifyVals()}'
                 hx-target="#override-status"
                 hx-swap="innerHTML"
                 hx-on::after-request="if (event.detail.successful) setTimeout(function(){ window.location.reload(); }, 600)"
@@ -656,11 +656,11 @@
                reload, equivalent to the prior JS `location.reload()`. #}
             <button class="btn btn-secondary" type="button"
                 hx-post="/api/library/manual-override"
-                hx-vals='js:manualOverrideClearVals()'
+                hx-vals='js:{...manualOverrideClearVals()}'
                 hx-swap="none">Clear override</button>
             <button class="btn btn-primary" type="button"
                 hx-post="/api/library/manual-override"
-                hx-vals='js:manualOverrideApplyVals()'
+                hx-vals='js:{...manualOverrideApplyVals()}'
                 hx-swap="none">Apply</button>
         </div>
     </div>

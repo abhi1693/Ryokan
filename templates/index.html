@@ -342,7 +342,7 @@
                    handler reloads to recover. #}
                 <button class="btn btn-primary" id="monitor-confirm-btn"
                     hx-post="/api/library/monitoring"
-                    hx-vals='js:confirmMonitoringVals()'
+                    hx-vals='js:{...confirmMonitoringVals()}'
                     hx-swap="none"
                     hx-on::response-error="window.location.reload()">Confirm</button>
             </div>
