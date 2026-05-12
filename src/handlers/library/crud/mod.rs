@@ -139,6 +139,21 @@ pub async fn add_series(
                         ),
                     )
                     .await;
+                    // Re-derive monitoring now that the episode map (with
+                    // aired dates) is populated. `load_episode_info` is
+                    // cache-only by design (no blocking Jikan walk inside
+                    // the request handlers), so the synchronous
+                    // `recompute_series_monitoring` in `add_series` above
+                    // ran against an empty map and the aired-date-aware
+                    // modes (Missing / Future) used the degraded heuristic.
+                    // This catch-up pass — off the request path — picks up
+                    // the real aired dates. Quiet on failure; the next
+                    // monitor-mode change or series-page render recomputes.
+                    let _ = monitoring_service::recompute_series_monitoring(
+                        &db_clone,
+                        tracked_clone.id,
+                    )
+                    .await;
                 }
                 Err(err) => {
                     logger::warn(

@@ -140,14 +140,35 @@ async fn effective_episode_count(db: &SqlitePool, row: &series::Series) -> i32 {
     0
 }
 
+/// Aired-date map for monitoring decisions, read from the cached
+/// `local_metadata` episode rows only. `resolve_monitored_episodes`
+/// uses the `aired` field to split Missing (already aired, not on
+/// disk) from Future (not yet aired); the `title` field rides along
+/// but isn't used here.
+///
+/// **Deliberately cache-only — no live Jikan fetch.** `recompute_series_monitoring`
+/// runs on the request path for monitor-mode changes, the add-series
+/// flow, the bulk-monitor handler, and the series-detail page render.
+/// The pre-2026-05-12 version fell through to `jikan::fetch_episode_titles`
+/// when the cache was empty, which on a freshly-added series (cache not
+/// yet populated by the background `refresh_series_metadata` spawn)
+/// did a paginated Jikan walk with a 400ms-per-page sleep inside the
+/// handler — multi-second stall before `set_monitoring` could return
+/// its `HX-Refresh`, surfacing as "I have to refresh the page to see
+/// the new entry." The episode map is populated asynchronously by
+/// `refresh_series_metadata` regardless; for the add-series case,
+/// `add_series` re-runs `recompute_series_monitoring` once that spawn
+/// finishes so the aired-date-aware modes catch up off the request
+/// path. When the cache is empty here, `resolve_monitored_episodes`
+/// degrades to its disk-files + `is_finished` heuristics, which are
+/// already correct for finished series and self-heal for airing ones
+/// on the next recompute.
 async fn load_episode_info(
     db: &SqlitePool,
     row: &series::Series,
 ) -> HashMap<i32, jikan::EpisodeInfo> {
-    if let Ok(cached) = local_metadata::get_episode_map_for_series(db, row.id).await
-        && !cached.is_empty()
-    {
-        return cached
+    match local_metadata::get_episode_map_for_series(db, row.id).await {
+        Ok(cached) => cached
             .into_iter()
             .map(|(num, ep)| {
                 (
@@ -158,12 +179,9 @@ async fn load_episode_info(
                     },
                 )
             })
-            .collect();
+            .collect(),
+        Err(_) => HashMap::new(),
     }
-    let Some(mal_id) = row.mal_id else {
-        return HashMap::new();
-    };
-    jikan::fetch_episode_titles(db, mal_id).await
 }
 
 fn resolve_monitored_episodes(
