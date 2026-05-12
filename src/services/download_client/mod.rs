@@ -183,7 +183,7 @@ pub trait DownloadClient: Send + Sync {
         "torrent"
     }
 
-    /// Issue #28 PR C — apply per-torrent seed-rule overrides
+    /// Issue #28 — apply per-torrent seed-rule overrides
     /// after [`add_torrent`]. Caller invokes this immediately after
     /// the grab when the source indexer has seed rules configured;
     /// the client enforces the rule on its own (Ryokan doesn't
@@ -237,7 +237,7 @@ pub trait DownloadClient: Send + Sync {
 
 /// Per-torrent seed-rule overrides. Both fields are optional —
 /// `None` means "don't change this rule on the client side."
-/// Issue #28 PR C maps these to the client's native API per the
+/// Issue #28 maps these to the client's native API per the
 /// trait method's per-impl mapping table.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SeedRules {
@@ -270,7 +270,7 @@ impl SeedRules {
     }
 }
 
-/// Issue #28 PR C — apply per-indexer seed rules after a successful
+/// Issue #28 — apply per-indexer seed rules after a successful
 /// `add_torrent`. Looks up the indexer row by id, builds a
 /// [`SeedRules`], and calls the trait method.
 ///

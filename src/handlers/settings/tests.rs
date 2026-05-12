@@ -140,7 +140,7 @@ fn resolve_grab_preview_mode_missing_existing_defaults_to_batches_only() {
     );
 }
 
-// ── #62 PR B watch-list sync interval resolver tests ───────────
+// ── #62 watch-list sync interval resolver tests ───────────
 
 #[test]
 fn resolve_external_sync_interval_integrations_tab_accepts_in_range() {
@@ -564,7 +564,7 @@ mod indexer_picker {
     }
 }
 
-/// Issue #129 Phase 1 completion — non-HTMX path coverage for the
+/// Issue #129 completion — non-HTMX path coverage for the
 /// three new per-tab subform handlers
 /// (`settings_general_submit`, `settings_quality_submit`,
 /// `settings_integrations_submit`).

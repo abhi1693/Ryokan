@@ -553,7 +553,7 @@ mod tests {
         assert_eq!(remaining, 0);
     }
 
-    /// Issue #28 PR C — pin the `respects_seed_rules` skip-client-delete
+    /// Issue #28 — pin the `respects_seed_rules` skip-client-delete
     /// branch for the bulk path. Previously `bulk::delete_one_series`
     /// unconditionally called `client.delete(hash, true)`, which would
     /// silently violate PT ratio policy for every grab on a 50-series

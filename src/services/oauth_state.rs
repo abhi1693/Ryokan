@@ -1,6 +1,6 @@
 //! Short-lived in-memory store for pending OAuth attempts.
 //!
-//! Issue #62 PR A: MAL's Auth Code + PKCE flow needs the PKCE verifier
+//! Issue #62: MAL's Auth Code + PKCE flow needs the PKCE verifier
 //! to survive between `/settings/oauth/mal/start` (generate + store +
 //! redirect user to MAL) and `/settings/oauth/mal/submit` (user pastes
 //! code → Ryokan exchanges code + verifier for tokens). Between those

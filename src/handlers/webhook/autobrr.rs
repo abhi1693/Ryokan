@@ -1,4 +1,4 @@
-//! Issue #28 PR D — autobrr push webhook.
+//! Issue #28 — autobrr push webhook.
 //!
 //! `POST /api/webhook/autobrr` is a Ryokan-native webhook
 //! receiver for autobrr's IRC-announce push integration. The

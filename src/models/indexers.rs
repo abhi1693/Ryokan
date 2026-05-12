@@ -1,4 +1,4 @@
-//! Torznab/newznab indexer registry (issue #28 PR A).
+//! Torznab/newznab indexer registry (issue #28).
 //!
 //! Configured indexers live in the `indexers` table; the search
 //! pipeline reads them at fan-out time and dispatches concurrent

@@ -520,7 +520,7 @@ async fn mark_replaced_flips_state_and_stamps_back_pointer() {
     );
 }
 
-// ── Issue #28 PR C: indexer attribution + respect_seed_rules ────
+// ── Issue #28: indexer attribution + respect_seed_rules ────
 
 async fn pr_c_seed_a_grab(db: &SqlitePool) -> (i64, String) {
     let (series_id, _) = series::upsert(

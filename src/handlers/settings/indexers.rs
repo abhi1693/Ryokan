@@ -1,4 +1,4 @@
-//! Settings → Indexers CRUD handlers (issue #28 PR B).
+//! Settings → Indexers CRUD handlers (issue #28).
 //!
 //! Mirrors the shape of the groups + custom-formats settings
 //! handlers: form-driven upsert + delete that redirect back to

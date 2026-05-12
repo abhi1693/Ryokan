@@ -1,4 +1,4 @@
-//! Watch-list sync background task (issue #62 PR B).
+//! Watch-list sync background task (issue #62).
 //!
 //! Pulls the user's AniList or MyAnimeList watch list into the
 //! Ryokan library on a configurable cadence (default 30 minutes,
@@ -206,7 +206,7 @@ async fn tick_once_inner(state: &AppState, force_full_sync: bool) -> Result<Stri
     let summary = match raw {
         Ok(s) => s,
         Err(e) => {
-            // #62 PR E — auth-rejection detection. The sync engine
+            // #62 — auth-rejection detection. The sync engine
             // returns stable error-prefix strings for token-dead
             // failures; a match flips the sticky flag so the
             // Settings UI can render the "Re-link required" banner.
@@ -398,7 +398,7 @@ async fn sync_anilist(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
-    // #62 PR E — clear any stale MAL deferred count from a prior
+    // #62 — clear any stale MAL deferred count from a prior
     // provider on this same account row. AL syncs never produce
     // deferred entries (no anibridge step), so always writing 0
     // keeps the Settings UI accurate after a provider switch.
@@ -622,7 +622,7 @@ async fn sync_mal(
     )
     .await;
     log_failed_entries(&state.db, &outcome).await;
-    // #62 PR E — persist the MAL→AL mapping-failure count so the
+    // #62 — persist the MAL→AL mapping-failure count so the
     // Settings UI can render a "N series couldn't be mapped" banner
     // without scraping the supervised-loop summary string.
     if let Err(e) = external_accounts::update_last_sync_deferred_count(

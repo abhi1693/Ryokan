@@ -1378,7 +1378,7 @@ async fn load_canonical_history(
 /// Match a release title against every tracked series in the library
 /// and return the best match's series id + resolved episode set, or
 /// `None` if no series cleared the matcher's confidence threshold.
-/// Used by the manual-search grab path (#1.3.0 plan item 6d) to
+/// Used by the manual-search grab path (v1.3.0 plan item 6d) to
 /// link grabs to existing library entries without re-implementing
 /// the RSS matcher.
 ///

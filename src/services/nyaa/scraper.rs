@@ -832,7 +832,7 @@ mod tests {
         // Base32-encoded magnets must produce the same dedup key as
         // their hex-encoded siblings. Non-qBit clients (Deluge,
         // Transmission) normalize to hex internally — storing base32
-        // would break dedupe silently. #63 Phase 0.
+        // would break dedupe silently. #63.
         let hex_hash = "abcdef0123456789abcdef0123456789abcdef01";
         let bytes = hex::decode(hex_hash).expect("known-good hex");
         let base32 = base32_encode_for_test(&bytes);

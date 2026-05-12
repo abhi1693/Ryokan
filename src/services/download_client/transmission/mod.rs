@@ -566,7 +566,7 @@ impl DownloadClient for TransmissionClient {
         "Transmission"
     }
 
-    /// Issue #28 PR C — apply per-torrent seed rules via
+    /// Issue #28 — apply per-torrent seed rules via
     /// Transmission's `torrent-set` RPC.
     ///
     /// Wire shape: `torrent-set` with `ids: [hash]` plus the

@@ -1,6 +1,6 @@
 //! AEAD encryption for OAuth tokens + other at-rest secrets.
 //!
-//! Issue #62 PR A groundwork. AL / MAL OAuth tokens are 1-year-TTL
+//! Issue #62 groundwork. AL / MAL OAuth tokens are 1-year-TTL
 //! credentials that authorize reading + writing the user's real
 //! external account (Ryokan doesn't write back itself, but the token
 //! scope still grants write access — if one leaked, an attacker

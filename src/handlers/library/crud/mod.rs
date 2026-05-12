@@ -613,7 +613,7 @@ pub async fn set_monitoring(
     //   1. The caller explicitly asked for it via `form.auto_grab`
     //      (e.g. the add-series flow does this once to seed the
     //      library), gated on `config.auto_grab_on_add`; or
-    //   2. `config.search_on_monitoring_change` is on (#1.3.0 opt-in
+    //   2. `config.search_on_monitoring_change` is on (v1.3.0 opt-in
     //      flag). This fires on every monitoring change so users who
     //      flip `none → all` get an immediate delta-search without
     //      needing to click an extra button.
@@ -793,7 +793,7 @@ pub async fn set_allow_upgrades(
     }
 }
 
-/// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
+/// Issue #28 — toggle the per-series PT upgrade opt-in.
 /// Default off; the upgrade sweep won't grab a private-tracker
 /// release as the chosen upgrade for this series unless the
 /// flag is on. Initial grabs and manual searches aren't gated.

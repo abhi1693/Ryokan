@@ -92,7 +92,7 @@ async fn stamp_synced_from_if_set(db: &SqlitePool, series_id: i64, account_id: O
     }
 }
 
-/// #62 PR C — write the user's personal score from the sync entry
+/// #62 — write the user's personal score from the sync entry
 /// onto `series.user_score`. Skips silently when `account_id` is
 /// `None` (unit-test pathway with no live account). Normalizes AL's
 /// `0.0` "unrated" sentinel to `NULL` so the schema unambiguously
@@ -118,7 +118,7 @@ async fn stamp_user_score_if_set(
     }
 }
 
-/// #62 PR D — replace the series's AL custom-list memberships from
+/// #62 — replace the series's AL custom-list memberships from
 /// `entry.custom_lists`. Skips when `account_id` is `None` (unit-
 /// test pathway) and when `provider` isn't AniList (MAL never emits
 /// custom-list memberships, so the call would just clear a never-
@@ -306,7 +306,7 @@ async fn merge_one_jikan_entry(
         );
     }
 
-    // #62 PR E — populate genre side table from Jikan-supplied genres.
+    // #62 — populate genre side table from Jikan-supplied genres.
     if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
         tracing::warn!(
             "series_genres::replace_for_series failed for series_id={series_id} during Jikan sync: {e}"
@@ -414,7 +414,7 @@ async fn merge_one_anilist_entry(
         tracing::warn!("metadata_cache::upsert failed for series_id={series_id} during sync: {e}");
     }
 
-    // #62 PR E — populate genre side table from AL-supplied genres.
+    // #62 — populate genre side table from AL-supplied genres.
     if let Err(e) = series_genres::replace_for_series(db, series_id, &detail.genres).await {
         tracing::warn!(
             "series_genres::replace_for_series failed for series_id={series_id} during AL sync: {e}"

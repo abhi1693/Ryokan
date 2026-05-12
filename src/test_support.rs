@@ -580,7 +580,7 @@ window.addEventListener('DOMContentLoaded', function () {
                 "/__test/connection-test-fixture",
                 get(connection_test_fixture),
             )
-            // SSE progress-toast fixture (issue #129 Phase 3 / v1.6.5
+            // SSE progress-toast fixture (issue #129 / v1.6.5
             // SSE migration). The fixture page opens
             // `ryokanProgressToast` against a known progress_id; the
             // emit endpoint pre-seeds events so the test doesn't need
@@ -663,7 +663,7 @@ window.addEventListener('DOMContentLoaded', function () {
             // that subsequent navs land on `/login` reflects the
             // genuine middleware redirect, not a mocked path.
             .route("/logout", get(crate::handlers::auth::logout))
-            // Issue #129 Phase 1 completion — per-tab subform handlers
+            // Issue #129 completion — per-tab subform handlers
             // (`/settings/general`, `/settings/quality`,
             // `/settings/integrations`). Mounted here so the
             // browser-e2e tests at `htmx_browser_e2e_settings_subforms`
@@ -786,7 +786,7 @@ pub async fn seed_radarr_enabled(db: &SqlitePool, api_key: &str) {
         .expect("persist Radarr-enabled config");
 }
 
-/// Issue #28 PR D — write `autobrr_api_key = <provided>` so the
+/// Issue #28 — write `autobrr_api_key = <provided>` so the
 /// webhook handler's auth check passes. Empty key means the
 /// webhook is disabled (returns 503), so the test seed always
 /// uses a non-empty value.
@@ -800,7 +800,7 @@ pub async fn seed_autobrr_enabled(db: &SqlitePool, api_key: &str) {
         .expect("persist autobrr-enabled config");
 }
 
-/// Issue #28 PR D — minimal router that mounts only the autobrr
+/// Issue #28 — minimal router that mounts only the autobrr
 /// webhook route, for tests that exercise the handler in
 /// isolation without dragging in the rest of the protected
 /// surface.

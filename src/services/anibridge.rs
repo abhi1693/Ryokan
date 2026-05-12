@@ -173,7 +173,7 @@ struct MappingCache {
     mal_to_tmdb: HashMap<i64, i64>,
     /// MAL ID → AniList ID. Populated whenever a mappings entry pairs
     /// both providers at the same index. Used by the watch-list sync
-    /// path (#62 PR B) to translate MAL list entries into AniList IDs
+    /// path (#62) to translate MAL list entries into AniList IDs
     /// before writing to `series` — without this, every MAL-sourced
     /// entry would land under the negated-MAL-id sentinel and become
     /// invisible to SeaDex / AL-keyed scoring.
@@ -389,7 +389,7 @@ pub async fn lookup_tmdb_by_anilist(anilist_id: i64) -> Option<i64> {
         .copied()
 }
 
-/// Look up AniList ID by MAL ID. The watch-list sync (#62 PR B) calls
+/// Look up AniList ID by MAL ID. The watch-list sync (#62) calls
 /// this to resolve MAL-list entries into AL IDs before merging into
 /// `series`; on miss the caller falls back to the negated-MAL-id
 /// sentinel (`series.anilist_id = -mal_id`) so the entry still lands
@@ -1065,7 +1065,7 @@ mod tests {
 
     #[test]
     fn parse_bytes_populates_mal_to_anilist_for_paired_entries() {
-        // The MAL→AL reverse map is what watch-list sync (#62 PR B)
+        // The MAL→AL reverse map is what watch-list sync (#62)
         // uses to resolve MAL list entries before merging into series.
         // An entry that names both anilist:N and mal:M must populate
         // mal_to_anilist[M] = N regardless of whether it also names a

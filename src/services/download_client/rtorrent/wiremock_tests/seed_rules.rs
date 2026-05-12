@@ -1,4 +1,4 @@
-//! Issue #28 PR C — `set_seed_rules` against rTorrent's
+//! Issue #28 — `set_seed_rules` against rTorrent's
 //! `d.ratio.max.set` XML-RPC call.
 //!
 //! rTorrent's wire format:

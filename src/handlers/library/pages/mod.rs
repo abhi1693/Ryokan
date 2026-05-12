@@ -30,7 +30,7 @@ use super::{Episode, ErrorTemplate, IndexTemplate, RelationCard, RelationGroup, 
 
 #[derive(Default, serde::Deserialize)]
 pub struct LibraryIndexQuery {
-    /// #62 PR D — `?list=<name>` filter. When present + non-empty,
+    /// #62 — `?list=<name>` filter. When present + non-empty,
     /// the index handler keeps only series whose
     /// `series_custom_lists` rows match. Echoed back to the
     /// template so the dropdown's selected-option state persists
@@ -43,7 +43,7 @@ pub struct LibraryIndexQuery {
     /// satisfy both predicates).
     #[serde(default)]
     pub search: Option<String>,
-    /// #62 PR E — `?sort=<key>` ordering. Currently supports
+    /// #62 — `?sort=<key>` ordering. Currently supports
     /// `recent` (default; SQL `ORDER BY added_at DESC`) and `score`
     /// (user-score descending — only meaningful when an account is
     /// linked, so the dropdown is hidden otherwise; unrated series
@@ -74,7 +74,7 @@ pub async fn index(
     )
     .await;
 
-    // #62 PR C — pull the linked account's score_format so library
+    // #62 — pull the linked account's score_format so library
     // cards can render "You: X" badges per row. Empty string when
     // no account is linked, in which case Series::user_score_display
     // returns None and no badge renders.
@@ -85,7 +85,7 @@ pub async fn index(
         .map(|a| a.score_format)
         .unwrap_or_default();
 
-    // #62 PR D — populate the filter dropdown + apply the active
+    // #62 — populate the filter dropdown + apply the active
     // filter. Distinct list names are alphabetized; empty result
     // means no memberships synced yet (template hides the dropdown).
     let custom_list_names = crate::models::series_custom_lists::distinct_list_names(&state.db)
@@ -125,7 +125,7 @@ pub async fn index(
         });
     }
 
-    // #62 PR E — sort-by-user-score. SQL already returned series
+    // #62 — sort-by-user-score. SQL already returned series
     // ordered by added_at DESC ("recent"); this is an opt-in
     // re-sort applied AFTER filters so the displayed order matches
     // the displayed set. NULL / 0.0 / negative user_score values
@@ -349,7 +349,7 @@ pub async fn series_detail(
         }
     }
 
-    // #62 PR B — derive the "Sync from AL/MAL" dropdown option's
+    // #62 — derive the "Sync from AL/MAL" dropdown option's
     // visibility + label. Only show when both (a) an account is
     // currently linked, and (b) this series row has a non-NULL
     // synced_from_external_account_id pointing at the same account.
@@ -391,7 +391,7 @@ pub async fn series_detail(
             monitor_mode.clone()
         };
 
-    // #62 PR C — render the "You: X" badge string per the linked
+    // #62 — render the "You: X" badge string per the linked
     // account's score_format. Hidden when no account is linked, the
     // series has no user_score, or the score is the unrated
     // sentinel. Computed here so the template just renders the
@@ -403,7 +403,7 @@ pub async fn series_detail(
         _ => None,
     };
 
-    // #62 PR D — read AL custom-list memberships for the badge row.
+    // #62 — read AL custom-list memberships for the badge row.
     // Empty when this series isn't on any user-defined list; the
     // template hides the row in that case. Sorted alphabetically by
     // the model layer so the badge order is stable across renders.

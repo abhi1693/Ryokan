@@ -154,7 +154,7 @@ pub struct AppState {
     /// RSS, and manual grabs continue to hit Nyaa directly. See
     /// [`services::interactive_search_cache`] for key shape + TTL.
     pub interactive_search_cache: InteractiveSearchCache,
-    /// In-memory store for pending OAuth attempts (issue #62 PR A).
+    /// In-memory store for pending OAuth attempts (issue #62).
     /// Holds the PKCE verifier between MAL's `/start` and `/submit`;
     /// 10-minute TTL sweeps forgotten flows. See
     /// [`services::oauth_state`] for scope + lifecycle.

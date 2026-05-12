@@ -1,6 +1,6 @@
 //! OAuth start / submit endpoints for AniList and MyAnimeList.
 //!
-//! Issue #62 PR A. Each provider has two endpoints:
+//! Issue #62. Each provider has two endpoints:
 //!
 //!   - `GET  /settings/oauth/{provider}/start`  — redirects the user's
 //!     browser to the provider's authorize URL. For MAL we first

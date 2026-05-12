@@ -751,7 +751,7 @@ impl DownloadClient for RtorrentClient {
         "RTorrent"
     }
 
-    /// Issue #28 PR C — apply per-torrent ratio rules via
+    /// Issue #28 — apply per-torrent ratio rules via
     /// rTorrent's `d.ratio.max.set` XML-RPC.
     ///
     /// Wire shape: `d.ratio.max.set` takes the hash + a ratio

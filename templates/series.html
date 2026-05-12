@@ -43,7 +43,7 @@
             {% if let Some(score_text) = detail.average_score_display %}
             <span class="tag tag-score {{ detail.score_class }}">{{ score_text }}</span>
             {% endif %}
-            {# #62 PR C — user's personal score from their linked AL/MAL
+            {# #62 — user's personal score from their linked AL/MAL
                account. Hidden when no account is linked, the series
                isn't on the user's list, or the user hasn't rated it.
                The display string is pre-formatted per
@@ -60,7 +60,7 @@
             {% endfor %}
         </div>
 
-        {# #62 PR D — AL custom-list membership badges. Hidden when
+        {# #62 — AL custom-list membership badges. Hidden when
            the series isn't on any of the user's custom lists (or
            no account is linked). Each badge links back to the
            library filtered to that list so the user can quickly
@@ -196,7 +196,7 @@
                     <option value="existing" {% if monitor_mode_select_value == "existing" %}selected{% endif %}>Existing Episodes</option>
                     <option value="none" {% if monitor_mode_select_value == "none" %}selected{% endif %}>None</option>
                     {% if can_sync_from_external_account %}
-                    {# #62 PR B — clearing the manual-override flag.
+                    {# #62 — clearing the manual-override flag.
                        Only visible when the series came from sync; for
                        manually-added series the option would be a
                        no-op. The "follow your AL/MAL list" choice
@@ -231,7 +231,7 @@
                         hx-on::response-error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'Upgrades toggle failed', body: 'Failed to update upgrades toggle', log: true})">
                     Allow automatic upgrades when a higher-quality release is found
                 </label>
-                {# Issue #28 PR E — PT upgrade opt-in. Indented under the
+                {# Issue #28 — PT upgrade opt-in. Indented under the
                    parent toggle since "PT upgrades" is a sub-decision of
                    "upgrades at all." #}
                 <label class="checkbox-label" style="margin-top:6px;margin-left:20px">

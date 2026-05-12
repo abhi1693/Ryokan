@@ -1,4 +1,4 @@
-//! Torznab/newznab indexer abstraction (issue #28 PR A).
+//! Torznab/newznab indexer abstraction (issue #28).
 //!
 //! ## Scope of this PR
 //!

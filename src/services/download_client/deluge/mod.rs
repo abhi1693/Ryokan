@@ -727,7 +727,7 @@ impl DownloadClient for DelugeClient {
         "Deluge"
     }
 
-    /// Issue #28 PR C — apply per-torrent ratio rules via Deluge's
+    /// Issue #28 — apply per-torrent ratio rules via Deluge's
     /// `core.set_torrent_options` API.
     ///
     /// Wire shape (live-probed against Deluge 2.x):

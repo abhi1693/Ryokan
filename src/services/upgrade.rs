@@ -67,7 +67,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
     // a CF mid-sweep, the next scheduled run picks it up.
     let cfs = state.custom_formats.read().await.clone();
 
-    // Issue #28 PR E — snapshot the set of PT indexer IDs once per
+    // Issue #28 — snapshot the set of PT indexer IDs once per
     // sweep so the per-series PT-upgrade gate doesn't re-read the
     // IndexerCache (or hit the DB) on every result. The set is used
     // to skip an upgrade candidate when the source indexer is private
@@ -235,7 +235,7 @@ pub async fn run_once(state: &AppState) -> Result<UpgradeSummary, String> {
                 continue;
             };
 
-            // Issue #28 PR E — PT upgrade gate. When a user hasn't
+            // Issue #28 — PT upgrade gate. When a user hasn't
             // opted this series in to PT-sourced upgrades and the
             // chosen candidate came from a private tracker, skip
             // the upgrade. The user can still grab from PT manually

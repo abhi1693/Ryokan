@@ -601,7 +601,7 @@ async fn refresh_series_metadata_inner(
             .await
             .map_err(|e| e.to_string())?;
 
-        // #62 PR E — extract genres into the per-row side table for
+        // #62 — extract genres into the per-row side table for
         // the library filter. Best-effort: a write failure here logs
         // but doesn't fail the whole metadata refresh — the cache
         // upsert above is the canonical source and the side table

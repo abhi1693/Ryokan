@@ -1,4 +1,4 @@
-//! Genre side table (issue #62 PR E).
+//! Genre side table (issue #62).
 //!
 //! AnimeDetail's `genres: Vec<String>` is the canonical source. This
 //! table extracts that into per-row form so the library filter +
@@ -18,7 +18,7 @@
 //! **Read paths currently have no consumer.** [`distinct_genres`]
 //! and [`series_ids_in_genre`] were originally written for a genre
 //! dropdown on the library page; that filter was replaced by the
-//! full-text library search before #62 PR E shipped. The write
+//! full-text library search before #62 shipped. The write
 //! paths + the one-shot backfill are kept on so the table stays
 //! warm against a future detail-page genre row or an advanced
 //! filter. Don't delete them assuming they're orphaned — check the
@@ -100,7 +100,7 @@ pub async fn series_ids_in_genre(db: &SqlitePool, genre: &str) -> Result<Vec<i64
 }
 
 /// Stable ID for the one-shot genre-backfill migration. The table
-/// is empty for any DB created before #62 PR E even though the
+/// is empty for any DB created before #62 even though the
 /// canonical genre data has been sitting in `series_metadata_cache`
 /// the whole time. This pre-populates the side table from the
 /// existing cache so the library filter dropdown lights up

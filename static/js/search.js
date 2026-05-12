@@ -587,7 +587,7 @@ function renderScoreBreakdown(r) {
     </div>`;
 }
 
-// #1.3.0 — close any open <details class="score-details"> when the user
+// v1.3.0 — close any open <details class="score-details"> when the user
 // clicks outside it or presses Escape. Without these, the only way to
 // dismiss the expander is to click the score badge itself, which is a
 // footgun on the mobile card layout where the score sits in a small

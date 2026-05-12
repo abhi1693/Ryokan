@@ -695,7 +695,7 @@ impl DownloadClient for QbitClient {
         "QBittorrent"
     }
 
-    /// Issue #28 PR C — qBit's per-torrent share-limit endpoint.
+    /// Issue #28 — qBit's per-torrent share-limit endpoint.
     ///
     /// Wire shape: `POST /api/v2/torrents/setShareLimits` with
     /// form fields `hashes`, `ratioLimit`, `seedingTimeLimit`, and

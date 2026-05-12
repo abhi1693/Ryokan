@@ -354,7 +354,7 @@ mod crud_ci {
         assert_eq!(body["allow_upgrades"], true);
     }
 
-    // ─── set_allow_pt_upgrades (#28 PR E) ─────────────────────
+    // ─── set_allow_pt_upgrades (#28) ─────────────────────
 
     #[tokio::test]
     async fn set_allow_pt_upgrades_persists_flag_and_defaults_off() {

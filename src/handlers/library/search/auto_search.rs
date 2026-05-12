@@ -624,7 +624,7 @@ async fn run_auto_search_targets_with_upgrades(
                             .await
                             .ok()
                             .flatten();
-                            // Issue #28 PR C — apply per-indexer
+                            // Issue #28 — apply per-indexer
                             // seed rules + stamp attribution.
                             // Nyaa grabs (indexer_id None) take the
                             // existing path (no seed-rule call,

@@ -162,7 +162,7 @@ pub struct AnimeEntry {
 }
 
 /// One entry from a user's AniList watch list, projected to the
-/// fields the watch-list sync (issue #62 PR B) cares about.
+/// fields the watch-list sync (issue #62) cares about.
 ///
 /// Every authenticated AL list query returns `MediaListCollection`
 /// grouped by status (CURRENT / PLANNING / COMPLETED / DROPPED /
