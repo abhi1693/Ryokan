@@ -1,5 +1,5 @@
 //! Radarr shim tests, parallel structure to the Sonarr side.
-//! Auth + system-tier response shapes only in PR 3; the movie
+//! Auth + system-tier response shapes only here; the movie
 //! endpoints follow in a later PR.
 
 mod auth;

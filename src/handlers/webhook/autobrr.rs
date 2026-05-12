@@ -48,7 +48,7 @@
 //!   on it.
 //! - Per-indexer-defaults overrides on push (e.g., "this autobrr
 //!   filter for AB skips Ryokan's PT-upgrade gate"). The plan
-//!   defers this to PR E.
+//!   defers this to a follow-up.
 
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
@@ -180,7 +180,7 @@ async fn check_api_key(
     path = "/api/webhook/autobrr",
     tag = "Webhook",
     summary = "autobrr push webhook",
-    description = "Receives a release push from autobrr's Webhook action and dispatches it to the active download client. API key required via X-Api-Key header or ?apikey= query param. The release is matched against tracked series via title-token overlap; unmatched releases are skipped (200 with status=skipped) so autobrr doesn't retry. Per-indexer seed rules from the matching `indexers` row apply automatically (PR C).",
+    description = "Receives a release push from autobrr's Webhook action and dispatches it to the active download client. API key required via X-Api-Key header or ?apikey= query param. The release is matched against tracked series via title-token overlap; unmatched releases are skipped (200 with status=skipped) so autobrr doesn't retry. Per-indexer seed rules from the matching `indexers` row apply automatically.",
     request_body = AutobrrPayload,
     responses(
         (status = 200, description = "Push handled (grabbed, deduped, or skipped)", body = AutobrrResponse),
@@ -354,7 +354,7 @@ pub async fn webhook_autobrr(
             );
         }
     };
-    // PR G — `add_torrent_returning_id` returns the canonical client-
+    // `add_torrent_returning_id` returns the canonical client-
     // side id alongside the outcome. For BT clients the returned id
     // equals the input info_hash; for SAB it's the `nzo_id` SAB
     // hands back from `mode=addurl`. Either way, persist the

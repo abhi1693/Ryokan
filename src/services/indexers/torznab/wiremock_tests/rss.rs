@@ -1,6 +1,6 @@
 //! Wiremock coverage for `services::indexers::fetch_indexer_rss`
-//! (multi-rss PR commit D, plan §3 of the per-indexer RSS path).
-//! The polling URL is the same `?t=tvsearch&cat=5070` shape the
+//! (the per-indexer RSS polling path). The polling URL is the same
+//! `?t=tvsearch&cat=5070` shape the
 //! search path uses, just with empty `q` — so a single XML
 //! parser handles both directions.
 //!
@@ -103,7 +103,7 @@ async fn fetch_indexer_rss_stamps_indexer_source_attribution() {
 #[tokio::test]
 async fn fetch_indexer_rss_returns_empty_for_zero_items_in_response() {
     // An empty channel is a valid quiet-period response — must
-    // not Err. Pins the contract that PR F's fan-out can rely on.
+    // not Err. Pins the contract that the fan-out can rely on.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))
         .and(path("/api"))
@@ -123,7 +123,7 @@ async fn fetch_indexer_rss_returns_empty_for_zero_items_in_response() {
 #[tokio::test]
 async fn fetch_indexer_rss_propagates_indexer_5xx_error() {
     // The torznab client already maps non-2xx to Err with a
-    // status-code-tagged message. RSS fan-out (PR F) folds that
+    // status-code-tagged message. RSS fan-out folds that
     // Err into `indexers.rss_last_poll_error` for UI display.
     let (server, client) = new_fixture().await;
     Mock::given(method("GET"))

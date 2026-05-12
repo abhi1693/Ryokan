@@ -358,7 +358,7 @@ pub async fn fetch_media_list_collection(
         //   * `AniList rate-limited` → next tick defers, stays linked
         //   * `AniList not found` / generic → surface as `unavailable`
         //   * Authorization-shaped messages stay as `unavailable` for
-        //     now; PR B's submit/refresh path will key off the literal
+        //     now; the submit/refresh path will key off the literal
         //     message and surface a "re-link required" banner.
         let lower = err_msg.to_ascii_lowercase();
         if lower.contains("too many requests") || lower.contains("rate limit") {

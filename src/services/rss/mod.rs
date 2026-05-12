@@ -200,7 +200,7 @@ static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
 /// resolution: a Nyaa-direct item routes through `config
 /// .nyaa_download_client_id`; a `UserFeed` item through the feed's
 /// own `download_client_id`; an `Indexer` item through the
-/// indexer's `download_client_id`. Cross-feed dedup (PR 5) keeps
+/// indexer's `download_client_id`. Cross-feed dedup keeps
 /// the highest-priority source when the same release shows up in
 /// multiple places.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,7 +246,7 @@ pub struct RssItem {
     pub is_batch: bool,
     /// Multi-RSS — which feed produced this item. The legacy
     /// Nyaa-only sync writes `RssSource::Nyaa` everywhere; the
-    /// multi-source fan-out (PR 5) populates this distinctly per
+    /// multi-source fan-out populates this distinctly per
     /// feed.
     pub source: RssSource,
 }
@@ -471,7 +471,7 @@ async fn fetch_all_sources(
 
     // 1. Nyaa — gate on `cfg.rss_enabled` (legacy v1 flag, plan
     //    decision #8 keeps its semantics) AND `!cfg.disable_nyaa_rss`
-    //    (Phase 7 PR E — Nyaa-specific opt-out for users who only
+    //    (Nyaa-specific opt-out for users who only
     //    want indexer-RSS / direct-RSS feeds polled). Master flag
     //    has already been honored at the sync_once_inner top.
     if cfg.rss_enabled && !cfg.disable_nyaa_rss {
@@ -1109,7 +1109,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
-        // PR G — use the returning-id variant so SAB grabs persist
+        // use the returning-id variant so SAB grabs persist
         // their `nzo_id` instead of the pre-computed BT-style hash.
         // For BT clients the returned id equals `info_hash` (default
         // impl), no behavior change.

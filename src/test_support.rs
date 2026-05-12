@@ -195,7 +195,7 @@ pub async fn count_series(db: &SqlitePool) -> i64 {
         .expect("count series")
 }
 
-// ─── PR 0 additions (test-coverage-expansion foundation) ──────────
+// ─── test-coverage-expansion foundation ──────────
 
 /// Create a user + session and return the pair of (state, cookie
 /// header value) so a test can make authenticated requests via
@@ -219,11 +219,11 @@ pub async fn logged_in_session(db: &SqlitePool) -> (AppState, String) {
     (state, format!("session={}", token))
 }
 
-/// Build a minimal axum router that mounts the handlers most PR 0
-/// pilot + PR 1+ auth tests want to exercise. Deliberately narrower
-/// than `main.rs`'s full `app` router so tests don't pay for every
-/// middleware layer — adds routes it needs and leaves the rest for
-/// later PRs to extend.
+/// Build a minimal axum router that mounts the handlers the auth
+/// tests want to exercise. Deliberately narrower than `main.rs`'s
+/// full `app` router so tests don't pay for every middleware layer —
+/// adds routes it needs and leaves the rest for later changes to
+/// extend.
 ///
 /// Currently includes:
 /// * `GET /login` — public login page render

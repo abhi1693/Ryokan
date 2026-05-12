@@ -38,11 +38,11 @@ use sqlx::{FromRow, SqlitePool};
 pub const HEARTBEAT_TTL_SECS: i64 = 60;
 
 #[derive(Debug, Clone, FromRow)]
-// PR A ships the struct with more columns than the handler currently
-// reads; `client_kind` / `indexer_id` / `series_id` / `created_at` /
-// `heartbeat_at` are populated for the sweep's decision-making (PR C)
-// and for future diagnostics. Silencing struct-level dead-code so the
-// fields stay available when the PR C consumers wire up, without
+// The struct carries more columns than the handler currently reads;
+// `client_kind` / `indexer_id` / `series_id` / `created_at` /
+// `heartbeat_at` are populated for the sweep's decision-making and
+// for future diagnostics. Struct-level dead-code allow so those
+// fields stay available for their eventual consumers without
 // per-field noise.
 #[allow(dead_code)]
 pub struct PendingGrab {

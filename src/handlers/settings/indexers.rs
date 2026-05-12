@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(parse_optional_f64(&Some("2.5".into())), Some(2.5));
     }
 
-    /// PR G follow-up: protocol-mismatch validation on the indexer
+    /// protocol-mismatch validation on the indexer
     /// upsert path. Pinning a torznab indexer to a SAB client (or a
     /// newznab indexer to a BT client) used to silently save the row
     /// and only fail at grab time when the client rejected the URL.

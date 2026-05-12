@@ -5,7 +5,7 @@ use crate::services::download_client::test_helpers;
 use crate::test_support;
 use std::sync::Arc;
 
-// ─── CI-gated library-CRUD coverage (PR 7) ────────────────────
+// ─── CI-gated library-CRUD coverage ────────────────────
 //
 // These tests exercise the handler functions directly (not via
 // the axum router) so they don't need a download client wired

@@ -11,7 +11,7 @@
 //!
 //! Plaintext tokens exist only briefly in memory during outbound API
 //! calls. The DB-at-rest copy is always ciphertext. A `ryokan
-//! --sanitize-db-for-debug` CLI (landing in a later PR A commit)
+//! --sanitize-db-for-debug` CLI (planned)
 //! blanks these columns before the user posts their DB in a bug
 //! report.
 //!

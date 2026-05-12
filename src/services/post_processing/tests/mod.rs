@@ -1,5 +1,5 @@
 //! Post-processing tests, topic-split per the test-coverage-expansion
-//! plan (PR 2). Each file covers one behavioral area of
+//! plan. Each file covers one behavioral area of
 //! `services::post_processing`:
 //!
 //!   * `file_ops.rs` — `do_file_op` across hardlink / copy / move

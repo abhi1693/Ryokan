@@ -165,7 +165,7 @@ struct SettingsTemplate {
     /// preference is Romaji or Native.
     title_language: String,
     /// Issue #28 — torznab/newznab indexer rows for the
-    /// Settings → Indexers tab placeholder. PR B replaces the
+    /// Settings → Indexers tab placeholder. a follow-up replaces the
     /// placeholder with add/edit/delete forms and uses the same
     /// list. Empty on a fresh install since no indexers exist
     /// until the user adds one.
@@ -384,7 +384,7 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
-    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Lives in the General
+    /// Nyaa-specific RSS opt-out. Lives in the General
     /// tab next to `rss_enabled` / `rss_interval_minutes`. Checkbox →
     /// `Some(_)` when checked, `None` when not.
     disable_nyaa_rss: Option<String>,
@@ -409,7 +409,7 @@ pub struct SettingsForm {
     /// Issue #83 — interactive file-picker trigger policy. `batches_only`
     /// (default) opens the modal for multi-file torrents; `never`
     /// preserves 1.3.0 one-click behavior. Omitted from forms before
-    /// PR C → falls back to the existing config value (or default).
+    /// Falls back to the existing config value (or default).
     #[serde(default)]
     grab_preview_mode: Option<String>,
     /// Issue #62 — watch-list sync cadence in minutes. Clamped
@@ -578,7 +578,7 @@ pub struct GeneralForm {
     #[serde(default)]
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
-    /// Phase 7 PR E — Nyaa-specific RSS opt-out.
+    /// Nyaa-specific RSS opt-out.
     #[serde(default)]
     disable_nyaa_rss: Option<String>,
     #[serde(default)]
@@ -701,7 +701,7 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         Some("groups") => "groups".to_string(),
         Some("general") => "general".to_string(),
         // Issue #28 — torznab/newznab indexer registry. Tab
-        // surface scaffolded; CRUD form lands in PR B alongside
+        // surface scaffolded; CRUD form lands alongside
         // the TorznabIndexer impl that needs caps probing on save.
         Some("indexers") => "indexers".to_string(),
         // Phase 7 follow-up — the multi-client picker was promoted

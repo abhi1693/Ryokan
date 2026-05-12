@@ -1,4 +1,4 @@
-//! Multi-client fan-out tests for `run_once`. PR F (multi-client) +
+//! Multi-client fan-out tests for `run_once`. Covers
 //! PR 109 (delete-cascade NULL-out) + PR 110 (in-loop NULL-cleanup
 //! when the stamped client resolves to None) all touched the
 //! resolution path that sits between `get_all_pending` and

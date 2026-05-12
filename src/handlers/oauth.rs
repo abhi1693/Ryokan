@@ -704,7 +704,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// Shared reqwest client for OAuth provider calls. Matches the
 /// `RSS_HTTP_CLIENT` convention in `services::rss::feed` — building
 /// a fresh client per call costs DNS + TLS handshake on first use
-/// and forfeits keep-alive pooling. PR B's token-refresh path will
+/// and forfeits keep-alive pooling. the token-refresh path will
 /// add a third caller of the same shape.
 static OAUTH_HTTP_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()

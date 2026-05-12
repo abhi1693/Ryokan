@@ -275,7 +275,7 @@ pub async fn grab_preview(
     // tab confirms first wins and the other just sees a 404 on its
     // next poll. Plan decision #6 also wants the eventual "show
     // current priorities" flow for releases already in the client,
-    // but that's PR C — this only covers the in-flight modal case.
+    // but that's a follow-up — this only covers the in-flight modal case.
     if let Some(existing) = pending_grabs::get_by_hash(&state.db, &info_hash)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?
@@ -659,7 +659,7 @@ pub async fn grab_confirm(
     // running — resume is idempotent.
     let resume_error = client.resume(&row.info_hash).await.err();
 
-    // Library attribution (PR C). Writes the `grabbed_torrents` row
+    // Library attribution. Writes the `grabbed_torrents` row
     // and kicks off sibling auto-expand on the user-selected subset —
     // files the user unchecked are excluded from the sibling-detection
     // file list so a deselected sibling (user unchecked all its

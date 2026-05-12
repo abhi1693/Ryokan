@@ -1,5 +1,5 @@
 //! Sonarr shim tests, topic-split per the test-coverage-expansion
-//! plan (PR 3).
+//! plan.
 //!
 //!   * `auth.rs` — `require_api_key` middleware: 503 when config
 //!     absent / shim disabled, 401 when key missing / mismatched,

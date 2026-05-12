@@ -1,14 +1,13 @@
 //! Torznab/newznab indexer abstraction (issue #28).
 //!
-//! ## Scope of this PR
+//! ## What's here
 //!
-//! Foundation only — the [`Indexer`] trait, the [`Release`] /
-//! [`SearchQuery`] / [`IndexerCaps`] data model, and pure-function
-//! helpers for the auto-search dedup pass and concurrent fan-out.
-//! No concrete [`Indexer`] impls live here yet; the
-//! `TorznabIndexer` impl lands in PR B alongside the search-pipeline
-//! integration that actually populates `Vec<Arc<dyn Indexer>>` from
-//! the [`crate::models::indexers`] table.
+//! The [`Indexer`] trait, the [`Release`] / [`SearchQuery`] /
+//! [`IndexerCaps`] data model, and pure-function helpers for the
+//! auto-search dedup pass and concurrent fan-out. The concrete
+//! `TorznabIndexer` impl lives in the `torznab/` submodule alongside
+//! the search-pipeline integration that populates
+//! `Vec<Arc<dyn Indexer>>` from the [`crate::models::indexers`] table.
 //!
 //! ## Why Nyaa stays out-of-band
 //!
@@ -264,9 +263,8 @@ pub trait Indexer: Send + Sync {
 
 /// Per-indexer search outcome. Surfaces partial failures so the
 /// auto-search inspector can show "AnimeTosho: timeout after 30s"
-/// alongside successful results from other indexers (plan
-/// "scoring inspector changes"). PR A defines the type; PR B's
-/// fan-out helper produces it.
+/// alongside successful results from other indexers; produced by the
+/// concurrent fan-out helper.
 #[derive(Debug)]
 pub struct IndexerSearchOutcome {
     pub indexer_id: i64,
@@ -290,11 +288,11 @@ pub struct IndexerSearchOutcome {
 /// search learns to fan out to indexers, it should NOT dedup across
 /// indexers — one row per `(indexer, infohash)` so the user can
 /// pick a preferred tracker. That path is intentionally Nyaa-only
-/// in v1.5.0 (PR B); the per-tracker-row behavior lands in PR C
-/// alongside the seed-rules wiring it depends on. The
-/// `merge_for_interactive_search` helper that previously lived
-/// here was removed in PR #107 round-2 review since it was dead
-/// code; PR C reintroduces it when there's a caller.
+/// for now; the per-tracker-row behavior lands alongside the
+/// seed-rules wiring it depends on. The `merge_for_interactive_search`
+/// helper that previously lived here was removed in PR #107 round-2
+/// review since it was dead code; it gets reintroduced when there's
+/// a caller.
 pub fn dedup_for_auto_search(releases: Vec<Release>) -> Vec<Release> {
     let mut by_key: HashMap<String, Release> = HashMap::new();
     for release in releases {
@@ -566,7 +564,7 @@ impl Release {
             upload_date: format_publish_date(self.publish_date),
             // PR #107 review fix #7: propagate the indexer_id so
             // grabbed_torrents.indexer_id can be populated at grab
-            // time. Without this, the FK column added in PR A is
+            // time. Without this, the indexer_id FK column would be
             // dormant — nothing surfaces the source indexer to the
             // grab path.
             indexer_id: Some(indexer_id),
@@ -691,7 +689,7 @@ fn format_publish_date(unix_ts: i64) -> String {
 ///
 /// Per-source attribution is stamped via `Release::to_rss_item`
 /// so each item carries `RssSource::Indexer { id, name, kind }`
-/// for the grab-time client routing in PR 5. The indexer's own
+/// for the grab-time client routing in a later change. The indexer's own
 /// `min_seeders` filter runs inside `search()` before we see
 /// the releases, so a low-seeder release leaking into the
 /// fan-out is wasted work (matches the search-path behavior).

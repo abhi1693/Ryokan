@@ -258,7 +258,7 @@ pub async fn recent_decisions(
 
 /// Cursor-paginated variant of [`recent_decisions`]. Pass
 /// `Some(before_id)` to fetch entries with `id < before_id`. Used by
-/// the System → RSS tab's "Older →" pagination link (Phase 7 PR F).
+/// the System → RSS tab's "Older →" pagination link.
 /// Same row shape as `recent_decisions` so the template renders both
 /// the first-page and the older-page paths through one loop.
 pub async fn recent_decisions_paginated(

@@ -255,7 +255,7 @@
     padding: 2px 8px;
 }
 
-/* Phase 7 PR G — source kind badges for the Release Group Source Map.
+/* source kind badges for the Release Group Source Map.
  * Re-uses the .log-badge typography (uppercase, monospace-y) but tints
  * each source kind with the same palette the rest of the app uses for
  * source signals (BD = mauve / accent, WEB = green, DVD = orange,

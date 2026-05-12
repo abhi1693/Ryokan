@@ -550,7 +550,7 @@ pub async fn series_detail(
 
     let all_monitored = ep_total > 0 && monitored_count >= ep_total;
     let allow_upgrades = db_series.as_ref().map(|s| s.allow_upgrades).unwrap_or(true);
-    // PR E — default off (untracked series have no upgrade sweep
+    // default off (untracked series have no upgrade sweep
     // anyway, so the default is moot for the .unwrap_or() branch).
     let allow_pt_upgrades = db_series
         .as_ref()

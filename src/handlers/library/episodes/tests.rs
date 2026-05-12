@@ -230,7 +230,7 @@ async fn d2_d3_cancel_pending_deletes_from_client() {
     eprintln!("D2/D3 integration verified");
 }
 
-// ─── CI-gated episode-handler coverage (PR 7) ────────────────
+// ─── CI-gated episode-handler coverage ────────────────
 //
 // Directly-called handler tests that don't need a live
 // download client. Complements the env-gated d1/d2/d3 tests

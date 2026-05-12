@@ -258,7 +258,7 @@ async fn reconcile_rename_adds_new_column_on_fresh_install() {
     assert_eq!(uploader, "", "fresh install starts with the default empty");
 }
 
-// ─── Idempotency + schema shape (PR 6) ──────────────────────────
+// ─── Idempotency + schema shape ──────────────────────────
 
 async fn fresh_migrated_pool() -> SqlitePool {
     let pool = SqlitePool::connect("sqlite::memory:")
@@ -680,7 +680,7 @@ async fn reconcile_typed_rename_adds_integer_column_on_fresh_install() {
     );
 }
 
-// ─── PR 6 expansion (2026-04-28) ────────────────────────────────────
+// ─── expansion (2026-04-28) ────────────────────────────────────
 // Added to bring migrations test density up to the planned ~40 mark.
 // Categories:
 //   • Per-table-group existence (cache, seed, external-account tables)

@@ -6,21 +6,21 @@
 //! Nyaa stays out-of-band per plan decision #1 — it never gets a
 //! row here.
 //!
-//! PR A scope: schema + CRUD only. PR B adds the `TorznabIndexer`
-//! trait impl that consumes these rows and the caps-probe path that
-//! populates `caps_json` / `caps_refreshed_at`. PR C wires
-//! `seed_ratio` / `seed_time_minutes` / `min_seeders` into the
-//! `DownloadClient` trait's per-torrent seed rules. Nothing else
-//! in PR A reads these columns yet — they're populated by the
-//! Settings form and lie dormant until later PRs hook in.
+//! Initial scope was schema + CRUD only; the `TorznabIndexer` trait
+//! impl that consumes these rows, the caps-probe path that populates
+//! `caps_json` / `caps_refreshed_at`, and the wiring of `seed_ratio` /
+//! `seed_time_minutes` / `min_seeders` into the `DownloadClient`
+//! trait's per-torrent seed rules all landed in follow-up changes.
+//! Some columns are still written by the Settings form ahead of the
+//! code that reads them.
 
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
 /// Indexer protocol kind. The wire format for torznab and newznab
 /// is identical; the value distinguishes them only for category-
-/// mapping (BitTorrent vs NZB) and download-client routing once
-/// PR F's torrent-vs-usenet split lands. Kept as `String` at the
+/// mapping (BitTorrent vs NZB) and download-client routing under
+/// the torrent-vs-usenet split. Kept as `String` at the
 /// boundary because `kind` is read directly into the row struct;
 /// callers that need to branch on it can `.as_str()` and match.
 pub const KIND_TORZNAB: &str = "torznab";
@@ -70,8 +70,8 @@ pub struct Indexer {
     /// alongside a fresh error.
     pub rss_last_item_count: i32,
     /// Cached caps response body. Empty until the first probe
-    /// succeeds (PR B). Read with a 7-day TTL — stale caps trigger
-    /// a transparent re-fetch on next read.
+    /// succeeds. Read with a 7-day TTL — stale caps trigger a
+    /// transparent re-fetch on next read.
     pub caps_json: String,
     pub caps_refreshed_at: Option<i64>,
     pub created_at: i64,
@@ -316,9 +316,8 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 }
 
 /// Update the cached caps response and bump `caps_refreshed_at` to
-/// the current Unix timestamp. Called by PR B's caps probe after a
-/// successful `t=caps` fetch. PR A defines the helper so the column
-/// shape is decided up front.
+/// the current Unix timestamp. Called by the caps probe after a
+/// successful `t=caps` fetch.
 pub async fn update_caps(db: &SqlitePool, id: i64, caps_json: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE indexers SET caps_json = ?, caps_refreshed_at = strftime('%s','now'), \

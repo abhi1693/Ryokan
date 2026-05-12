@@ -524,7 +524,7 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 /// `indexer_id` of `None` means the grab came from Nyaa (the v1.4
 /// default); the column stays NULL. `respect_seed_rules` flips
 /// to true only when the indexer had real seed rules and the
-/// client honored them — the delete-path skip in PR C and the
+/// client honored them — the delete-path skip and the
 /// upgrade sweep's per-indexer rules in later PRs both key off
 /// this flag.
 pub async fn set_indexer_attribution(

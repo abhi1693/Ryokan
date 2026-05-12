@@ -273,7 +273,7 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 /// `score_format`) and the FK-on-`series` `synced_from_external_
 /// account_id` (the ON DELETE SET NULL on the FK does this automatically
 /// once the account row is gone). Custom-list memberships will get
-/// the same treatment in PR D.
+/// the same treatment in a follow-up.
 ///
 /// Without the user_score wipe, an unlink → re-link-different-provider
 /// flow would render every prior AL POINT_100 score as a MAL POINT_10

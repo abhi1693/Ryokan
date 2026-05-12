@@ -12,10 +12,10 @@ use crate::handlers;
 use crate::test_support::{build_test_app_state, in_memory_pool};
 
 /// The shared `handler_router` helper only mounts `/login` and
-/// `/setup` in the public group (they're all PR 0 needed). This
-/// lightweight variant adds `/forgot-password` so the recovery page
-/// can be exercised without bloating the shared helper. Later PRs
-/// can promote this route back into the shared `handler_router` if
+/// `/setup` in the public group. This lightweight variant adds
+/// `/forgot-password` so the recovery page can be exercised without
+/// bloating the shared helper. A future change can promote this
+/// route back into the shared `handler_router` if
 /// more tests need it.
 fn router_with_forgot_password(state: crate::AppState) -> axum::Router {
     use axum::Router;

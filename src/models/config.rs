@@ -86,7 +86,7 @@ pub struct Config {
     /// from `rss_enabled`, which retains its v1 semantics
     /// (Nyaa-only flag) — see plan decision #8.
     pub rss_master_enabled: bool,
-    /// Phase 7 PR E — opt-out for Nyaa-specific RSS polling without
+    /// opt-out for Nyaa-specific RSS polling without
     /// disabling indexer-RSS (torznab/newznab) feeds. The user has
     /// other indexers configured and only wants those polled —
     /// before this flag, the only way to skip Nyaa was to disable

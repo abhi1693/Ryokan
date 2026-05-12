@@ -1427,9 +1427,10 @@ mod tests {
         assert!(pinned.is_none());
     }
 
-    /// PR G follow-up — Nyaa surfaces torrent magnets, so pinning to
-    /// a SAB client would resolve at grab time and immediately fail
-    /// at SAB's `mode=addurl`. Reject the save with a clear toast.
+    /// Nyaa surfaces torrent magnets, so pinning the Nyaa download
+    /// client to a SAB (usenet) client would resolve at grab time and
+    /// immediately fail at SAB's `mode=addurl`. Reject the save with a
+    /// clear toast.
     #[tokio::test]
     async fn nyaa_pin_to_sab_client_is_rejected() {
         let db = in_memory_pool().await;

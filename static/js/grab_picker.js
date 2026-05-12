@@ -1,20 +1,20 @@
-// grab_picker.js — interactive file-picker modal (issue #83, PR B).
+// grab_picker.js — interactive file-picker modal (issue #83).
 //
 // Exposes `window.openGrabPicker(url, ctx)` for callers that want to
 // open a pending-grab preview and let the user pick files before the
 // torrent starts downloading. The modal lives in search.html; the JS
-// polls the PR A endpoints (POST /api/grab/preview, GET
+// polls the preview/poll/confirm endpoints (POST /api/grab/preview, GET
 // /api/grab/preview/{id}, POST /api/grab/heartbeat/{id}, POST
 // /api/grab/confirm) to drive the lifecycle.
 //
-// Scope notes (PR B):
+// Scope notes:
 //   * Heuristic pre-uncheck runs client-side from filename patterns —
 //     cheap, no server round-trip, and matches the plan's
 //     `pick_unwanted_file_indices` inversion (decision #5). The
 //     heuristic stays conservative (NCOP/NCED/sample/readme/nfo) so
 //     it never pre-unchecks something the user clearly wanted.
 //   * No "Wait another 30s" / "Grab with defaults" dialog on metadata
-//     timeout — deferred to PR C (needs a retry endpoint + a
+//     timeout — deferred (needs a retry endpoint + a
 //     commit-with-empty-file-list path). Error state surfaces the
 //     message and a Close button; the TTL sweep handles cleanup if
 //     metadata never arrives.
@@ -22,7 +22,7 @@
 //     X-in-corner stops the heartbeat; the sweep auto-commits with
 //     all files wanted within ~2 minutes of walkaway.
 //   * Same-hash dedup's "show current priorities" path (decision #6)
-//     is deferred to PR C — PR B's dedup only covers the Tab 1 / Tab 2
+//     is deferred — the dedup only covers the Tab 1 / Tab 2
 //     concurrency case via the server-side pre-flight check.
 
 (function () {
@@ -59,7 +59,7 @@
     // server's `services::nyaa::extract_hash` but client-side so we
     // can pass it verbatim to /api/grab/preview (required field). For
     // `.torrent` HTTP URLs we return empty — the server re-derives on
-    // its end, and PR B doesn't need to hash .torrent files in-browser.
+    // its end, and the browser side doesn't need to hash .torrent files in-browser.
     function extractInfoHash(url) {
         if (!url) return '';
         const m = /xt=urn:btih:([a-fA-F0-9]{40})/.exec(url);
@@ -396,8 +396,8 @@
             .then(data => {
                 if (!data || !session) return;
                 if (data.status === 'error') {
-                    // Terminal for PR B — the two-button retry dialog
-                    // needs backend endpoints that aren't in PR A.
+                    // Terminal for now — the two-button retry dialog
+                    // needs backend endpoints that aren't implemented yet.
                     // User's action is Close; sweep handles cleanup.
                     renderStatus(data.error || 'Metadata fetch failed', {
                         error: true,

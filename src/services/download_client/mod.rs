@@ -600,7 +600,7 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 &row.password,
                 &row.label,
             ))),
-            // PR G — SAB takes (url, username, api_key, category).
+            // SAB takes (url, username, api_key, category).
             // The `download_clients.password` column carries the SAB
             // API key for usenet rows (SAB has no per-user auth at
             // the API layer; the API key is the only credential).
@@ -999,8 +999,8 @@ mod tests {
 
     #[test]
     fn download_item_wire_shape_carries_state_kind() {
-        // Regression for the PR C badge refactor: state_kind used to
-        // be `#[serde(skip)]` and the JS state-label map keyed off
+        // Regression for the download-state badge refactor: state_kind
+        // used to be `#[serde(skip)]` and the JS state-label map keyed off
         // the client-native `state` string. After switching to the
         // kebab enum on both sides, state_kind MUST appear on the
         // wire or the Downloads queue page renders every row with

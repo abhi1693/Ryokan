@@ -2096,8 +2096,8 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .ok();
 
     // Issue #28 — torznab/newznab indexer registry. Foundation
-    // for v1.5's multi-indexer support; PR B wires the actual
-    // TorznabIndexer impl. Schema mirrors the plan doc:
+    // for v1.5's multi-indexer support; the TorznabIndexer impl
+    // that consumes these rows lands alongside it. Schema:
     //   - `kind` is `'torznab' | 'newznab'`. Nyaa stays out-of-band
     //     (decision #1) and never gets a row here.
     //   - `priority` follows Sonarr's convention (lower = preferred,
@@ -2168,7 +2168,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // Issue #28 — `grabbed_torrents.respect_seed_rules` flags
     // grabs whose torrents have per-torrent seed-ratio / seed-time
-    // rules applied at add time (PR C). Delete paths (manual delete,
+    // rules applied at add time. Delete paths (manual delete,
     // upgrade-replacement) skip torrents with this flag so the
     // client can finish seeding to the per-tracker target before
     // teardown. Nyaa grabs default 0; PT grabs default 1.
@@ -2197,11 +2197,11 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Issue #28 — per-series PT-upgrade opt-in (decision: PR E
-    // wires the UI + sweep filter; column lands here so PR B's
-    // search code can already filter on it without a chained
-    // migration in PR E). Default FALSE so a user upgrading from
-    // 1.4.x sees no change in behavior.
+    // Issue #28 — per-series PT-upgrade opt-in. The UI + sweep
+    // filter land in a later change; the column lands here up front
+    // so the search code can filter on it without a chained
+    // migration. Default FALSE so a user upgrading from 1.4.x sees
+    // no change in behavior.
     sqlx::query("ALTER TABLE series ADD COLUMN allow_pt_upgrades INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
@@ -2209,7 +2209,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // Issue #28 — autobrr push endpoint API key. Empty string
     // until the user generates one via Settings → Connections →
-    // autobrr (PR D). Empty disables the webhook entirely; PR D's
+    // autobrr. Empty disables the webhook entirely; the
     // `/api/webhook/autobrr` middleware rejects when the key is
     // empty so a fresh install doesn't accept anonymous pushes.
     sqlx::query("ALTER TABLE config ADD COLUMN autobrr_api_key TEXT NOT NULL DEFAULT ''")
@@ -2543,7 +2543,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Phase 7 PR E — Nyaa-specific RSS opt-out. Default 0 so existing
+    // Nyaa-specific RSS opt-out. Default 0 so existing
     // installs keep polling Nyaa; user flips on when they only want
     // indexer-RSS / direct-RSS feeds polled. Distinct from
     // `rss_master_enabled` (which kills the whole sync) and
