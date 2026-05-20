@@ -274,7 +274,13 @@ anitomy = "0.2"
 # `cargo build` / `cargo test` (without the flag) don't pull it, so
 # prod and CI stay unaffected. Listed here rather than in
 # [dev-dependencies] because Cargo doesn't allow optional dev-deps.
-fantoccini = { version = "0.22", optional = true }
+# default-features = false + rustls-tls swaps fantoccini's default
+# native-tls stack (hyper-tls -> native-tls -> openssl) for rustls.
+# The rest of Ryokan already runs on rustls+aws-lc, so this prunes
+# `openssl` (and `native-tls`) from the lock at the source instead of
+# carrying a phantom advisory only the browser-e2e feature could ever
+# build (same approach as the sqlx default-features opt-out above).
+fantoccini = { version = "0.22", optional = true, default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 # Used only by the env-gated live_smoke tests for the DownloadClient
