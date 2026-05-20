@@ -1001,6 +1001,44 @@ mod tests {
         assert_eq!(states[1].1, "removed", "latest row flips to removed");
     }
 
+    /// Regression: an in-flight grab must surface a non-empty `state`
+    /// through `get_for_series`. `record_grab` upserts the current tag as
+    /// `state = 'grabbed'`; the series-page handler clones that into the
+    /// episode's `quality_state` (the grab-tag branch in
+    /// `handlers/library/pages`), and `series.js`'s poll loop clears the
+    /// progress bar whenever `quality_state` comes back empty. If the
+    /// loader's SELECT ever dropped the `state` column or mis-keyed the
+    /// row by episode, an actively-downloading episode would flash to
+    /// "Missing" mid-download. See the PR #170 review + fix 863a0b8.
+    #[tokio::test]
+    async fn grabbed_episode_has_nonempty_state_via_loader() {
+        let db = SqlitePool::connect("sqlite::memory:").await.unwrap();
+        crate::models::migrate(&db).await.unwrap();
+        let sid = seed_series(&db).await;
+
+        let cls = synthetic_classification(Source::Web, Resolution::R1080p);
+        record_grab(
+            &db,
+            sid,
+            3,
+            &cls,
+            "synthetic-release-token",
+            "synthetic-group",
+            1_000_000,
+            false,
+        )
+        .await
+        .expect("record_grab");
+
+        let tags = get_for_series(&db, sid).await.expect("get_for_series");
+        let tag = tags.get(&3).expect("episode 3 tag present after grab");
+        assert_eq!(
+            tag.state, "grabbed",
+            "in-flight grab must round-trip with a non-empty state; an empty \
+             quality_state flashes the series-page progress bar to Missing"
+        );
+    }
+
     /// Companion to `mark_grab_history_removed_flips_latest_completed_row`
     /// — pins the same `state IN ('grabbed', 'completed')` filter
     /// broadening on the bulk-removal path. Earlier the WHERE clause

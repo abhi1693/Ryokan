@@ -780,7 +780,9 @@ pub async fn set_allow_upgrades(
     .await;
     // HTMX checkboxes (#166): the visual state is already what the
     // user clicked; just acknowledge with empty 200 + `hx-swap="none"`
-    // on the input. Reserve the JSON path for programmatic callers.
+    // on the input. The non-HTMX branch returns JSON; note the request
+    // body is form-encoded either way (this is `Form<T>`, so an
+    // `application/json` POST would 415, not reach the JSON branch).
     if is_htmx {
         Ok(StatusCode::OK.into_response())
     } else {
