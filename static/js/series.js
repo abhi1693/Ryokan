@@ -404,6 +404,20 @@ function patchEpisodeRows(episodes, force) {
                 }
                 qualityCell.innerHTML = DL_PROGRESS_HTML_ZERO;
             }
+        } else if (ep.quality_state === 'completed') {
+            // Post-processing-off: torrent finished and the lightweight
+            // sweep flipped the tag to 'completed', but the file isn't
+            // in media_root (and won't be — post-proc is off). Mirror
+            // the server template's `ep.downloaded` branch (line 357 of
+            // series.html) which renders ep-row-have + the quality tag
+            // even though on_disk is false. Without this branch, a
+            // completed row falls through to the missing fallback below
+            // and flashes back to "Missing" mid-poll.
+            row.classList.remove('ep-row-missing', 'ep-row-queued');
+            row.classList.add('ep-row-have');
+            if (statusCell) statusCell.innerHTML = STATUS_ICON_HAVE;
+            qualityCell.innerHTML = `<span class="tag tag-quality">${escHtml(ep.quality || 'UNKNOWN')}</span>`;
+            delete qualityCell.dataset.originalHtml;
         } else if (ep.quality_state === 'failed') {
             row.classList.remove('ep-row-queued', 'ep-row-have');
             row.classList.add('ep-row-missing');
@@ -411,16 +425,21 @@ function patchEpisodeRows(episodes, force) {
             qualityCell.innerHTML = `<span class="tag tag-quality-failed">${escHtml(ep.quality || '')} ✗</span>`;
             delete qualityCell.dataset.originalHtml;
         } else {
-            // Neither on disk, grabbed, nor failed — missing.
+            // Neither on disk, grabbed, completed, nor failed — missing.
+            // The tag was cleared server-side (cancel-pending, the 30s
+            // stale-grab reconcile in episode_download_progress when a
+            // torrent vanished from the download client externally, or
+            // a downloads-page delete on a queued grab). Clear the
+            // progress bar HTML unconditionally — the prior `if (force)`
+            // gate left an orphaned 0% bar layered under the
+            // ep-row-missing class until the next page refresh, which
+            // is the bug the user reports as "stays at 0% after
+            // deleting in qBit / on the downloads page."
             row.classList.remove('ep-row-have', 'ep-row-queued');
             row.classList.add('ep-row-missing');
             if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
-            // Don't blow away a stale progress bar unless force is set:
-            // post-processing may simply not have run yet.
-            if (force) {
-                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
-                delete qualityCell.dataset.originalHtml;
-            }
+            qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+            delete qualityCell.dataset.originalHtml;
         }
     }
 }

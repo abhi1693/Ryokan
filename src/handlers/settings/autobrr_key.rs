@@ -1,4 +1,4 @@
-//! Issue #28 PR D — autobrr API key rotation.
+//! Issue #28 — autobrr API key rotation.
 //!
 //! `POST /settings/autobrr/regenerate-key` mints a fresh
 //! 32-byte URL-safe random key, writes it onto the singleton

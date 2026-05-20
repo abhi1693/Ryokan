@@ -68,19 +68,6 @@ pub async fn upsert_for_series(
     tx.commit().await
 }
 
-/// Delete every airing for a series. Used when the user removes a
-/// series via a path that doesn't go through the FK cascade
-/// (e.g. external_sync removal pruning); a no-op if FK already
-/// fired.
-#[allow(dead_code)]
-pub async fn delete_for_series(db: &SqlitePool, series_id: i64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM episode_airings WHERE series_id = ?")
-        .bind(series_id)
-        .execute(db)
-        .await?;
-    Ok(result.rows_affected())
-}
-
 /// Drop airings whose `airing_at` is more than `older_than_secs`
 /// seconds in the past. Called from the refresh task to keep the
 /// table from growing unbounded — there's no value in retaining

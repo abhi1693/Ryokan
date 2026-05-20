@@ -1,5 +1,4 @@
-// Page lifecycle helper for the hx-boost rollout (Phase B per
-// /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md).
+// Page lifecycle helper for the hx-boost rollout (Phase B).
 //
 // Why this exists: per-page scripts that started a `setInterval` at
 // module scope (downloads.js, system.js) work fine on a fresh

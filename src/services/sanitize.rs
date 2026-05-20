@@ -1,4 +1,4 @@
-//! `--sanitize-db-for-debug` CLI helper (issue #62 PR A).
+//! `--sanitize-db-for-debug` CLI helper (issue #62).
 //!
 //! Produces a sanitized copy of the SQLite database with every token
 //! and password column blanked out so a user can safely paste their
@@ -100,7 +100,7 @@ pub async fn run_sanitize(live_db: &Path, output: &Path) -> Result<SanitizeSumma
         .map_err(|e| format!("migrate sanitized copy: {e}"))?;
 
     let sentinel: &[u8] = SANITIZED_SENTINEL;
-    // `external_accounts` tokens — the primary #62 PR A concern.
+    // `external_accounts` tokens — the primary #62 concern.
     let ext_rows = sqlx::query(
         "UPDATE external_accounts
             SET access_token_encrypted = ?,

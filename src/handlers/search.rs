@@ -65,7 +65,7 @@ fn default_page() -> i32 {
 #[derive(Deserialize, utoipa::ToSchema)]
 pub struct GrabForm {
     url: String,
-    /// Optional release title — used for library linkage (#1.3.0 plan
+    /// Optional release title — used for library linkage (v1.3.0 plan
     /// item 6d). When supplied, the grab handler tries to match it
     /// against an existing library series; on match, the grab lands
     /// in `grabbed_torrents` linked to that series and (for batches)
@@ -203,7 +203,7 @@ pub async fn search_submit(
         }
     };
 
-    // #1.3.0 — augment the base-score breakdown with Custom Format
+    // v1.3.0 — augment the base-score breakdown with Custom Format
     // contributions so the search-page expander shows both the base
     // rules and the CF deltas. SeaDex specs never fire here (no
     // series context = empty hash set), which is deliberate: the

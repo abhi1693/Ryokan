@@ -1,5 +1,5 @@
 //! Wiremock coverage for `services::rss::feed::fetch_user_feed`
-//! (multi-rss PR 3, Option A). The Nyaa-direct path has no
+//! (Multi-RSS, Option A). The Nyaa-direct path has no
 //! integration test (it hits nyaa.si live in dev / RSS sync); the
 //! user-feed path is the new generic-RSS surface and needs one.
 //!

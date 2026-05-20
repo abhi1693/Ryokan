@@ -1,5 +1,4 @@
-//! Shared response helpers — Phase C of the hx-boost rollout
-//! (per /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md).
+//! Shared response helpers — Phase C of the hx-boost rollout plan.
 //!
 //! ## Why this module exists
 //!

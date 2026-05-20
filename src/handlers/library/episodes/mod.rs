@@ -414,7 +414,7 @@ pub async fn delete_episode_file(
                     if grab.hash.is_empty() {
                         continue;
                     }
-                    // Issue #28 PR C — skip the client-side
+                    // Issue #28 — skip the client-side
                     // delete for grabs from a PT indexer with
                     // seed rules in effect; the client owns
                     // when seeding ends. The grab row still
@@ -968,7 +968,7 @@ pub async fn mark_episode_failed(
             if old.hash.is_empty() {
                 continue;
             }
-            // Issue #28 PR C — preserve PT seed rules across
+            // Issue #28 — preserve PT seed rules across
             // episode-replace. The old torrent has already
             // imported successfully and is seeding to its
             // per-tracker ratio/time policy; deleting it

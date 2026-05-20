@@ -1,4 +1,4 @@
-//! Issue #28 PR C — `set_seed_rules` against Transmission's
+//! Issue #28 — `set_seed_rules` against Transmission's
 //! `torrent-set` RPC.
 //!
 //! Wire shape: `torrent-set` with `ids: [hash]` plus

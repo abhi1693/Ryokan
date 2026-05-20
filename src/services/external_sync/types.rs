@@ -84,7 +84,7 @@ pub struct SyncEntry {
     pub status: NormalizedStatus,
     /// Episodes the user has marked watched. **Reserved**: the
     /// current merge step doesn't write this to the `series` row
-    /// (PR B is a "what's on the list" import, not a "watched-state
+    /// (this is a "what's on the list" import, not a "watched-state
     /// mirror"). Carried through the abstraction so a follow-up PR
     /// can light up the user-progress sync without re-plumbing the
     /// fetcher.

@@ -18,13 +18,13 @@ struct IndexTemplate {
     page: String,
     library: Vec<series::Series>,
     title_language: String,
-    /// #62 PR C — the linked external account's `score_format`,
+    /// #62 — the linked external account's `score_format`,
     /// used by `Series::user_score_display(...)` to render per-row
     /// "You: X" badges. Empty string when no account is linked, in
     /// which case `user_score_display` always returns `None` and
     /// the template renders no badge.
     score_format: String,
-    /// #62 PR D — distinct AL custom-list names across the whole
+    /// #62 — distinct AL custom-list names across the whole
     /// library. Powers the filter-dropdown next to the search box.
     /// Empty when no memberships have synced yet, in which case the
     /// template hides the dropdown entirely.
@@ -38,7 +38,7 @@ struct IndexTemplate {
     /// Echoed back so the input's `value` persists across
     /// navigations.
     search_query: String,
-    /// #62 PR E — `recent` (default) or `score`. The handler has
+    /// #62 — `recent` (default) or `score`. The handler has
     /// already applied the sort to `library`; this field drives the
     /// dropdown's selected-option state.
     sort_value: String,
@@ -98,11 +98,11 @@ struct SeriesTemplate {
     #[allow(dead_code)]
     monitor_mode: String,
     monitor_mode_label: String,
-    /// #62 PR B — `true` when the user has manually pinned monitor_mode
+    /// #62 — `true` when the user has manually pinned monitor_mode
     /// through the dropdown (sync's merge step skips the row). Drives
     /// a small "pinned" hint next to the dropdown.
     monitor_mode_manual_override: bool,
-    /// #62 PR B — `true` when an external account is linked AND this
+    /// #62 — `true` when an external account is linked AND this
     /// series carries a `synced_from_external_account_id`. Gates the
     /// "Sync from AL/MAL" dropdown option; for manually-added series
     /// not on the user's list, the option doesn't make sense.
@@ -111,19 +111,19 @@ struct SeriesTemplate {
     /// so the user sees provider-specific copy. Empty when no account
     /// is linked.
     sync_provider_label: String,
-    /// #62 PR B — value the dropdown should treat as "selected" so
+    /// #62 — value the dropdown should treat as "selected" so
     /// only one option highlights. Equals `"sync"` when the series
     /// is following the external account (sync-tracked + override
     /// cleared); otherwise equals `monitor_mode`.
     monitor_mode_select_value: String,
-    /// #62 PR C — pre-rendered "You: X" badge for the detail page,
+    /// #62 — pre-rendered "You: X" badge for the detail page,
     /// formatted per the linked account's `score_format`. `None`
     /// when no account is linked, the user hasn't rated this
     /// series, or the score is the unrated sentinel. The variant
     /// (Text vs. Smiley) drives whether the template renders a
     /// string or an inline SVG outline face.
     user_score_display: Option<crate::services::user_score::FormattedUserScore>,
-    /// #62 PR D — AL custom-list names this series belongs to.
+    /// #62 — AL custom-list names this series belongs to.
     /// Sorted alphabetically by the model layer. Empty when no
     /// memberships are recorded (no account linked, or sync hasn't
     /// found this series in any custom list); the template hides
@@ -134,7 +134,7 @@ struct SeriesTemplate {
     /// Phase 4: series-level upgrade opt-in. Rendered as a checkbox on the
     /// series detail page; toggled via POST /api/library/allow-upgrades.
     allow_upgrades: bool,
-    /// Issue #28 PR E — per-series PT upgrade opt-in. Default off. The
+    /// Issue #28 — per-series PT upgrade opt-in. Default off. The
     /// upgrade sweep skips a candidate when its source indexer is private
     /// and this is false. Toggled via POST /api/library/allow-pt-upgrades.
     /// Rendered inside an "Advanced" collapsible since most users won't
@@ -249,6 +249,13 @@ pub struct AnilistSearchQuery {
     /// AL-first with MAL only on AL failure.
     #[serde(default)]
     pub source: Option<String>,
+    /// Title-language hint for the HTMX partial response. The browser
+    /// reads `localStorage.titleLanguage` (set by the title-switcher) and
+    /// forwards it via `hx-vals` so the server-rendered card picks the
+    /// same title the rest of the page is using; `None` falls back to
+    /// the config-level `title_language`. Ignored on the JSON path.
+    #[serde(default)]
+    pub lang: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -304,7 +311,7 @@ pub struct SetAllowUpgradesForm {
     allow: bool,
 }
 
-/// Issue #28 PR E — per-series PT upgrade opt-in form. Same shape
+/// Issue #28 — per-series PT upgrade opt-in form. Same shape
 /// as [`SetAllowUpgradesForm`] but toggles the second-axis flag
 /// (`series.allow_pt_upgrades`) that gates whether the upgrade
 /// sweep is allowed to grab a private-tracker release for this

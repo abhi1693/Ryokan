@@ -939,8 +939,8 @@
     display: inline-block;
     width: 12px;
     height: 12px;
-    border: 2px solid rgba(125, 174, 211, 0.25);
-    border-top-color: var(--blue);
+    border: 2px solid rgba(203, 166, 247, 0.25);
+    border-top-color: var(--accent);
     border-radius: 50%;
     animation: spin-ring 0.7s linear infinite;
 }
@@ -1121,6 +1121,69 @@
 .btn-mark-failed:hover { background: rgba(211, 125, 125, 0.2); }
 
 .btn-mark-failed:disabled { opacity: 0.5; cursor: default; }
+
+/* Centered spinner + hint text for the interactive-search modal's two
+   loading states (per-episode search at series_interactive_search.js
+   ::openInteractiveSearch, batch at ::openInteractiveBatchSearch).
+   Larger spinner than the per-row `.ep-search-spinner` since this
+   replaces the whole modal body. */
+.isearch-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 48px 24px;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.isearch-loading-spinner {
+    width: 32px;
+    height: 32px;
+    border: 3px solid rgba(203, 166, 247, 0.25);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin-ring 0.7s linear infinite;
+}
+
+/* Empty-state copy ("No results found." / "No batch releases found.")
+   for the interactive-search modal body. Matches the centering +
+   muted color the previous JS string template used inline. */
+.isearch-empty {
+    text-align: center;
+    color: var(--text-dim);
+    padding: 32px;
+}
+
+/* Inline save-status pill returned by the HTMX-aware
+   `set_search_overrides` handler. Replaces the JS-driven status text
+   that lived at `series_config.js::saveSeriesSearchOverrides`. The OK
+   variant auto-fades after a beat so a stale "Saved" doesn't sit on
+   the page indefinitely; the error variant stays visible until the
+   user retries (the next swap replaces it). */
+.save-status-pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+.save-status-pill-ok {
+    background: rgba(125, 211, 137, 0.15);
+    color: var(--green);
+    animation: save-status-pill-fade 2.5s linear forwards;
+}
+
+.save-status-pill-err {
+    background: rgba(211, 125, 125, 0.15);
+    color: var(--red);
+}
+
+@keyframes save-status-pill-fade {
+    0%, 60% { opacity: 1; }
+    100% { opacity: 0; }
+}
 
 .interactive-search-table {
     width: 100%;

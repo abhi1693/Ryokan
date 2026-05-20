@@ -4,7 +4,7 @@
 //! when a modal's heartbeat lapses, the torrent is still a user-
 //! intended download (they hit Grab), so we resume it with every
 //! file marked wanted rather than leaving it paused forever. The
-//! full grab-row-write + sibling auto-expand chain is still PR C
+//! full grab-row-write + sibling auto-expand chain is a follow-up
 //! scope — this sweep gets the files downloading, but library
 //! attribution (the `grabbed_torrents` row wiring) is a separate
 //! pass.
@@ -170,7 +170,7 @@ async fn auto_commit_row(state: &AppState, row: &pending_grabs::PendingGrab) {
         return;
     }
 
-    // Library attribution (PR C). Walkaway means the user got every
+    // Library attribution. Walkaway means the user got every
     // file wanted, so the full file list is passed to auto-expand —
     // unlike the confirm path which passes only the user-selected
     // subset. Failures inside `commit_grab_and_expand` are logged;

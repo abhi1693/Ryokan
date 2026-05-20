@@ -88,7 +88,7 @@ use services::{
         handlers::settings::custom_formats::settings_custom_formats_reset_defaults,
         handlers::settings::custom_formats::settings_custom_formats_export,
         handlers::settings::custom_formats::settings_custom_formats_test,
-        // Settings — Indexers (issue #28 PR B)
+        // Settings — Indexers (issue #28)
         handlers::settings::indexers::settings_indexers_upsert,
         handlers::settings::indexers::settings_indexers_delete,
         // Settings — Download clients (multi-client refactor)
@@ -101,9 +101,9 @@ use services::{
         handlers::settings::download_clients::settings_download_clients_add_form,
         handlers::settings::download_clients::settings_download_clients_status,
         handlers::settings::download_clients::settings_indexers_nyaa_pin,
-        // Settings — autobrr API key rotation (issue #28 PR D)
+        // Settings — autobrr API key rotation (issue #28)
         handlers::settings::autobrr_key::settings_autobrr_regenerate_key,
-        // Webhooks (issue #28 PR D)
+        // Webhooks (issue #28)
         handlers::webhook::autobrr::webhook_autobrr,
         handlers::system::api_logs_poll,
         handlers::system::api_logs_clear,
@@ -401,7 +401,7 @@ async fn main() {
         .await
         .expect("Failed to run migrations");
 
-    // #62 PR E — one-shot genre backfill from existing
+    // #62 — one-shot genre backfill from existing
     // series_metadata_cache rows so the library filter dropdown
     // lights up immediately on first boot after upgrade. Idempotent
     // via the `schema_migrations` ledger; subsequent boots are a
@@ -471,7 +471,7 @@ async fn main() {
     // runtime worker during startup.
     let _ = tokio::task::spawn_blocking(models::user::warm_timing_equalizer).await;
 
-    // Warm the AEAD encryption-key LazyLock (issue #62 PR A). Same
+    // Warm the AEAD encryption-key LazyLock (issue #62). Same
     // pattern as `warm_timing_equalizer`: pays the cold-start cost
     // (env-var parse, file read, possible first-run key generation
     // with a 0600 chmod) at boot rather than during the user's first
@@ -779,7 +779,7 @@ async fn main() {
             "/settings",
             get(handlers::settings::settings_page).post(handlers::settings::settings_submit),
         )
-        // Issue #129 Phase 1 completion — per-tab subform handlers.
+        // Issue #129 completion — per-tab subform handlers.
         // Each tab POSTs only its own fields to its dedicated route;
         // the legacy `/settings` POST above is the no-UI fallback for
         // any external bookmark or script still hitting the bulk
@@ -796,7 +796,7 @@ async fn main() {
             "/settings/integrations",
             post(handlers::settings::settings_integrations_submit),
         )
-        // Issue #62 PR A: AL + MAL OAuth endpoints. `start` GETs
+        // Issue #62: AL + MAL OAuth endpoints. `start` GETs
         // redirect the user to the provider; `submit` POSTs accept
         // the pasted token/code, validate, and persist via
         // `external_accounts::link`. `unlink` drops the current row.
@@ -1185,7 +1185,7 @@ async fn main() {
             handlers::radarr_compat::require_api_key,
         ));
 
-    // Issue #28 PR D — autobrr push webhook. Lives outside the
+    // Issue #28 — autobrr push webhook. Lives outside the
     // cookie-auth layer because autobrr authenticates via the
     // Ryokan-issued API key in `X-Api-Key` (or `?apikey=`).
     // Unlike the arr-compat shims, autobrr's check is inside the
@@ -2077,7 +2077,7 @@ async fn main() {
         });
     }
 
-    // Issue #62 PR B — watch-list sync. One of the supervised tasks.
+    // Issue #62 — watch-list sync. One of the supervised tasks.
     // Same minute-tick + minutes_since_last cadence pattern as
     // rss_sync (so a process restart respects the persisted
     // last-finished timestamp instead of forcing an immediate

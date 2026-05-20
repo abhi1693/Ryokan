@@ -1,4 +1,4 @@
-//! AL / MAL external-account linkage (issue #62 PR A).
+//! AL / MAL external-account linkage (issue #62).
 //!
 //! Persists OAuth credentials + per-list import preferences for the
 //! user's linked AniList or MyAnimeList account. Tokens are
@@ -56,13 +56,13 @@ pub struct ExternalAccount {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
-    /// #62 PR E — count of entries from the most recent sync that
+    /// #62 — count of entries from the most recent sync that
     /// couldn't be mapped MAL→AL via anibridge. Always 0 for AL
     /// accounts. Surfaces on the Settings → External Accounts card
     /// as a banner so the user can see which subset of their MAL
     /// list is sitting on the negated-id sentinel path.
     pub last_sync_deferred_count: i64,
-    /// #62 PR E — sticky flag set when the most recent sync tick
+    /// #62 — sticky flag set when the most recent sync tick
     /// failed with an auth-rejection error (AL 401/403, MAL
     /// refresh-token dead). Cleared on the next successful tick.
     /// Drives the Settings UI's "Re-link required" banner — the
@@ -273,7 +273,7 @@ pub async fn link(db: &SqlitePool, req: LinkRequest) -> Result<i64, String> {
 /// `score_format`) and the FK-on-`series` `synced_from_external_
 /// account_id` (the ON DELETE SET NULL on the FK does this automatically
 /// once the account row is gone). Custom-list memberships will get
-/// the same treatment in PR D.
+/// the same treatment in a follow-up.
 ///
 /// Without the user_score wipe, an unlink → re-link-different-provider
 /// flow would render every prior AL POINT_100 score as a MAL POINT_10
@@ -379,7 +379,7 @@ pub struct ImportPreferences {
     pub skip_already_watched: bool,
 }
 
-/// #62 PR E — record the count of MAL→AL mapping failures from
+/// #62 — record the count of MAL→AL mapping failures from
 /// the most recent sync. AL syncs always pass `0`. Read by the
 /// Settings → External Accounts page handler to render the
 /// "N series couldn't be mapped to AniList" banner.
@@ -397,7 +397,7 @@ pub async fn update_last_sync_deferred_count(
     Ok(())
 }
 
-/// #62 PR E — flip the auth-failure flag. Set to `true` from the
+/// #62 — flip the auth-failure flag. Set to `true` from the
 /// sync engine's auth-rejection branches (AL 401/403, MAL refresh
 /// dead); cleared back to `false` on the next successful tick.
 pub async fn update_last_sync_auth_failed(

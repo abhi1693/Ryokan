@@ -1,39 +1,13 @@
-// Series-level configuration controls: monitor mode, manual
-// classification override, allow-upgrades, allow-pt-upgrades,
-// per-series search overrides. Each is a small fetch wrapper around
-// the corresponding `/api/library/...` endpoint with optimistic UI
-// state + revert-on-error.
-
-function setMonitoring(mode) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const select = document.getElementById('monitor-mode');
-    const summary = document.getElementById('monitor-summary');
-    if (select) select.disabled = true;
-    if (summary) summary.textContent = 'Updating monitoring…';
-
-    fetch('/api/library/monitoring', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, monitor_mode: mode })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update monitoring');
-        return data;
-    })
-    .then(data => {
-        if (summary) summary.textContent = `${data.monitor_mode_label || mode} · ${data.monitored_count || 0} monitored`;
-        if (select) select.disabled = false;
-        // Reload to reflect per-episode monitoring changes since they depend on server-side logic
-        location.reload();
-    })
-    .catch(err => {
-        if (summary) summary.textContent = err.message || 'Failed to update monitoring';
-        if (select) select.disabled = false;
-    });
-}
+// Series-level configuration controls: manual classification override,
+// allow-upgrades, allow-pt-upgrades, per-series search overrides. Each
+// is a thin helper that builds the `hx-vals` payload for a declarative
+// `hx-post` on the corresponding `/api/library/...` endpoint.
+//
+// Issue #166 — `setMonitoring` was here too; it moved to declarative
+// `hx-post` + `hx-trigger="change"` on the `#monitor-mode` dropdown in
+// `templates/series.html`. The server returns `HX-Refresh: true` for
+// the HTMX branch so the page reloads after a mode change, equivalent
+// to the prior `location.reload()` call.
 
 var overrideTargetEpisode = null;
 
@@ -123,10 +97,21 @@ function closeManualOverride(event) {
     if (modal) modal.style.display = 'none';
 }
 
-function applyManualOverride() {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
+// Issue #166 — applyManualOverride / clearManualOverride / reclassifyEpisode
+// moved to declarative `hx-post` on the modal-footer buttons in
+// `templates/series.html`. The three helpers below build the form-
+// values payload at click time via `hx-vals='js:'`. The composite
+// dropdown key (`bluray_remux`, etc.) is unpacked here via
+// OVERRIDE_SOURCE_MAP rather than server-side so the existing source-
+// map (which doubles as the dropdown ↔ wire-shape mapping) doesn't
+// need a parallel Rust port.
+//
+// `overrideTargetEpisode` is set when the modal opens via
+// `openManualOverride` above. The helpers read it from module scope —
+// the modal closes before the request lands, so a stale value can't
+// race a fresh open: each open assigns the new value before the new
+// click could fire.
+function manualOverrideApplyVals() {
     const key = document.getElementById('override-source').value;
     // Defensive fallback: the dropdown can only produce keys that
     // exist in OVERRIDE_SOURCE_MAP, but a future refactor could pass
@@ -134,211 +119,43 @@ function applyManualOverride() {
     // default that actually exists) instead of `unknown` — the latter
     // would build `{source: 'Unknown'}` which the handler 400s on.
     const mapped = OVERRIDE_SOURCE_MAP[key] || OVERRIDE_SOURCE_MAP.bluray;
-    const resolution = document.getElementById('override-resolution').value;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Saving…';
-    fetch('/api/library/manual-override', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-            source: mapped.source,
-            resolution: resolution,
-            is_remux: mapped.is_remux,
-            is_bdmv: mapped.is_bdmv,
-            web_kind: mapped.web_kind,
-        })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to apply override');
-        return data;
-    })
-    .then(_ => { location.reload(); })
-    .catch(err => { if (status) status.textContent = err.message || 'Failed to apply override'; });
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+        source: mapped.source,
+        resolution: document.getElementById('override-resolution').value,
+        is_remux: mapped.is_remux,
+        is_bdmv: mapped.is_bdmv,
+        web_kind: mapped.web_kind,
+    };
 }
 
-function clearManualOverride() {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Clearing…';
-    fetch('/api/library/manual-override', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-            source: '',
-            resolution: '',
-            is_remux: false,
-            is_bdmv: false,
-            web_kind: '',
-        })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to clear override');
-        return data;
-    })
-    .then(_ => { location.reload(); })
-    .catch(err => { if (status) status.textContent = err.message || 'Failed to clear override'; });
+function manualOverrideClearVals() {
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+        source: '',
+        resolution: '',
+        is_remux: false,
+        is_bdmv: false,
+        web_kind: '',
+    };
 }
 
-// Ad-hoc trigger for the per-episode full-pipeline classifier.
-// Targets the same episode the modal is currently editing. Useful
-// after the user edits Release Groups or a custom format and wants
-// to see the new verdict without waiting up to 6h for the next
-// library-classify sweep.
-function reclassifyEpisode(btn) {
-    if (overrideTargetEpisode == null) return;
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const status = document.getElementById('override-status');
-    if (status) status.textContent = 'Re-classifying…';
-    if (btn) btn.disabled = true;
-    fetch('/api/library/reclassify-episode', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            episode_number: overrideTargetEpisode,
-        })
-    })
-    .then(async r => {
-        let text = await r.text();
-        // The endpoint returns plain-text error bodies from Axum's
-        // `Err((StatusCode, String))` shape, so surface the body
-        // verbatim rather than trying to JSON-parse a 409.
-        let data = {};
-        try { data = JSON.parse(text); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || text || `Re-classify failed (HTTP ${r.status})`);
-        return data;
-    })
-    .then(data => {
-        if (status) {
-            status.textContent = `→ ${data.quality_tag || 'unknown'} (conf ${Number(data.confidence || 0).toFixed(2)}${data.needs_review ? ', needs review' : ''})`;
-        }
-        // Reload so the episode row picks up the new tag everywhere it
-        // renders (quality badge, override modal pre-selection, etc.).
-        setTimeout(() => { location.reload(); }, 600);
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Re-classify failed';
-        if (btn) btn.disabled = false;
-    });
+function manualOverrideReclassifyVals() {
+    return {
+        series_id: parseInt(SD.dbId),
+        episode_number: overrideTargetEpisode,
+    };
 }
 
-function setAllowUpgrades(allow) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const checkbox = document.getElementById('allow-upgrades');
-    if (checkbox) checkbox.disabled = true;
-
-    fetch('/api/library/allow-upgrades', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, allow: allow })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update upgrades toggle');
-        return data;
-    })
-    .then(_ => {
-        if (checkbox) checkbox.disabled = false;
-    })
-    .catch(err => {
-        if (checkbox) {
-            checkbox.checked = !allow;
-            checkbox.disabled = false;
-        }
-        if (window.ryokanToast) window.ryokanToast({
-            kind: 'error',
-            category: 'library',
-            title: 'Upgrades toggle failed',
-            body: err && err.message ? err.message : 'Failed to update upgrades toggle',
-        });
-    });
-}
-
-// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
-// Mirror of setAllowUpgrades; hits the parallel /api/library/allow-pt-upgrades
-// endpoint and reverts the checkbox state on failure so the UI
-// never lies about what's persisted. Server-side persists a Library
-// log row on success; an error toast covers the failure path.
-function setAllowPtUpgrades(allow) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const checkbox = document.getElementById('allow-pt-upgrades');
-    if (checkbox) checkbox.disabled = true;
-
-    fetch('/api/library/allow-pt-upgrades', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: dbId, allow: allow })
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to update PT-upgrades toggle');
-        return data;
-    })
-    .then(_ => {
-        if (checkbox) checkbox.disabled = false;
-    })
-    .catch(err => {
-        if (checkbox) {
-            checkbox.checked = !allow;
-            checkbox.disabled = false;
-        }
-        if (window.ryokanToast) window.ryokanToast({
-            kind: 'error',
-            category: 'library',
-            title: 'PT-upgrades toggle failed',
-            body: err && err.message ? err.message : 'Failed to update PT-upgrades toggle',
-        });
-    });
-}
-
-// #23 — Save per-series search overrides (Nyaa uploader + custom tokens).
-// Empty inputs clear the override server-side so the series falls back
-// to the global default in Settings → Quality.
-function saveSeriesSearchOverrides(btn) {
-    const dbId = parseInt(SD.dbId);
-    if (!dbId) return;
-    const tokens = (document.getElementById('series-custom-query-tokens')?.value || '').trim();
-    const restrict = (document.getElementById('series-restrict-to-group')?.value || '').trim();
-    const status = document.getElementById('series-search-overrides-status');
-    btn.disabled = true;
-    if (status) status.textContent = 'Saving…';
-
-    fetch('/api/library/search-overrides', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            series_id: dbId,
-            custom_query_tokens: tokens,
-            restrict_to_uploader: restrict,
-        }),
-    })
-    .then(async r => {
-        let data = {};
-        try { data = await r.json(); } catch (_) {}
-        if (!r.ok) throw new Error(data.message || 'Failed to save overrides');
-        return data;
-    })
-    .then(_ => {
-        if (status) status.textContent = 'Saved';
-        btn.disabled = false;
-    })
-    .catch(err => {
-        if (status) status.textContent = err.message || 'Failed to save overrides';
-        btn.disabled = false;
-    });
-}
+// Issue #166 — `setAllowUpgrades`, `setAllowPtUpgrades`, and
+// `saveSeriesSearchOverrides` moved to declarative HTMX attributes
+// on the inputs/form in `templates/series.html`. The checkbox toggles
+// post against `/api/library/allow-upgrades` and
+// `/api/library/allow-pt-upgrades` with `hx-swap="none"`; an
+// `hx-on::response-error` handler reverts the checkbox and fires a
+// toast on 4xx/5xx. The search-overrides form posts to
+// `/api/library/search-overrides` and swaps the rendered
+// `partials/series/save_status_pill.html` into
+// `#series-search-overrides-status`.

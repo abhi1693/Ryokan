@@ -104,7 +104,7 @@ pub struct SearchResult {
     pub is_trusted: bool,
     pub score: i32,
     pub info_hash: String,
-    /// #1.3.0 — per-component breakdown of the base score (what rules
+    /// v1.3.0 — per-component breakdown of the base score (what rules
     /// fired, with what delta and a human-readable detail). Populated
     /// by the search scraper alongside `score` so the UI can render a
     /// "why this score" expansion on search results. Note this covers
@@ -112,14 +112,14 @@ pub struct SearchResult {
     /// tracked separately at the auto-search site.
     #[serde(default)]
     pub score_breakdown: Vec<crate::services::scoring::ScoreComponent>,
-    /// #1.3.0 — upload date as Nyaa renders it in the table ("YYYY-
+    /// v1.3.0 — upload date as Nyaa renders it in the table ("YYYY-
     /// MM-DD HH:MM" UTC). Empty string when the column couldn't be
     /// parsed (e.g. for releases fetched via the view page rather
     /// than the listing). Surfaced to the UI so the search-results
     /// table matches Nyaa's own listing shape.
     #[serde(default)]
     pub upload_date: String,
-    /// Issue #28 PR B — FK to `indexers.id` of the indexer that
+    /// Issue #28 — FK to `indexers.id` of the indexer that
     /// surfaced this release. `None` for Nyaa-direct results (the
     /// existing behavior; Nyaa stays out-of-band per plan
     /// decision #1). `Some(id)` for results from a torznab/newznab
@@ -332,7 +332,7 @@ pub(crate) fn extract_hash(magnet: &str) -> String {
     // internally; leaving a base32 string in the DB would mean our
     // stored hash didn't match the client's reported hash, silently
     // breaking dedup the first time a base32 magnet landed under a
-    // non-qBit client. See #63 Phase 0.
+    // non-qBit client. See #63.
     let lower = magnet.to_ascii_lowercase();
     let Some(pos) = lower.find("btih:") else {
         return String::new();

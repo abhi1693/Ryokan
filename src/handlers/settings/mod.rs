@@ -151,7 +151,7 @@ struct SettingsTemplate {
     message: Option<String>,
     error: Option<String>,
     version: &'static str,
-    /// Issue #62 PR A — currently-linked AL or MAL account, if any.
+    /// Issue #62 — currently-linked AL or MAL account, if any.
     /// `None` renders the paired Link buttons; `Some(view)` renders
     /// the linked-state card with username, preferences checkboxes,
     /// and Unlink button. The view deliberately excludes tokens —
@@ -164,8 +164,8 @@ struct SettingsTemplate {
     /// browser snaps titles back to English even when the saved
     /// preference is Romaji or Native.
     title_language: String,
-    /// Issue #28 PR A — torznab/newznab indexer rows for the
-    /// Settings → Indexers tab placeholder. PR B replaces the
+    /// Issue #28 — torznab/newznab indexer rows for the
+    /// Settings → Indexers tab placeholder. a follow-up replaces the
     /// placeholder with add/edit/delete forms and uses the same
     /// list. Empty on a fresh install since no indexers exist
     /// until the user adds one.
@@ -197,7 +197,7 @@ struct SettingsTemplate {
     /// paths (full page + section partial) populate from the same
     /// process-wide cache so they stay in sync.
     cached_status: std::collections::HashMap<i64, crate::DcStatusEntry>,
-    /// Multi-RSS PR G/H — user-supplied direct RSS feeds (e.g.
+    /// Multi-RSS — user-supplied direct RSS feeds (e.g.
     /// SubsPlease per-quality feeds) rendered on the Indexers tab
     /// alongside the torznab/newznab indexer rows. Empty until the
     /// user adds one via the bottom-of-tab form.
@@ -228,16 +228,16 @@ pub(crate) struct ExternalAccountView {
     pub import_dropped: bool,
     pub import_completed: bool,
     pub skip_already_watched: bool,
-    /// #62 PR E — count of MAL→AL mapping failures from the most
+    /// #62 — count of MAL→AL mapping failures from the most
     /// recent sync. Surfaces as a "N couldn't be mapped" info banner
     /// only when > 0 AND the linked provider is MAL (AL never
     /// produces deferred entries; the column always reads 0 there).
     pub last_sync_deferred_count: i64,
-    /// #62 PR E — sticky auth-rejection flag. Drives the
+    /// #62 — sticky auth-rejection flag. Drives the
     /// "Re-link required" red banner on the External Accounts card.
     /// Cleared by the next successful sync.
     pub last_sync_auth_failed: bool,
-    /// #62 PR E (redesign) — relative-time label for the most
+    /// #62 (redesign) — relative-time label for the most
     /// recent successful sync. "Never" when `list_last_synced_at`
     /// is NULL; otherwise the largest reasonable unit ("4 minutes
     /// ago", "2 hours ago", "3 days ago"). Computed server-side
@@ -333,7 +333,7 @@ pub struct SettingsQuery {
 #[derive(Deserialize)]
 pub struct SettingsForm {
     tab: Option<String>,
-    /// #63 Phase 2 — which download client is active. Accepted
+    /// #63 — which download client is active. Accepted
     /// values: "qbittorrent" | "deluge". Settings save branches on
     /// this to construct the concrete trait impl.
     #[serde(default)]
@@ -384,13 +384,13 @@ pub struct SettingsForm {
     title_language: String,
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
-    /// Phase 7 PR E — Nyaa-specific RSS opt-out. Lives in the General
+    /// Nyaa-specific RSS opt-out. Lives in the General
     /// tab next to `rss_enabled` / `rss_interval_minutes`. Checkbox →
     /// `Some(_)` when checked, `None` when not.
     disable_nyaa_rss: Option<String>,
     post_processing_enabled: Option<String>,
     post_processing_mode: String,
-    /// #1.3.0 — opt-in: trigger auto-search when a series's
+    /// v1.3.0 — opt-in: trigger auto-search when a series's
     /// monitoring mode changes. Default off. Settings → General.
     search_on_monitoring_change: Option<String>,
     /// 1.7 — opt-out for the manual-search-page auto-add path.
@@ -409,10 +409,10 @@ pub struct SettingsForm {
     /// Issue #83 — interactive file-picker trigger policy. `batches_only`
     /// (default) opens the modal for multi-file torrents; `never`
     /// preserves 1.3.0 one-click behavior. Omitted from forms before
-    /// PR C → falls back to the existing config value (or default).
+    /// Falls back to the existing config value (or default).
     #[serde(default)]
     grab_preview_mode: Option<String>,
-    /// Issue #62 PR B — watch-list sync cadence in minutes. Clamped
+    /// Issue #62 — watch-list sync cadence in minutes. Clamped
     /// to 15..=10080 (15 minutes .. 7 days) on save per decision #5.
     /// `None` means "field absent from this form submission" and
     /// falls through to the existing value, same pattern as
@@ -434,7 +434,7 @@ pub struct JellyfinTestForm {
 /// on success and a red one on failure; previously the JS just wrote
 /// plain text into the same element, so the only visible change is
 /// color.
-/// Issue #129 Phase 1 completion — Integrations tab subform. Final
+/// Issue #129 completion — Integrations tab subform. Final
 /// piece of the per-tab split. Largest field set of the three:
 /// includes the legacy single-slot download-client columns (qbit_*,
 /// deluge_*, transmission_*, rtorrent_*) carried through as hidden
@@ -512,7 +512,7 @@ pub struct IntegrationsForm {
     /// #83 — Interactive file-picker trigger policy.
     #[serde(default)]
     grab_preview_mode: Option<String>,
-    /// #62 PR B — watch-list sync cadence in minutes. `None` means
+    /// #62 — watch-list sync cadence in minutes. `None` means
     /// the field was absent from this submission (e.g. no account
     /// linked, so the input wasn't rendered) and the existing
     /// value is preserved.
@@ -529,7 +529,7 @@ pub(crate) struct IntegrationsFormPartial {
     pub external_account: Option<ExternalAccountView>,
 }
 
-/// Issue #129 Phase 1 completion — Quality tab subform. Companion to
+/// Issue #129 completion — Quality tab subform. Companion to
 /// `GeneralForm`; same per-tab-isolation rationale.
 #[derive(Deserialize)]
 pub struct QualityForm {
@@ -561,7 +561,7 @@ pub struct QualityFormPartial {
     pub error: Option<String>,
 }
 
-/// Issue #129 Phase 1 completion — General tab subform. Replaces the
+/// Issue #129 completion — General tab subform. Replaces the
 /// bulk-form path through `settings_submit` for the General tab so a
 /// Save click only POSTs General fields (not the previously-bundled
 /// integrations + quality fields too). HTMX path swaps the form
@@ -578,7 +578,7 @@ pub struct GeneralForm {
     #[serde(default)]
     rss_enabled: Option<String>,
     rss_interval_minutes: i32,
-    /// Phase 7 PR E — Nyaa-specific RSS opt-out.
+    /// Nyaa-specific RSS opt-out.
     #[serde(default)]
     disable_nyaa_rss: Option<String>,
     #[serde(default)]
@@ -646,7 +646,7 @@ pub(crate) fn resolve_grab_preview_mode(
     }
 }
 
-/// Issue #62 PR B — watch-list sync cadence default + bounds.
+/// Issue #62 — watch-list sync cadence default + bounds.
 pub(crate) const EXTERNAL_SYNC_INTERVAL_DEFAULT_MIN: i32 = 30;
 pub(crate) const EXTERNAL_SYNC_INTERVAL_FLOOR_MIN: i32 = 15;
 pub(crate) const EXTERNAL_SYNC_INTERVAL_CEILING_MIN: i32 = 10080; // 7 days
@@ -700,8 +700,8 @@ fn normalize_settings_tab(tab: Option<String>) -> String {
         Some("custom_formats") => "custom_formats".to_string(),
         Some("groups") => "groups".to_string(),
         Some("general") => "general".to_string(),
-        // Issue #28 PR A — torznab/newznab indexer registry. Tab
-        // surface scaffolded; CRUD form lands in PR B alongside
+        // Issue #28 — torznab/newznab indexer registry. Tab
+        // surface scaffolded; CRUD form lands alongside
         // the TorznabIndexer impl that needs caps probing on save.
         Some("indexers") => "indexers".to_string(),
         // Phase 7 follow-up — the multi-client picker was promoted
@@ -1117,7 +1117,7 @@ pub async fn settings_submit(
         },
         // General-tab fields (media_root, title_language, rss_*, post_processing_*,
         // search_on_monitoring_change, disable_nyaa_rss) are now owned by the
-        // dedicated `/settings/general` subform handler (issue #129 Phase 1
+        // dedicated `/settings/general` subform handler (issue #129
         // completion). The legacy bulk form covers integrations + quality
         // only, so the General fields aren't even in the POST body when
         // reaching this handler — `Form<SettingsForm>` deserializes them
@@ -1254,7 +1254,7 @@ pub async fn settings_submit(
                 .map(|c| c.radarr_api_key.clone())
                 .unwrap_or_default()
         },
-        // Issue #28 PR D — autobrr API key. Carried forward from the
+        // Issue #28 — autobrr API key. Carried forward from the
         // existing row; rotated only via the dedicated
         // /settings/autobrr/regenerate-key handler so a stray POST to
         // the integrations tab can't silently wipe a working webhook.
@@ -1319,7 +1319,7 @@ pub async fn settings_submit(
             form.tab.as_deref(),
             existing_cfg.as_ref().map(|c| c.grab_preview_mode.as_str()),
         ),
-        // #62 PR B — watch-list sync interval. Same Integrations-tab
+        // #62 — watch-list sync interval. Same Integrations-tab
         // ownership pattern as grab_preview_mode. Range clamped to
         // 15..=10080 (15 min .. 7 days) per decision #5; out-of-range
         // values coerce to the default 30 rather than erroring so a
@@ -1549,7 +1549,7 @@ pub async fn settings_submit(
     Html(template.render().unwrap_or_default())
 }
 
-/// Issue #129 Phase 1 completion — General tab dedicated POST handler.
+/// Issue #129 completion — General tab dedicated POST handler.
 /// Owns only General-tab fields (`media_root`, `title_language`, RSS
 /// flags, post-processing flags, monitoring-change auto-search opt-in).
 /// Reads existing config to preserve every other tab's fields,
@@ -1695,7 +1695,7 @@ async fn general_response(
     Html(template.render().unwrap_or_default()).into_response()
 }
 
-/// Issue #129 Phase 1 completion — Quality tab dedicated POST handler.
+/// Issue #129 completion — Quality tab dedicated POST handler.
 /// Mirrors `settings_general_submit`. Owns only Quality-tab fields;
 /// preserves every other tab's fields via struct-update on existing
 /// config.
@@ -1825,7 +1825,7 @@ async fn quality_response(
     Html(template.render().unwrap_or_default()).into_response()
 }
 
-/// Issue #129 Phase 1 completion — Integrations tab dedicated POST
+/// Issue #129 completion — Integrations tab dedicated POST
 /// handler. Owns Jellyfin URL+key, Sonarr/Radarr API enable+key,
 /// grab_preview_mode, external_sync_interval_minutes, and the legacy
 /// single-slot download-client columns (preserved verbatim through

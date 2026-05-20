@@ -193,14 +193,14 @@ static RE_ABSOLUTE: LazyLock<Vec<(&str, Regex)>> = LazyLock::new(|| {
     ]
 });
 
-/// multi-rss PR 2 — provenance attribution for each item the sync
+/// Multi-RSS — provenance attribution for each item the sync
 /// loop sees. Carried alongside the item through dedup, scoring, and
 /// grab so logs / grab-row routing can answer "which feed produced
 /// this release". Also drives per-source download-client pin
 /// resolution: a Nyaa-direct item routes through `config
 /// .nyaa_download_client_id`; a `UserFeed` item through the feed's
 /// own `download_client_id`; an `Indexer` item through the
-/// indexer's `download_client_id`. Cross-feed dedup (PR 5) keeps
+/// indexer's `download_client_id`. Cross-feed dedup keeps
 /// the highest-priority source when the same release shows up in
 /// multiple places.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,9 +244,9 @@ pub struct RssItem {
     pub group: String,
     pub resolution: String,
     pub is_batch: bool,
-    /// multi-rss PR 2 — which feed produced this item. The legacy
+    /// Multi-RSS — which feed produced this item. The legacy
     /// Nyaa-only sync writes `RssSource::Nyaa` everywhere; the
-    /// multi-source fan-out (PR 5) populates this distinctly per
+    /// multi-source fan-out populates this distinctly per
     /// feed.
     pub source: RssSource,
 }
@@ -471,7 +471,7 @@ async fn fetch_all_sources(
 
     // 1. Nyaa — gate on `cfg.rss_enabled` (legacy v1 flag, plan
     //    decision #8 keeps its semantics) AND `!cfg.disable_nyaa_rss`
-    //    (Phase 7 PR E — Nyaa-specific opt-out for users who only
+    //    (Nyaa-specific opt-out for users who only
     //    want indexer-RSS / direct-RSS feeds polled). Master flag
     //    has already been honored at the sync_once_inner top.
     if cfg.rss_enabled && !cfg.disable_nyaa_rss {
@@ -1109,7 +1109,7 @@ async fn sync_once_inner(state: &AppState, trigger: &str) -> Result<SyncSummary,
             .await;
             continue;
         };
-        // PR G — use the returning-id variant so SAB grabs persist
+        // use the returning-id variant so SAB grabs persist
         // their `nzo_id` instead of the pre-computed BT-style hash.
         // For BT clients the returned id equals `info_hash` (default
         // impl), no behavior change.
@@ -1378,7 +1378,7 @@ async fn load_canonical_history(
 /// Match a release title against every tracked series in the library
 /// and return the best match's series id + resolved episode set, or
 /// `None` if no series cleared the matcher's confidence threshold.
-/// Used by the manual-search grab path (#1.3.0 plan item 6d) to
+/// Used by the manual-search grab path (v1.3.0 plan item 6d) to
 /// link grabs to existing library entries without re-implementing
 /// the RSS matcher.
 ///

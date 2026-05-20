@@ -1,7 +1,7 @@
 //! hx-boost rollout — Phase C lint test.
 //!
-//! Per /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md
-//! Phase C definition-of-done: every `Redirect::to` callsite outside
+//! Per the hx-boost rollout plan's Phase C definition-of-done:
+//! every `Redirect::to` callsite outside
 //! the documented exceptions must go through
 //! `crate::handlers::responses::htmx_aware_redirect` (or its
 //! `*_from_req` variant for middleware). This test grep-asserts that
@@ -114,9 +114,9 @@ fn no_unaudited_redirect_callsites() {
     assert!(
         diffs.is_empty(),
         "Phase C redirect audit failed — {} change(s):\n  {}\n\nBackground: \
-         /home/john/Documents/ryokan-roadmap/hx_boost_rollout_plan.md Phase C \
-         requires every Redirect::to in handlers/ to either go through \
-         htmx_aware_redirect (boost-safe) or be in the documented exceptions list.",
+         the hx-boost rollout plan's Phase C requires every Redirect::to in \
+         handlers/ to either go through htmx_aware_redirect (boost-safe) or be \
+         in the documented exceptions list.",
         diffs.len(),
         diffs.join("\n  ")
     );

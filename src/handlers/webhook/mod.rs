@@ -1,4 +1,4 @@
-//! Webhook receivers (issue #28 PR D).
+//! Webhook receivers (issue #28).
 //!
 //! `POST /api/webhook/autobrr` is the first webhook endpoint —
 //! receives push notifications from autobrr for IRC-announced

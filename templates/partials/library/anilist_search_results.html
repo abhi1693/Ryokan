@@ -1,0 +1,39 @@
+{# AniList / MAL search results panel rendered by `anilist_search` for HTMX
+   callers. The same shape was previously emitted by JS template literals in
+   `static/js/index.js::searchAnilist`; that path was removed when the input
+   gained `hx-get` (issue #166). The full `data-entry` JSON is pre-serialized
+   in the handler so `addSeries` can keep reading it without a separate fetch. #}
+{% if entries.is_empty() %}
+<p class="loading-text">No results found.</p>
+{% else %}
+{% for r in entries %}
+<div class="anilist-result">
+    {% match r.external_href %}
+    {% when Some with (href) %}
+    <a href="{{ href }}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on {{ r.source_label }}">
+        <img src="{{ r.entry.cover_url }}" alt="" class="anilist-cover" loading="lazy">
+    </a>
+    {% when None %}
+    <img src="{{ r.entry.cover_url }}" alt="" class="anilist-cover" loading="lazy">
+    {% endmatch %}
+    <div class="anilist-info">
+        <p class="anilist-title">
+            {% match r.external_href %}
+            {% when Some with (href) %}
+            <a href="{{ href }}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on {{ r.source_label }}">{{ r.title }}</a>
+            {% when None %}
+            {{ r.title }}
+            {% endmatch %}
+        </p>
+        <p class="anilist-subtitle">{{ r.subtitle }}</p>
+        <div class="anilist-meta">
+            <span class="tag tag-res">{{ r.format_display }}</span>
+            <span class="tag tag-res">{{ r.episodes_display }}</span>
+            <span class="tag tag-status-{{ r.status_class }}">{{ r.status_label }}</span>
+            <span>{{ r.source_label }}</span>
+        </div>
+    </div>
+    <button class="btn btn-primary btn-add" onclick="addSeries({{ r.entry.id }}, this)" data-entry="{{ r.data_entry_json }}">Add</button>
+</div>
+{% endfor %}
+{% endif %}

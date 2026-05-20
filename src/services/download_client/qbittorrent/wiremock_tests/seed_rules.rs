@@ -1,4 +1,4 @@
-//! Issue #28 PR C — `set_seed_rules` wire shape against
+//! Issue #28 — `set_seed_rules` wire shape against
 //! `/api/v2/torrents/setShareLimits`.
 //!
 //! The endpoint takes form fields:

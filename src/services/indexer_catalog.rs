@@ -1,5 +1,5 @@
 //! Seeded indexer catalog for the Settings → Indexers picker
-//! (issue #28 PR D follow-up).
+//! (issue #28 follow-up).
 //!
 //! Sonarr / autobrr both ship a curated indexer list so users
 //! pick from named cards instead of typing into a blank form.

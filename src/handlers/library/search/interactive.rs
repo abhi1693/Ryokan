@@ -9,10 +9,13 @@
 //! permissions, so it sits closer to the per-episode interactive
 //! handlers than to the auto-search pipeline.
 
+use askama::Template;
 use axum::{
     extract::{Path, Query, State},
-    response::Json,
+    http::StatusCode,
+    response::{Html, IntoResponse, Json, Response},
 };
+use axum_htmx::HxRequest;
 
 use crate::AppState;
 use crate::models::log::LogCategory;
@@ -21,6 +24,113 @@ use crate::services::{auto_search, logger, progress};
 
 use super::super::reconcile::resolve_series_context;
 use super::auto_search::{AutoSearchQuery, batch_episode_numbers, display_title_for_progress};
+
+/// Pre-computed display fields for one row in the interactive-search
+/// table. Mirrors the AL-search migration's `SearchResultRow` shape:
+/// title-language picking and JSON-in-attribute payload built in Rust
+/// so the Askama template stays simple and Askama auto-escape replaces
+/// the prior hand-rolled `escHtml` / `escAttr` calls in JS.
+struct InteractiveSearchRow {
+    result: crate::services::nyaa::SearchResult,
+    /// `"score-high"`, `"score-mid"`, or `"score-low"` — same thresholds
+    /// (>=80 / >=40 / else) the JS used at
+    /// `series_interactive_search.js::renderInteractiveResults`. The
+    /// `r.score >= 60` cutoff in `templates/search.html` is a different
+    /// surface (manual Nyaa search) and isn't shared here on purpose;
+    /// interactive search shows scored hits per series, where the band
+    /// boundaries shift higher.
+    score_class: &'static str,
+    /// `indexer_name` falls back to "Nyaa" when empty so the column
+    /// always renders a source attribution.
+    indexer_display: String,
+    /// Pre-serialized JSON of `result`. Embedded into the Grab button's
+    /// `data-result` attribute; the JS click handler reads it via
+    /// `JSON.parse(btn.dataset.result)` instead of the previous
+    /// module-scope `_isearchResults[idx]` array, so the rendered DOM
+    /// is the source of truth for grab metadata.
+    data_result_json: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/series/interactive_search_table.html")]
+pub(super) struct InteractiveSearchTablePartial {
+    rows: Vec<InteractiveSearchRow>,
+    /// `Some(N)` for per-episode flow → Grab button calls
+    /// `grabInteractiveResult(N, this)`. `None` for the batch flow →
+    /// `grabInteractiveBatchResult(this)`. The two flows share this
+    /// partial because the table itself is identical; only the click
+    /// target differs.
+    grab_episode_number: Option<i32>,
+    /// Rendered when `rows.is_empty()`. Per-episode shows "No results
+    /// found."; batch shows "No batch releases found." — matches the
+    /// pre-migration JS copy verbatim.
+    empty_message: &'static str,
+}
+
+fn build_interactive_search_partial(
+    results: Vec<crate::services::nyaa::SearchResult>,
+    grab_episode_number: Option<i32>,
+) -> InteractiveSearchTablePartial {
+    let rows = results
+        .into_iter()
+        .map(|result| {
+            let score_class = if result.score >= 80 {
+                "score-high"
+            } else if result.score >= 40 {
+                "score-mid"
+            } else {
+                "score-low"
+            };
+            let indexer_display = if result.indexer_name.is_empty() {
+                "Nyaa".to_string()
+            } else {
+                result.indexer_name.clone()
+            };
+            let data_result_json = serde_json::to_string(&result).unwrap_or_else(|_| "{}".into());
+            InteractiveSearchRow {
+                result,
+                score_class,
+                indexer_display,
+                data_result_json,
+            }
+        })
+        .collect();
+    let empty_message = if grab_episode_number.is_some() {
+        "No results found."
+    } else {
+        "No batch releases found."
+    };
+    InteractiveSearchTablePartial {
+        rows,
+        grab_episode_number,
+        empty_message,
+    }
+}
+
+fn render_interactive_partial(
+    results: Vec<crate::services::nyaa::SearchResult>,
+    grab_episode_number: Option<i32>,
+) -> Result<Response, (StatusCode, String)> {
+    let partial = build_interactive_search_partial(results, grab_episode_number);
+    let html = partial
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    Ok(Html(html).into_response())
+}
+
+/// Test-only seam for the partial builder. The underlying fn + struct
+/// are private to this module so callers in `tests/mod.rs` can't see
+/// them; this re-exports them under `cfg(test)` without leaking into
+/// production builds.
+#[cfg(test)]
+pub(super) mod test_helpers {
+    pub fn build_partial_for_test(
+        results: Vec<crate::services::nyaa::SearchResult>,
+        grab_episode_number: Option<i32>,
+    ) -> super::InteractiveSearchTablePartial {
+        super::build_interactive_search_partial(results, grab_episode_number)
+    }
+}
 
 /// Search batch releases only for a series (no single-episode grabs).
 #[utoipa::path(
@@ -348,8 +458,9 @@ pub async fn search_batch_releases(
 )]
 pub async fn interactive_search_episode(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Path((request_id, episode_number)): Path<(i64, i32)>,
-) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     // 5-minute TTL cache so rapid reloads of the picker modal during
     // UI iteration don't hammer Nyaa. Scope-limited to interactive
     // search only; auto-search / RSS / manual grabs still go direct.
@@ -357,16 +468,21 @@ pub async fn interactive_search_episode(
     if let Some(cached) =
         crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
     {
-        return Ok(Json((*cached).clone()));
+        let cached_vec: Vec<_> = (*cached).clone();
+        return if is_htmx {
+            render_interactive_partial(cached_vec, Some(episode_number))
+        } else {
+            Ok(Json(cached_vec).into_response())
+        };
     }
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
     let cfg = config::get_config(&state.db)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
     let cfs = state.custom_formats.read().await.clone();
@@ -398,7 +514,11 @@ pub async fn interactive_search_episode(
         cache_key,
         results.clone(),
     );
-    Ok(Json(results))
+    if is_htmx {
+        render_interactive_partial(results, Some(episode_number))
+    } else {
+        Ok(Json(results).into_response())
+    }
 }
 
 /// Interactive batch search: return all scored batch candidates so the user
@@ -422,24 +542,30 @@ pub async fn interactive_search_episode(
 )]
 pub async fn interactive_search_batches(
     State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
     Path(request_id): Path<i64>,
-) -> Result<Json<Vec<crate::services::nyaa::SearchResult>>, (axum::http::StatusCode, String)> {
+) -> Result<Response, (StatusCode, String)> {
     // 5-minute TTL cache — see interactive_search_episode for rationale.
     // `None` episode slot distinguishes batch from per-episode.
     let cache_key = (request_id, None);
     if let Some(cached) =
         crate::services::interactive_search_cache::get(&state.interactive_search_cache, cache_key)
     {
-        return Ok(Json((*cached).clone()));
+        let cached_vec: Vec<_> = (*cached).clone();
+        return if is_htmx {
+            render_interactive_partial(cached_vec, None)
+        } else {
+            Ok(Json(cached_vec).into_response())
+        };
     }
 
     let (_, _, detail) = resolve_series_context(&state.db, request_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::BAD_GATEWAY, e))?;
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
 
     let cfg = config::get_config(&state.db)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .unwrap_or_default();
 
     let cfs = state.custom_formats.read().await.clone();
@@ -461,5 +587,9 @@ pub async fn interactive_search_batches(
         cache_key,
         results.clone(),
     );
-    Ok(Json(results))
+    if is_htmx {
+        render_interactive_partial(results, None)
+    } else {
+        Ok(Json(results).into_response())
+    }
 }

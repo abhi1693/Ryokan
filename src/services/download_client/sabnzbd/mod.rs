@@ -1,4 +1,4 @@
-//! SABnzbd implementation of [`DownloadClient`] (#28 PR G).
+//! SABnzbd implementation of [`DownloadClient`] (#28).
 //!
 //! Speaks the SAB API
 //! (<https://sabnzbd.org/wiki/configuration/4.0/api>). Authenticates by

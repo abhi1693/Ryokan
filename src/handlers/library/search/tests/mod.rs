@@ -1076,9 +1076,11 @@ mod handler_endpoints {
         let state = build_test_app_state(db, None);
         let result = anilist_search(
             State(state),
+            axum_htmx::HxRequest(false),
             Query(AnilistSearchQuery {
                 q: "anything".into(),
                 source: Some("anilist".into()),
+                lang: None,
             }),
         )
         .await;
@@ -1092,6 +1094,244 @@ mod handler_endpoints {
             }
             Ok(_) => panic!("invalid source must surface as 400, not Ok"),
         }
+    }
+
+    // ─── Interactive-search partial render (issue #166) ─────────
+
+    /// HTMX path on `interactive_search_episode` returns a rendered
+    /// partial; this test exercises the build+render directly so it
+    /// doesn't need Nyaa or AL upstreams. Mirrors the AL-search test
+    /// shape: assert each load-bearing field reaches the rendered
+    /// HTML, then round-trip the `data-result` JSON to confirm the
+    /// per-row Grab button can read its full SearchResult payload.
+    #[test]
+    fn interactive_search_partial_renders_table_and_data_result() {
+        use crate::services::nyaa::SearchResult;
+        use crate::services::scoring::ScoreComponent;
+        use askama::Template;
+
+        let mut hit = SearchResult {
+            title: "[Group] Show - 03 [BD 1080p].mkv".into(),
+            link: "https://nyaa.example/view/42".into(),
+            magnet: "magnet:?xt=urn:btih:abc123".into(),
+            torrent: "https://nyaa.example/download/42.torrent".into(),
+            size: "1.4 GiB".into(),
+            size_bytes: 1_500_000_000,
+            seeders: 42,
+            leechers: 3,
+            downloads: 200,
+            group: "Group".into(),
+            resolution: "1080".into(),
+            quality_label: "BD-1080p".into(),
+            source: "BluRay".into(),
+            web_kind: String::new(),
+            is_remux: false,
+            is_bdmv: false,
+            is_batch: false,
+            is_trusted: true,
+            score: 92,
+            info_hash: "abc123abc123abc123abc123abc123abc123abc1".into(),
+            score_breakdown: vec![ScoreComponent {
+                label: "Seeders".into(),
+                delta: 10,
+                detail: Some("42 seeders".into()),
+            }],
+            upload_date: String::new(),
+            indexer_id: Some(7),
+            indexer_name: "Example-Indexer".into(),
+        };
+        // Force a low-score row to confirm the score-class threshold.
+        let mut low = hit.clone();
+        low.score = 12;
+        low.title = "[NoGroup] Show - 03.mkv".into();
+        low.indexer_name = String::new(); // -> renders "Nyaa"
+        low.is_trusted = false;
+        low.indexer_id = None;
+        hit.score = 92;
+
+        let partial = super::super::interactive::test_helpers::build_partial_for_test(
+            vec![hit.clone(), low.clone()],
+            Some(3),
+        );
+        let html = partial.render().expect("partial renders");
+
+        // High-score row class + the score badge value visible.
+        assert!(
+            html.contains("score-high"),
+            "score>=80 must render the high band\n{html}"
+        );
+        // Low-score row class.
+        assert!(
+            html.contains("score-low"),
+            "score<40 must render the low band\n{html}"
+        );
+        // Per-row Grab button uses the per-episode handler with the
+        // episode number from grab_episode_number.
+        assert!(
+            html.contains("grabInteractiveResult(3, this)"),
+            "per-episode flow must wire the Grab button to the episode handler\n{html}"
+        );
+        // Trusted tag rendered for the trusted hit.
+        assert!(
+            html.contains("trusted"),
+            "is_trusted=true must surface the trusted tag\n{html}"
+        );
+        // Empty `indexer_name` falls back to "Nyaa" so the column never
+        // renders blank.
+        assert!(
+            html.contains(">Nyaa<"),
+            "empty indexer_name must fall back to Nyaa\n{html}"
+        );
+
+        // The Grab button's `data-result` carries the full SearchResult
+        // JSON. Round-trip parse it to confirm `grabInteractiveResult`
+        // can reconstruct the metadata it needs (url, title, group,
+        // info_hash, indexer_id) without the prior `_isearchResults`
+        // module-scope array.
+        let needle = r#"data-result=""#;
+        let start = html.find(needle).expect("data-result attr present") + needle.len();
+        let end = start
+            + html[start..]
+                .find('"')
+                .expect("data-result attr is double-quoted");
+        let escaped = &html[start..end];
+        let unescaped = escaped.replace("&#34;", "\"").replace("&amp;", "&");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unescaped).expect("data-result JSON parses");
+        assert_eq!(
+            parsed.get("info_hash").and_then(|v| v.as_str()),
+            Some("abc123abc123abc123abc123abc123abc123abc1"),
+            "data-result must round-trip info_hash; got {parsed}"
+        );
+        assert_eq!(
+            parsed.get("indexer_id").and_then(|v| v.as_i64()),
+            Some(7),
+            "data-result must round-trip indexer_id; got {parsed}"
+        );
+    }
+
+    /// Batch flow: same partial, `grab_episode_number = None` →
+    /// Grab button calls the batch handler instead. Empty result
+    /// list renders the batch-specific copy.
+    #[test]
+    fn interactive_search_partial_batch_flow_uses_batch_handler() {
+        use askama::Template;
+
+        let empty = super::super::interactive::test_helpers::build_partial_for_test(vec![], None);
+        let html = empty.render().expect("renders empty");
+        assert!(
+            html.contains("No batch releases found."),
+            "batch flow must use batch-specific empty copy\n{html}"
+        );
+    }
+
+    // ─── HTMX partial render (issue #166) ────────────────────────
+
+    /// The HxRequest branch in `anilist_search` calls
+    /// `build_search_results_partial` with the AL hits and renders the
+    /// `partials/library/anilist_search_results.html` template. This
+    /// test exercises the build+render directly so it doesn't need an
+    /// AL upstream — the upstream call is what `anilist_search` does
+    /// before this code path runs, and its behavior is independent.
+    ///
+    /// Asserts every load-bearing field reaches the rendered HTML:
+    ///   - title chosen by language (english here),
+    ///   - external href shape (AL vs MAL → different host + id),
+    ///   - format / episode / status badges,
+    ///   - the `data-entry` JSON parses back to the same `id`, which
+    ///     is what `addSeries(id, this)` in `static/js/index.js` reads.
+    #[test]
+    fn htmx_partial_renders_expected_markers_and_data_entry() {
+        use crate::services::anilist::AnimeEntry;
+        use askama::Template;
+
+        let entries = vec![
+            AnimeEntry {
+                id: 21,
+                id_mal: None,
+                title_romaji: "Naruto".into(),
+                title_english: "Naruto".into(),
+                title_native: "ナルト".into(),
+                cover_url: "https://cdn.example/cover-21.jpg".into(),
+                format: "TV_SHORT".into(),
+                status: "FINISHED".into(),
+                status_display: "Finished".into(),
+                episodes: Some(220),
+                season_year: Some(2002),
+                source: "al".into(),
+                average_score: Some(78),
+            },
+            AnimeEntry {
+                id: 100,
+                id_mal: Some(9876),
+                title_romaji: "Some MAL Show".into(),
+                title_english: String::new(),
+                title_native: String::new(),
+                cover_url: String::new(),
+                format: String::new(),
+                status: "RELEASING".into(),
+                status_display: String::new(),
+                episodes: None,
+                season_year: None,
+                source: "mal".into(),
+                average_score: None,
+            },
+        ];
+
+        let partial = super::super::build_search_results_partial(entries, "english");
+        let html = partial.render().expect("partial renders");
+
+        // AL row: external link to anilist.co with the AL id, format
+        // underscore replaced, episodes count rendered, status class
+        // lowercased.
+        assert!(
+            html.contains(r#"href="https://anilist.co/anime/21""#),
+            "AL row must link to anilist.co with the entry id\n{html}"
+        );
+        assert!(
+            html.contains("TV SHORT"),
+            "format underscore must render as space\n{html}"
+        );
+        assert!(html.contains("220 eps"), "episodes badge missing\n{html}");
+        assert!(
+            html.contains("tag-status-finished"),
+            "status class must lowercase the AL enum\n{html}"
+        );
+
+        // MAL row: external link uses myanimelist.net + id_mal, episode
+        // fallback "?", source label is "MAL". Empty `format` falls back
+        // to "TBA" per the JS contract this replaced.
+        assert!(
+            html.contains(r#"href="https://myanimelist.net/anime/9876""#),
+            "MAL row must link to MAL with id_mal\n{html}"
+        );
+        assert!(
+            html.contains("TBA"),
+            "empty format must fall back to TBA\n{html}"
+        );
+
+        // The AL row's `data-entry` attribute must round-trip the JSON
+        // `addSeries` reads. Askama auto-escapes `"` to `&quot;`, so
+        // strip-then-parse to confirm the embedded payload is intact.
+        let needle = r#"data-entry=""#;
+        let start = html.find(needle).expect("data-entry attr present") + needle.len();
+        let end = start
+            + html[start..]
+                .find('"')
+                .expect("data-entry attr is double-quoted");
+        let escaped = &html[start..end];
+        // Askama 0.16 escapes `"` as `&#34;` (numeric character
+        // reference, not the named `&quot;` entity). Both forms are
+        // valid HTML; pinning to `&#34;` here keeps the test honest if
+        // a future Askama major flips back.
+        let unescaped = escaped.replace("&#34;", "\"").replace("&amp;", "&");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&unescaped).expect("data-entry JSON parses");
+        assert_eq!(
+            parsed.get("id").and_then(|v| v.as_i64()),
+            Some(21),
+            "data-entry must round-trip the entry id; got {parsed}"
+        );
     }
 
     // ─── interactive_search_* cache short-circuits ──────────────
@@ -1120,10 +1360,18 @@ mod handler_endpoints {
             seeded.clone(),
         );
 
-        let AxumJson(results) =
-            interactive_search_episode(State(state), Path((request_id, episode)))
-                .await
-                .expect("cache-hit path must succeed without resolver/Nyaa");
+        let resp = interactive_search_episode(
+            State(state),
+            axum_htmx::HxRequest(false),
+            Path((request_id, episode)),
+        )
+        .await
+        .expect("cache-hit path must succeed without resolver/Nyaa");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let results: Vec<SearchResult> =
+            serde_json::from_slice(&bytes).expect("body parses as Vec<SearchResult>");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].title, "[Group] Cached Show - 05.mkv");
     }
@@ -1483,9 +1731,15 @@ mod handler_endpoints {
             seeded.clone(),
         );
 
-        let AxumJson(results) = interactive_search_batches(State(state), Path(request_id))
+        let resp =
+            interactive_search_batches(State(state), axum_htmx::HxRequest(false), Path(request_id))
+                .await
+                .expect("cache-hit path must succeed");
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
-            .expect("cache-hit path must succeed");
+            .expect("read body");
+        let results: Vec<SearchResult> =
+            serde_json::from_slice(&bytes).expect("body parses as Vec<SearchResult>");
         assert_eq!(results.len(), 2);
         assert!(results.iter().any(|r| r.title.contains("01-12")));
         assert!(results.iter().any(|r| r.title.contains("01-24")));

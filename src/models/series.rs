@@ -29,7 +29,7 @@ pub struct Series {
     /// skips this series entirely, even if a higher-quality release is
     /// available. Defaults to true to preserve historical behavior.
     pub allow_upgrades: bool,
-    /// Issue #28 PR E — per-series PT upgrade opt-in. When false (the
+    /// Issue #28 — per-series PT upgrade opt-in. When false (the
     /// default), the upgrade sweep won't grab a private-tracker release
     /// for this series even if it's the top-scoring candidate. The
     /// initial-grab and manual-search paths aren't affected (those are
@@ -55,14 +55,14 @@ pub struct Series {
     /// relative target (AL's own numbering) OR `target + offset` (the
     /// absolute number a SubsPlease-style release would use).
     pub cumulative_prior_episodes: i32,
-    /// #62 PR B — `1` when the user has manually pinned this series's
+    /// #62 — `1` when the user has manually pinned this series's
     /// `monitor_mode` through the per-series UI. The watch-list sync
     /// skips both the merge-step monitor_mode update and the removal-
     /// detection downgrade for these rows, so a pinned mode stays
     /// pinned across syncs. Cleared when the user picks "Sync from
     /// AL/MAL" from the dropdown.
     pub monitor_mode_manual_override: bool,
-    /// #62 PR C — user's personal score on their linked AL/MAL
+    /// #62 — user's personal score on their linked AL/MAL
     /// account. `None` for manually-added series (no linked account
     /// fed a score in) and for sync-imported series the user hasn't
     /// rated. The render helper in `services::user_score` formats
@@ -85,7 +85,7 @@ impl Series {
         MonitorMode::from_str(&self.monitor_mode)
     }
 
-    /// #62 PR C — render the "You: X" badge for this series using
+    /// #62 — render the "You: X" badge for this series using
     /// the given `score_format` (typically the linked
     /// `external_accounts.score_format`). Returns `None` when no
     /// account is linked, the user hasn't rated this series, or the
@@ -514,7 +514,7 @@ pub async fn update_monitor_mode_manual_override(
     Ok(())
 }
 
-/// #62 PR C — write the user's personal score from the linked
+/// #62 — write the user's personal score from the linked
 /// AL/MAL account. AL's POINT_10_DECIMAL format stores fractional
 /// values, so the column is REAL. Stored as `0.0` for unrated
 /// (matching AL's "0 means no score" convention); the render helper
@@ -555,7 +555,7 @@ pub async fn update_monitor_mode_with_override(
     Ok(())
 }
 
-/// #62 PR B — stamp the external account that most-recently synced
+/// #62 — stamp the external account that most-recently synced
 /// this series. Called on every successful merge action (Created,
 /// MonitorUpdated, Unchanged) so the marker stays current even if
 /// the user manually adds a series that later appears on their AL
@@ -629,7 +629,7 @@ pub async fn update_allow_upgrades(
     Ok(())
 }
 
-/// Issue #28 PR E — toggle the per-series PT upgrade opt-in. When
+/// Issue #28 — toggle the per-series PT upgrade opt-in. When
 /// false (the default), the upgrade sweep won't accept a private-
 /// tracker release as the chosen upgrade for this series. Initial
 /// grabs and manual-search grabs aren't gated.

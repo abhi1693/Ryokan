@@ -511,7 +511,7 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Issue #28 PR C — stamp the indexer attribution + the
+/// Issue #28 — stamp the indexer attribution + the
 /// respect_seed_rules flag on a grab row after the grab has been
 /// added to the download client and any per-indexer
 /// `set_seed_rules` call has been made.
@@ -524,7 +524,7 @@ pub async fn mark_failed(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 /// `indexer_id` of `None` means the grab came from Nyaa (the v1.4
 /// default); the column stays NULL. `respect_seed_rules` flips
 /// to true only when the indexer had real seed rules and the
-/// client honored them — the delete-path skip in PR C and the
+/// client honored them — the delete-path skip and the
 /// upgrade sweep's per-indexer rules in later PRs both key off
 /// this flag.
 pub async fn set_indexer_attribution(
@@ -605,7 +605,7 @@ pub async fn set_download_client(
     Ok(())
 }
 
-/// Issue #28 PR D — true when `info_hash` is already in
+/// Issue #28 — true when `info_hash` is already in
 /// `grabbed_torrents` in any active state (`pending` or
 /// `imported`). Used by the autobrr webhook to dedup against
 /// already-handled releases — autobrr can race against torznab
@@ -651,7 +651,7 @@ pub async fn client_id_for_hash(db: &SqlitePool, hash: &str) -> Option<i64> {
     .flatten()
 }
 
-/// Issue #28 PR C — read back the `respect_seed_rules` flag for
+/// Issue #28 — read back the `respect_seed_rules` flag for
 /// a grab row by hash. Used by delete paths (manual delete,
 /// upgrade-replace) to decide whether to skip the underlying
 /// `client.delete()` call so the per-tracker seed-rule policy
@@ -677,7 +677,7 @@ pub async fn respects_seed_rules(db: &SqlitePool, info_hash: &str) -> bool {
     .is_some()
 }
 
-/// Mark every `pending` grab row as `failed`. Used by the #63 Phase 2
+/// Mark every `pending` grab row as `failed`. Used by the #63
 /// client-switch handler: when the user changes `active_client` in
 /// Settings, any grab that was in-flight against the old client is
 /// now orphaned (the new client has never seen that hash). Dropping

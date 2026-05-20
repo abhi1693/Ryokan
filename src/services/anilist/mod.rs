@@ -111,6 +111,18 @@ fn search_cache_get(key: &str) -> Option<Vec<AnimeEntry>> {
 }
 
 fn search_cache_put(key: String, results: Vec<AnimeEntry>) {
+    // Skip caching empty results. The four call sites that feed this all
+    // produce empty Vecs under user-visible failure modes — AL in cooldown
+    // with Jikan also empty, AL network error, AL 403/429/5xx, and the
+    // "AL HTTP 200 with `data.Page.media: []`" branch which is the real
+    // foot gun: during an AniList search-index outage every query returns
+    // an empty success body. Caching it pinned the empty result for the
+    // full TTL even after AL recovered, so the next legitimate retry hit
+    // a stale 0 silently. A non-cached miss makes the user retype-loop
+    // self-healing as soon as upstream comes back.
+    if results.is_empty() {
+        return;
+    }
     if let Ok(mut cache) = SEARCH_CACHE.lock() {
         // Bound the cache. Simple heuristic — if we're >200 entries, drop expired
         // ones; if still too big, just clear. Search queries are long-tail anyway.
@@ -150,7 +162,7 @@ pub struct AnimeEntry {
 }
 
 /// One entry from a user's AniList watch list, projected to the
-/// fields the watch-list sync (issue #62 PR B) cares about.
+/// fields the watch-list sync (issue #62) cares about.
 ///
 /// Every authenticated AL list query returns `MediaListCollection`
 /// grouped by status (CURRENT / PLANNING / COMPLETED / DROPPED /
@@ -346,7 +358,7 @@ pub async fn fetch_media_list_collection(
         //   * `AniList rate-limited` → next tick defers, stays linked
         //   * `AniList not found` / generic → surface as `unavailable`
         //   * Authorization-shaped messages stay as `unavailable` for
-        //     now; PR B's submit/refresh path will key off the literal
+        //     now; the submit/refresh path will key off the literal
         //     message and surface a "re-link required" banner.
         let lower = err_msg.to_ascii_lowercase();
         if lower.contains("too many requests") || lower.contains("rate limit") {
@@ -504,7 +516,6 @@ fn all_buckets_are_custom_lists(lists: &[serde_json::Value]) -> bool {
 }
 
 /// Search AniList for anime by title, falling back to MAL/Jikan if AniList 403s.
-#[allow(dead_code)]
 pub async fn search_anime(query: &str) -> Result<Vec<AnimeEntry>, String> {
     search_anime_with_options(query, false).await
 }

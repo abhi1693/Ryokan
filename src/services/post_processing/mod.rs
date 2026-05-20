@@ -40,7 +40,7 @@ pub static LIBRARY_CLASSIFY_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 // the Phase 1 enum normalizes those into one representation for
 // client-agnostic checks. Pre-refactor this function only knew qBit's
 // string set, which silently skipped Deluge's completed torrents
-// forever (#63 Phase 2 regression).
+// forever (#63 regression).
 
 /// Decide whether a walked file's parsed episode number is one this
 /// grab's import should claim.
@@ -1169,7 +1169,7 @@ async fn import_torrent(
             // same old grab 12 times.
             for old_grab in &old_grabs {
                 if !old_grab.hash.is_empty() {
-                    // Issue #28 PR C — preserve PT seed rules
+                    // Issue #28 — preserve PT seed rules
                     // across upgrade-replace. The old torrent has
                     // imported and is seeding to its per-tracker
                     // ratio; deleting it mid-seed could ding the

@@ -192,7 +192,7 @@ reqwest = { version = "0.13", features = ["json", "cookies", "query", "form", "m
 # required for storing `Arc<dyn DownloadClient>` in AppState alongside
 # tokio's multi-threaded runtime. async_trait's boxed-future macro
 # sidesteps that and is the idiomatic choice for object-safe async
-# traits. Added for the DownloadClient trait (#63 Phase 1).
+# traits. Added for the DownloadClient trait (#63).
 async-trait = "0.1"
 
 # Bounded-concurrency stream combinators (`StreamExt::buffer_unordered`)
@@ -203,7 +203,7 @@ async-trait = "0.1"
 futures-util = "0.3"
 
 # HTML scraping
-scraper = "0.26"
+scraper = "0.27"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -221,14 +221,14 @@ rand = "0.10"
 hex = "0.4"
 subtle = "2"
 # AEAD encryption for OAuth tokens stored in `external_accounts`
-# (issue #62 PR A). Pure-Rust, no system deps, ~50 KB compiled.
+# (issue #62). Pure-Rust, no system deps, ~50 KB compiled.
 # ChaCha20-Poly1305 picked over AES-GCM because it has no hardware-
 # acceleration dependency — runs identically on a Raspberry Pi and an
 # x86_64 server, and the performance difference doesn't matter for
 # encrypting a handful of tokens per sync tick.
 chacha20poly1305 = "0.10"
 # Base64 encoding. Originally added as a dev-only dep for the
-# download-client smokes; promoted to a prod dep in #62 PR A because
+# download-client smokes; promoted to a prod dep in #62 because
 # the `RYOKAN_ENCRYPTION_KEY` env var is base64-encoded and
 # `services::crypto` decodes it at startup. Kept a single declaration
 # here rather than duplicating into `[dev-dependencies]` — prod code

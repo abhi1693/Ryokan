@@ -1,4 +1,4 @@
-//! Settings → Indexers CRUD handlers (issue #28 PR B).
+//! Settings → Indexers CRUD handlers (issue #28).
 //!
 //! Mirrors the shape of the groups + custom-formats settings
 //! handlers: form-driven upsert + delete that redirect back to
@@ -167,7 +167,7 @@ pub struct IndexerUpsertForm {
     /// `download_clients` this indexer routes to. Empty
     /// string = NULL (use the default client at grab time).
     pub download_client_id: Option<String>,
-    /// multi-rss PR 1 — opt this indexer into the RSS sync
+    /// Multi-RSS — opt this indexer into the RSS sync
     /// fan-out. Checkbox; presence-equivalent to true.
     pub rss_enabled: Option<String>,
 }
@@ -861,7 +861,7 @@ mod tests {
         assert_eq!(parse_optional_f64(&Some("2.5".into())), Some(2.5));
     }
 
-    /// PR G follow-up: protocol-mismatch validation on the indexer
+    /// protocol-mismatch validation on the indexer
     /// upsert path. Pinning a torznab indexer to a SAB client (or a
     /// newznab indexer to a BT client) used to silently save the row
     /// and only fail at grab time when the client rejected the URL.

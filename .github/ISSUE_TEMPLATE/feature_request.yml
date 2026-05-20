@@ -1,0 +1,28 @@
+name: Feature request
+description: Suggest something Ryokan should do
+labels: ["enhancement", "triage"]
+body:
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Before you file this
+      options:
+        - label: I've searched the [open and closed issues](https://github.com/johnthreekay/Ryokan/issues?q=is%3Aissue) and this isn't already requested.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that Ryokan makes hard or impossible right now?
+      placeholder: "I want to keep two copies of the same series, one BD batch and one weekly release, but the library treats..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: The behavior or feature you want. If you have a concrete UI or API shape in mind, sketch it.
+    validations:
+      required: true

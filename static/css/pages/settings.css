@@ -832,7 +832,7 @@ fieldset legend {
 
 .cf-score-zero { color: var(--text-dim); }
 
-/* ─── External Accounts — #62 PR E ────────────────────────────────
+/* ─── External Accounts — #62 ────────────────────────────────
    The fieldset itself is the standard connections-tab fieldset (no
    bespoke surface). Just two small primitives below to support
    the linked-state content:

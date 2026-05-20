@@ -1,4 +1,4 @@
-//! Torznab/newznab `Indexer` impl (issue #28 PR B).
+//! Torznab/newznab `Indexer` impl (issue #28).
 //!
 //! Wire format is RSS 2.0 with `<torznab:attr name="X" value="Y"/>`
 //! sibling extensions on each `<item>`. Same shape across torznab

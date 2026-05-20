@@ -13,7 +13,7 @@
         {% if !suggestions.is_empty() %}
         {# Suggested mappings — promoted to the top so the user sees
            what's actionable without scrolling past the (long)
-           current-entries table. Phase 7 PR G. #}
+           current-entries table. #}
         <h3 class="settings-subheading">Suggested Mappings ({{ suggestions.len() }})</h3>
         <p class="form-hint">Inferred from your manual classification overrides. When you've pinned multiple episodes from the same release group to the same source, Ryokan surfaces it here so you can teach the identity table.</p>
         <div class="table-scroll-wrap">
@@ -56,7 +56,7 @@
         </div>
         {% endif %}
 
-        {# Current entries comes BEFORE the Add form (Phase 7 PR G).
+        {# Current entries comes BEFORE the Add form.
            The previous layout sandwiched the Add form between the
            Suggestions and Current Entries tables, breaking the
            visual flow + hiding the bulk of the data behind a long

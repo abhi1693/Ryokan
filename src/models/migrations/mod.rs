@@ -833,7 +833,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Issue #62 PR A — external AL/MAL account linkage. One row per
+    // Issue #62 — external AL/MAL account linkage. One row per
     // linked provider (decision #10 limits this to one row total at
     // any time; the "at most one" invariant is enforced in the
     // `external_accounts` model's `link` function rather than in the
@@ -904,7 +904,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #62 PR B — track which external_account most-recently synced
+    // #62 — track which external_account most-recently synced
     // each series. NULL for manually-added series + pre-PR-B rows.
     // Used by sync's removal-detection pass: on full-resync, series
     // marked with a sync source whose AL id is NOT in the current
@@ -919,7 +919,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // #62 PR B — pinned monitor_mode flag. Set when the user changes
+    // #62 — pinned monitor_mode flag. Set when the user changes
     // monitor_mode through the per-series UI; cleared when the user
     // picks "Sync from AL/MAL" from the same dropdown. The
     // watch-list sync's merge step skips updating monitor_mode on
@@ -936,7 +936,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // #62 PR C — user's personal score on the linked AL/MAL account
+    // #62 — user's personal score on the linked AL/MAL account
     // for this series. NULL means "no linked account" or "unrated"
     // (the watch-list sync writes 0.0 for unrated entries; the read
     // path treats 0.0 the same as NULL when rendering — never shows
@@ -948,7 +948,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #62 PR D — AL custom-list membership. AL groups list entries
+    // #62 — AL custom-list membership. AL groups list entries
     // into status buckets (CURRENT/PLANNING/etc.) plus zero or more
     // user-named custom lists; a series can belong to many at once.
     // The sync engine pulls per-entry membership in the same
@@ -982,7 +982,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // #62 PR E — genre side table for the library filter dropdown.
+    // #62 — genre side table for the library filter dropdown.
     // Genres come from AL/Jikan AnimeDetail.genres (already cached
     // in series_metadata_cache); we extract them into their own
     // table on every metadata refresh + sync merge so the filter +
@@ -1010,7 +1010,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // #62 PR E — count of MAL→AL mapping failures from the most
+    // #62 — count of MAL→AL mapping failures from the most
     // recent sync run. Surfaces on the Settings → External Accounts
     // card as a "N series couldn't be mapped to AniList" banner so
     // the user knows which subset of their MAL list is on the
@@ -1023,7 +1023,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // #62 PR E — sticky flag set when a sync tick fails because
+    // #62 — sticky flag set when a sync tick fails because
     // the auth token was rejected (AL 401/403 or MAL refresh-token
     // dead). Cleared on the next successful tick. Drives the
     // "Re-link required" banner on the External Accounts card so
@@ -1236,7 +1236,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // search_on_monitoring_change (#1.3.0 UX pass): when true, any
+    // search_on_monitoring_change (v1.3.0 UX pass): when true, any
     // update to a series's monitoring mode triggers a background
     // auto-search over the newly-monitored-and-airable episodes.
     // Default off to preserve existing behavior on upgrade.
@@ -1294,7 +1294,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Issue #28 PR E — per-series PT upgrade opt-in. Default 0 (off).
+    // Issue #28 — per-series PT upgrade opt-in. Default 0 (off).
     // The upgrade sweep skips a candidate when the source indexer is
     // a private tracker (`indexers.is_private_tracker = 1`) and this
     // flag is 0. Initial / manual / interactive grabs aren't gated —
@@ -1408,7 +1408,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .ok();
 
     // Sonarr-parity dual-path tracking (#14 follow-up, renamed to
-    // `client_content_path` in #63 Phase 1). Stamped from the download
+    // `client_content_path` in #63). Stamped from the download
     // client's native content path (qBit ≥ 2.6.1) or `save_path`
     // fallback the moment the client reports the torrent complete,
     // independent of whether post-processing has moved the file into
@@ -1425,7 +1425,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     // rewrite, so leaving the legacy ADD in place rewrites
     // `grabbed_torrents` on every startup.
 
-    // ── #63 Phase 1 — pluggable download clients ───────────────────────
+    // ── #63 — pluggable download clients ───────────────────────
     //
     // `client_type` discriminator on each grab row so a future
     // multi-client config (Phase 2+) can route per-client operations
@@ -1468,7 +1468,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #63 Phase 2 — Deluge credentials + label. The label is Deluge's
+    // #63 — Deluge credentials + label. The label is Deluge's
     // scoping mechanism (Ryokan sets it per-grab via
     // `label.set_torrent`) and defaults to "ryokan" at trait-impl
     // construction when empty here. Same base-URL pattern as qBit
@@ -1486,7 +1486,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #63 Phase 2 — Per-client download path, same shape as the
+    // #63 — Per-client download path, same shape as the
     // long-standing `qbit_download_path`. Ryokan reads the client's
     // completed files from `<client>_download_path`; the client's
     // own reported save_path (container-internal, or on a seedbox)
@@ -1501,7 +1501,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // #63 Phase 3 — Transmission credentials + label + download_path.
+    // #63 — Transmission credentials + label + download_path.
     // Transmission uses HTTP Basic auth (user + password) rather than
     // Deluge's password-only model. Native 4.x `labels: [String]` on
     // `torrent-add`/`torrent-get` is our scoping mechanism.
@@ -1528,7 +1528,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // #63 Phase 4 — rtorrent credentials + label + download_path.
+    // #63 — rtorrent credentials + label + download_path.
     // URL is the full XML-RPC endpoint (e.g. `http://host:8081/RPC2`)
     // taken verbatim — deployment shape varies too much to infer a
     // default path suffix. Scoping label stored in rtorrent's
@@ -1606,7 +1606,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .await;
 
-    // ── #63 Phase 0 follow-up — legacy base32 hash backfill ────────────
+    // ── #63 follow-up — legacy base32 hash backfill ────────────
     //
     // Phase 0 canonicalized `extract_hash` to lowercase hex going
     // forward, but any pre-Phase-0 rows with 32-char base32 values in
@@ -2082,7 +2082,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // Issue #62 PR B — watch-list sync interval in minutes. Default
+    // Issue #62 — watch-list sync interval in minutes. Default
     // 30 (decision #5). Range 15..=10080 enforced at the settings-
     // save handler and clamped again on read by the supervised task,
     // so a hand-edited DB row can't push the cadence into a value
@@ -2095,9 +2095,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .await
     .ok();
 
-    // Issue #28 PR A — torznab/newznab indexer registry. Foundation
-    // for v1.5's multi-indexer support; PR B wires the actual
-    // TorznabIndexer impl. Schema mirrors the plan doc:
+    // Issue #28 — torznab/newznab indexer registry. Foundation
+    // for v1.5's multi-indexer support; the TorznabIndexer impl
+    // that consumes these rows lands alongside it. Schema:
     //   - `kind` is `'torznab' | 'newznab'`. Nyaa stays out-of-band
     //     (decision #1) and never gets a row here.
     //   - `priority` follows Sonarr's convention (lower = preferred,
@@ -2139,7 +2139,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // Issue #28 PR A — `grabbed_torrents.indexer_id` records which
+    // Issue #28 — `grabbed_torrents.indexer_id` records which
     // indexer surfaced each grab. Nullable, no real FK: SQLite
     // can't add a FOREIGN KEY constraint via ALTER TABLE, so the
     // column is structurally unconstrained. The
@@ -2166,9 +2166,9 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Issue #28 PR A — `grabbed_torrents.respect_seed_rules` flags
+    // Issue #28 — `grabbed_torrents.respect_seed_rules` flags
     // grabs whose torrents have per-torrent seed-ratio / seed-time
-    // rules applied at add time (PR C). Delete paths (manual delete,
+    // rules applied at add time. Delete paths (manual delete,
     // upgrade-replacement) skip torrents with this flag so the
     // client can finish seeding to the per-tracker target before
     // teardown. Nyaa grabs default 0; PT grabs default 1.
@@ -2197,19 +2197,19 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Issue #28 PR A — per-series PT-upgrade opt-in (decision: PR E
-    // wires the UI + sweep filter; column lands here so PR B's
-    // search code can already filter on it without a chained
-    // migration in PR E). Default FALSE so a user upgrading from
-    // 1.4.x sees no change in behavior.
+    // Issue #28 — per-series PT-upgrade opt-in. The UI + sweep
+    // filter land in a later change; the column lands here up front
+    // so the search code can filter on it without a chained
+    // migration. Default FALSE so a user upgrading from 1.4.x sees
+    // no change in behavior.
     sqlx::query("ALTER TABLE series ADD COLUMN allow_pt_upgrades INTEGER NOT NULL DEFAULT 0")
         .execute(db)
         .await
         .ok();
 
-    // Issue #28 PR A — autobrr push endpoint API key. Empty string
+    // Issue #28 — autobrr push endpoint API key. Empty string
     // until the user generates one via Settings → Connections →
-    // autobrr (PR D). Empty disables the webhook entirely; PR D's
+    // autobrr. Empty disables the webhook entirely; the
     // `/api/webhook/autobrr` middleware rejects when the key is
     // empty so a fresh install doesn't accept anonymous pushes.
     sqlx::query("ALTER TABLE config ADD COLUMN autobrr_api_key TEXT NOT NULL DEFAULT ''")
@@ -2409,7 +2409,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         }
     }
 
-    // multi-rss PR 1 — user-configured RSS feeds (Option A). Custom
+    // Multi-RSS — user-configured RSS feeds (Option A). Custom
     // feeds beyond Nyaa-direct: per-uploader Nyaa filters, SubsPlease's
     // direct per-quality feeds, indexer-of-the-week aggregators, etc.
     // The sync loop fetches every enabled row each tick and merges
@@ -2434,7 +2434,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
-    // multi-rss PR 1 — Option B: let an enabled torznab/newznab indexer
+    // Multi-RSS — Option B: let an enabled torznab/newznab indexer
     // contribute its `?t=tvsearch&extended=1` (or `&t=search` newznab
     // RSS) endpoint to the per-tick fan-out. Default 0 (off) so the
     // existing search-only indexer fan-out is unaffected; users opt
@@ -2543,7 +2543,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
-    // Phase 7 PR E — Nyaa-specific RSS opt-out. Default 0 so existing
+    // Nyaa-specific RSS opt-out. Default 0 so existing
     // installs keep polling Nyaa; user flips on when they only want
     // indexer-RSS / direct-RSS feeds polled. Distinct from
     // `rss_master_enabled` (which kills the whole sync) and

@@ -183,7 +183,7 @@ pub trait DownloadClient: Send + Sync {
         "torrent"
     }
 
-    /// Issue #28 PR C — apply per-torrent seed-rule overrides
+    /// Issue #28 — apply per-torrent seed-rule overrides
     /// after [`add_torrent`]. Caller invokes this immediately after
     /// the grab when the source indexer has seed rules configured;
     /// the client enforces the rule on its own (Ryokan doesn't
@@ -237,7 +237,7 @@ pub trait DownloadClient: Send + Sync {
 
 /// Per-torrent seed-rule overrides. Both fields are optional —
 /// `None` means "don't change this rule on the client side."
-/// Issue #28 PR C maps these to the client's native API per the
+/// Issue #28 maps these to the client's native API per the
 /// trait method's per-impl mapping table.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SeedRules {
@@ -270,7 +270,7 @@ impl SeedRules {
     }
 }
 
-/// Issue #28 PR C — apply per-indexer seed rules after a successful
+/// Issue #28 — apply per-indexer seed rules after a successful
 /// `add_torrent`. Looks up the indexer row by id, builds a
 /// [`SeedRules`], and calls the trait method.
 ///
@@ -600,7 +600,7 @@ pub async fn rebuild_clients_cache(cache: &crate::DownloadClientsCache, db: &sql
                 &row.password,
                 &row.label,
             ))),
-            // PR G — SAB takes (url, username, api_key, category).
+            // SAB takes (url, username, api_key, category).
             // The `download_clients.password` column carries the SAB
             // API key for usenet rows (SAB has no per-user auth at
             // the API layer; the API key is the only credential).
@@ -726,9 +726,9 @@ pub async fn wait_for_files(
 /// Returns an empty string if `files` is empty (metadata not yet
 /// known) — caller should check and retry.
 ///
-/// Phase 1: unused (qBit impl uses its native `content_path` field).
-/// Phase 2+ impls will call this to produce a client-agnostic path.
-#[allow(dead_code)]
+/// qBit uses its native `content_path` field; the Deluge and
+/// Transmission impls call this to derive the equivalent
+/// client-agnostic path from `save_path` + the file list.
 pub fn compute_content_path(save_path: &str, files: &[DownloadFile]) -> String {
     if files.is_empty() {
         return String::new();
@@ -999,8 +999,8 @@ mod tests {
 
     #[test]
     fn download_item_wire_shape_carries_state_kind() {
-        // Regression for the PR C badge refactor: state_kind used to
-        // be `#[serde(skip)]` and the JS state-label map keyed off
+        // Regression for the download-state badge refactor: state_kind
+        // used to be `#[serde(skip)]` and the JS state-label map keyed off
         // the client-native `state` string. After switching to the
         // kebab enum on both sides, state_kind MUST appear on the
         // wire or the Downloads queue page renders every row with

@@ -851,7 +851,7 @@ mod tests {
         db
     }
 
-    // ─── schema_migrations ledger round-trip (PR 6) ────────────────
+    // ─── schema_migrations ledger round-trip ────────────────
 
     #[tokio::test]
     async fn ensure_schema_migrations_table_is_idempotent() {

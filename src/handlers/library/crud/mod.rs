@@ -39,6 +39,19 @@ struct EpisodeMonitorButtonContext {
     monitored: bool,
 }
 
+/// Inline save-status pill returned by `set_search_overrides` and any
+/// future series-page "POST a value, show a status pill" handler that
+/// fits the same shape. Issue #166 — replaces the JS-driven status
+/// label that lived at `static/js/series_config.js::saveSeriesSearchOverrides`.
+/// `ok=true` renders the success variant (CSS auto-fades after 2s);
+/// `ok=false` renders the message inline so the failure stays visible.
+#[derive(Template)]
+#[template(path = "partials/series/save_status_pill.html")]
+struct SaveStatusPillPartial {
+    ok: bool,
+    message: String,
+}
+
 use super::reconcile::reconcile_all_fallback_entries;
 use super::search::{AutoSearchQuery, auto_search_series};
 use super::{
@@ -124,6 +137,21 @@ pub async fn add_series(
                             "provider_id={}, mal_id={:?}, episodes={:?}",
                             detail.id, detail.id_mal, detail.episodes
                         ),
+                    )
+                    .await;
+                    // Re-derive monitoring now that the episode map (with
+                    // aired dates) is populated. `load_episode_info` is
+                    // cache-only by design (no blocking Jikan walk inside
+                    // the request handlers), so the synchronous
+                    // `recompute_series_monitoring` in `add_series` above
+                    // ran against an empty map and the aired-date-aware
+                    // modes (Missing / Future) used the degraded heuristic.
+                    // This catch-up pass — off the request path — picks up
+                    // the real aired dates. Quiet on failure; the next
+                    // monitor-mode change or series-page render recomputes.
+                    let _ = monitoring_service::recompute_series_monitoring(
+                        &db_clone,
+                        tracked_clone.id,
                     )
                     .await;
                 }
@@ -518,8 +546,9 @@ pub(crate) async fn apply_monitor_mode(
 )]
 pub async fn set_monitoring(
     State(state): State<AppState>,
-    Json(form): Json<SetMonitoringForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetMonitoringForm>,
+) -> Result<Response, (StatusCode, String)> {
     let series_id = form.series_id;
 
     // "sync" sentinel: clear the manual-override flag, leave the
@@ -529,10 +558,10 @@ pub async fn set_monitoring(
     if form.monitor_mode == MONITOR_MODE_SYNC_SENTINEL {
         series::update_monitor_mode_manual_override(&state.db, series_id, false)
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
             .await
-            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         logger::info(
             &state.db,
             LogCategory::Library,
@@ -540,14 +569,17 @@ pub async fn set_monitoring(
             "next sync tick will apply the AL/MAL-derived monitor_mode",
         )
         .await;
-        return Ok(Json(serde_json::json!({
-            "ok": true,
-            "monitor_mode": summary.mode.as_str(),
-            "monitor_mode_label": summary.mode.label(),
-            "monitor_mode_manual_override": false,
-            "monitored_count": summary.monitored_count,
-            "total_count": summary.total_count,
-        })));
+        return Ok(monitoring_response(
+            is_htmx,
+            serde_json::json!({
+                "ok": true,
+                "monitor_mode": summary.mode.as_str(),
+                "monitor_mode_label": summary.mode.label(),
+                "monitor_mode_manual_override": false,
+                "monitored_count": summary.monitored_count,
+                "total_count": summary.total_count,
+            }),
+        ));
     }
 
     let mode = monitoring::MonitorMode::from_str(&form.monitor_mode);
@@ -559,10 +591,10 @@ pub async fn set_monitoring(
     // episode_monitor_state; running it twice is harmless.
     series::update_monitor_mode_with_override(&state.db, series_id, mode.as_str(), true)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let summary = monitoring_service::recompute_series_monitoring(&state.db, series_id)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     logger::info(
         &state.db,
@@ -581,7 +613,7 @@ pub async fn set_monitoring(
     //   1. The caller explicitly asked for it via `form.auto_grab`
     //      (e.g. the add-series flow does this once to seed the
     //      library), gated on `config.auto_grab_on_add`; or
-    //   2. `config.search_on_monitoring_change` is on (#1.3.0 opt-in
+    //   2. `config.search_on_monitoring_change` is on (v1.3.0 opt-in
     //      flag). This fires on every monitoring change so users who
     //      flip `none → all` get an immediate delta-search without
     //      needing to click an extra button.
@@ -628,14 +660,38 @@ pub async fn set_monitoring(
         }
     }
 
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "monitor_mode": summary.mode.as_str(),
-        "monitor_mode_label": summary.mode.label(),
-        "monitor_mode_manual_override": true,
-        "monitored_count": summary.monitored_count,
-        "total_count": summary.total_count,
-    })))
+    Ok(monitoring_response(
+        is_htmx,
+        serde_json::json!({
+            "ok": true,
+            "monitor_mode": summary.mode.as_str(),
+            "monitor_mode_label": summary.mode.label(),
+            "monitor_mode_manual_override": true,
+            "monitored_count": summary.monitored_count,
+            "total_count": summary.total_count,
+        }),
+    ))
+}
+
+/// HTMX path returns empty 200 + `HX-Refresh: true` so htmx triggers
+/// a real `window.location.reload()` — equivalent to the prior JS
+/// `location.reload()` in setMonitoring + confirmMonitoring without
+/// the imperative fetch wrapper. Non-HTMX callers (`toggleMonitorAll`
+/// in `series_episode_actions.js` which updates many DOM elements
+/// imperatively) keep getting the JSON summary they consume.
+fn monitoring_response(is_htmx: bool, body: serde_json::Value) -> Response {
+    if is_htmx {
+        (
+            [(
+                axum::http::header::HeaderName::from_static("hx-refresh"),
+                "true",
+            )],
+            StatusCode::OK,
+        )
+            .into_response()
+    } else {
+        Json(body).into_response()
+    }
 }
 
 #[utoipa::path(
@@ -706,11 +762,12 @@ pub async fn set_episode_monitoring(
 )]
 pub async fn set_allow_upgrades(
     State(state): State<AppState>,
-    Json(form): Json<SetAllowUpgradesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetAllowUpgradesForm>,
+) -> Result<Response, (StatusCode, String)> {
     series::update_allow_upgrades(&state.db, form.series_id, form.allow)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -721,14 +778,24 @@ pub async fn set_allow_upgrades(
         "",
     )
     .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "series_id": form.series_id,
-        "allow_upgrades": form.allow,
-    })))
+    // HTMX checkboxes (#166): the visual state is already what the
+    // user clicked; just acknowledge with empty 200 + `hx-swap="none"`
+    // on the input. The non-HTMX branch returns JSON; note the request
+    // body is form-encoded either way (this is `Form<T>`, so an
+    // `application/json` POST would 415, not reach the JSON branch).
+    if is_htmx {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "series_id": form.series_id,
+            "allow_upgrades": form.allow,
+        }))
+        .into_response())
+    }
 }
 
-/// Issue #28 PR E — toggle the per-series PT upgrade opt-in.
+/// Issue #28 — toggle the per-series PT upgrade opt-in.
 /// Default off; the upgrade sweep won't grab a private-tracker
 /// release as the chosen upgrade for this series unless the
 /// flag is on. Initial grabs and manual searches aren't gated.
@@ -746,11 +813,12 @@ pub async fn set_allow_upgrades(
 )]
 pub async fn set_allow_pt_upgrades(
     State(state): State<AppState>,
-    Json(form): Json<SetAllowPtUpgradesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetAllowPtUpgradesForm>,
+) -> Result<Response, (StatusCode, String)> {
     series::update_allow_pt_upgrades(&state.db, form.series_id, form.allow)
         .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -761,11 +829,16 @@ pub async fn set_allow_pt_upgrades(
         "",
     )
     .await;
-    Ok(Json(serde_json::json!({
-        "ok": true,
-        "series_id": form.series_id,
-        "allow_pt_upgrades": form.allow,
-    })))
+    if is_htmx {
+        Ok(StatusCode::OK.into_response())
+    } else {
+        Ok(Json(serde_json::json!({
+            "ok": true,
+            "series_id": form.series_id,
+            "allow_pt_upgrades": form.allow,
+        }))
+        .into_response())
+    }
 }
 
 /// #23 — Update the per-series search overrides (custom Nyaa tokens +
@@ -785,16 +858,52 @@ pub async fn set_allow_pt_upgrades(
 )]
 pub async fn set_search_overrides(
     State(state): State<AppState>,
-    Json(form): Json<SetSearchOverridesForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
-    series::update_search_overrides(
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetSearchOverridesForm>,
+) -> Result<Response, (StatusCode, String)> {
+    let result = series::update_search_overrides(
         &state.db,
         form.series_id,
         &form.custom_query_tokens,
         &form.restrict_to_uploader,
     )
-    .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .await;
+
+    // HTMX inline-result swap — per templates/CLAUDE.md, always-200
+    // so the partial replaces the status-pill slot regardless of
+    // success/failure. Error pill renders the message instead of
+    // dropping the swap (which would leave a stuck "Saving…" string).
+    if is_htmx {
+        if let Err(e) = result {
+            let html = SaveStatusPillPartial {
+                ok: false,
+                message: format!("Failed to save overrides: {e}"),
+            }
+            .render()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            return Ok(Html(html).into_response());
+        }
+        logger::info(
+            &state.db,
+            LogCategory::Library,
+            &format!("Search overrides updated for series {}", form.series_id),
+            &format!(
+                "tokens={:?} restrict_to={:?}",
+                form.custom_query_tokens.trim(),
+                form.restrict_to_uploader.trim(),
+            ),
+        )
+        .await;
+        let html = SaveStatusPillPartial {
+            ok: true,
+            message: String::new(),
+        }
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Html(html).into_response());
+    }
+
+    result.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     logger::info(
         &state.db,
         LogCategory::Library,
@@ -811,7 +920,8 @@ pub async fn set_search_overrides(
         "series_id": form.series_id,
         "custom_query_tokens": form.custom_query_tokens.trim(),
         "restrict_to_uploader": form.restrict_to_uploader.trim(),
-    })))
+    }))
+    .into_response())
 }
 
 /// Apply (or clear) a user's manual source/resolution override for a single
@@ -832,8 +942,9 @@ pub async fn set_search_overrides(
 )]
 pub async fn set_manual_override(
     State(state): State<AppState>,
-    Json(form): Json<SetManualOverrideForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<SetManualOverrideForm>,
+) -> Result<Response, (StatusCode, String)> {
     use crate::services::source::{Resolution, Source, WebKind};
 
     // Validate + canonicalize the form fields *before* writing.
@@ -843,14 +954,14 @@ pub async fn set_manual_override(
         let parsed_source = Source::from_str(&form.source);
         if parsed_source == Source::Unknown {
             return Err((
-                axum::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 format!("invalid source: {:?}", form.source),
             ));
         }
         let parsed_resolution = Resolution::from_str(&form.resolution);
         if parsed_resolution == Resolution::Unknown {
             return Err((
-                axum::http::StatusCode::BAD_REQUEST,
+                StatusCode::BAD_REQUEST,
                 format!("invalid resolution: {:?}", form.resolution),
             ));
         }
@@ -873,7 +984,7 @@ pub async fn set_manual_override(
         &web_kind_str,
     )
     .await
-    .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let action = if source_str.is_empty() {
         "cleared".to_string()
@@ -891,6 +1002,23 @@ pub async fn set_manual_override(
     )
     .await;
 
+    // HTMX path returns empty 200 + `HX-Refresh: true` so htmx triggers
+    // a full `window.location.reload()`. Matches the prior JS behavior
+    // (location.reload() on success in `series_config.js`) without the
+    // imperative fetch wrapper. The override modal is decorative once
+    // the override lands — the row's quality tag re-renders from the
+    // refreshed page state.
+    if is_htmx {
+        return Ok((
+            [(
+                axum::http::header::HeaderName::from_static("hx-refresh"),
+                "true",
+            )],
+            StatusCode::OK,
+        )
+            .into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -898,7 +1026,8 @@ pub async fn set_manual_override(
         "source": source_str,
         "resolution": resolution_str,
         "is_remux": form.is_remux,
-    })))
+    }))
+    .into_response())
 }
 
 /// Batch apply manual overrides. The bulk-actions UI on `/library/review`
@@ -1047,8 +1176,9 @@ pub async fn bulk_manual_override(
 )]
 pub async fn reclassify_episode(
     State(state): State<AppState>,
-    Json(form): Json<ReclassifyEpisodeForm>,
-) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, String)> {
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<ReclassifyEpisodeForm>,
+) -> Result<Response, (StatusCode, String)> {
     use crate::services::source::{self, SeriesContext};
     use std::path::Path;
 
@@ -1248,6 +1378,31 @@ pub async fn reclassify_episode(
     )
     .await;
 
+    if is_htmx {
+        // Render the verdict into the save-status pill so the user sees
+        // the new tag + confidence before the page reloads. The 600ms
+        // delay before reload (set in the template's hx-on::after-request)
+        // gives them time to read it. Pill copy mirrors the prior JS
+        // text at series_config.js::reclassifyEpisode.
+        let pill_message = format!(
+            "→ {} (conf {:.2}{})",
+            label,
+            result.confidence,
+            if result.needs_review {
+                ", needs review"
+            } else {
+                ""
+            }
+        );
+        let html = SaveStatusPillPartial {
+            ok: true,
+            message: pill_message,
+        }
+        .render()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        return Ok(Html(html).into_response());
+    }
+
     Ok(Json(serde_json::json!({
         "ok": true,
         "series_id": form.series_id,
@@ -1260,7 +1415,8 @@ pub async fn reclassify_episode(
         "web_kind": result.web_kind.as_str(),
         "confidence": result.confidence,
         "needs_review": result.needs_review,
-    })))
+    }))
+    .into_response())
 }
 
 #[utoipa::path(

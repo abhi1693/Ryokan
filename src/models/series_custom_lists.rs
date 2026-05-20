@@ -1,4 +1,4 @@
-//! AniList custom-list membership side table (issue #62 PR D).
+//! AniList custom-list membership side table (issue #62).
 //!
 //! Sync writes one row per (series, provider, custom-list-name) on
 //! every merge action. The detail page renders a badge row from

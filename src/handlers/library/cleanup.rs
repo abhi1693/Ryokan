@@ -2,7 +2,7 @@
 //! handler ([`crud::remove_series`]) and the bulk delete handler
 //! ([`bulk::delete_one_series`]) call into [`cleanup_series_files`] so
 //! the security-critical canonicalize-and-`starts_with` guard, the PT
-//! seed-rule honor (issue #28 PR C), the SAB stamped-source-path
+//! seed-rule honor (issue #28), the SAB stamped-source-path
 //! cleanup, and the Jellyfin refresh nudge all stay in lockstep.
 //!
 //! Before this lived in one place, the bulk path silently bypassed the
@@ -155,7 +155,7 @@ pub async fn cleanup_series_files(
         if hash.is_empty() {
             continue;
         }
-        // Issue #28 PR C — preserve PT seed rules across removal. A
+        // Issue #28 — preserve PT seed rules across removal. A
         // user wiping a series typically wants ratio policies
         // honored; the `grabbed_torrents` row gets dropped below
         // either way (delete_all_for_series), so the upgrade sweep

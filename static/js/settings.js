@@ -854,7 +854,7 @@ function generateRadarrApiKey() {
     document.getElementById('radarr_api_key').value = key;
 }
 
-// #63 Phase 2 — show/hide the credential fieldset for the selected
+// #63 — show/hide the credential fieldset for the selected
 // download client. Both fieldsets stay in the DOM so a user
 // mid-edit doesn't lose form state when they toggle back.
 function toggleClientFieldset(value) {
@@ -1093,7 +1093,7 @@ if (typeof window.ryokanRegisterPageInit === 'function') {
     bindSettingsDirtyGuard();
 }
 
-// ── External Accounts (AL / MAL, issue #62 PR A) ──────────────────────
+// ── External Accounts (AL / MAL, issue #62) ──────────────────────
 //
 // Three interactions on the Settings → Integrations → External
 // Accounts card:
@@ -1436,7 +1436,7 @@ function saveExternalAccountPrefs() {
     }, 250);
 }
 
-// #62 PR E — live updater for `[data-relative-time]` elements.
+// #62 — live updater for `[data-relative-time]` elements.
 // Mirrors the Rust-side `humanize_relative_time` policy so the
 // label that JS produces matches what a fresh page load from the
 // server would produce. Re-runs every 30 seconds; the user

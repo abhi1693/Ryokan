@@ -1,4 +1,4 @@
-//! End-to-end watch-list sync test (issue #62 PR B).
+//! End-to-end watch-list sync test (issue #62).
 //!
 //! Stands up a wiremock server that pretends to be AL's GraphQL
 //! endpoint, points Ryokan at it via `RYOKAN_ANILIST_API_BASE`, seeds
@@ -542,7 +542,7 @@ async fn watch_list_sync_emits_relink_notification_only_on_false_to_true_transit
     }
 }
 
-/// Issue #62 PR E + #118 — when a sync succeeds on a later tick
+/// Issue #62 + #118 — when a sync succeeds on a later tick
 /// (user re-linked their account), `last_sync_auth_failed` must
 /// clear back to false. This is the precondition for the transition
 /// gate to ever fire again — without the clear, every subsequent

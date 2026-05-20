@@ -115,93 +115,33 @@ function getTitleByLang(entry, lang) {
 
 // Title-language switching for `.title-switcher` elements is handled by
 // CSS via the `html[data-title-language]` attribute that base.html sets
-// pre-paint. `getTitleByLang` above is still used for search results and
-// modal titles that render via innerHTML rather than title-switcher spans.
+// pre-paint. `getTitleByLang` above is still used by `addSeries` for the
+// monitor-mode modal title (rendered via textContent, not a switcher span).
 
 // Per-search provider override. Defaults to AniList; the user can flip
 // to MAL via the toggle in the Add Series modal. The selection is
 // remembered across modal opens within the page session, but resets on
 // a hard reload (no localStorage — explicit-each-session by design).
-var currentSearchSource = 'al';
+// Issue #166 — AL/MAL search migrated to `hx-get` on the
+// `#anilist-query` input. The handler at `/api/anilist/search` returns
+// the rendered partial under HX-Request, JSON otherwise (preserving the
+// existing programmatic-caller contract). `currentSearchSource` lives on
+// `window` so the input's `hx-vals='js:...'` expression can read it
+// without grabbing module-scope identifiers across boost re-execute.
+window.currentSearchSource = window.currentSearchSource || 'al';
 
 function setSearchSource(btn) {
-    currentSearchSource = btn.dataset.source;
+    window.currentSearchSource = btn.dataset.source;
     document.querySelectorAll('.search-source-toggle .btn-pill').forEach(b => {
         b.classList.toggle('active', b === btn);
     });
-}
-
-function searchAnilist() {
-    const q = document.getElementById('anilist-query').value.trim();
-    if (!q) return;
-
-    const container = document.getElementById('anilist-results');
-    container.innerHTML = '<p class="loading-text">Searching titles...</p>';
-
-    fetch(`/api/anilist/search?q=${encodeURIComponent(q)}&source=${currentSearchSource}`)
-        .then(r => {
-            if (!r.ok) {
-                return r.text().then(msg => {
-                    const trimmed = (msg || '').trim();
-                    throw new Error(trimmed || `Search failed (HTTP ${r.status})`);
-                });
-            }
-            return r.json();
-        })
-        .then(results => {
-            if (!results.length) {
-                container.innerHTML = '<p class="loading-text">No results found.</p>';
-                return;
-            }
-
-            const lang = localStorage.getItem('titleLanguage') || initialTitleLanguage || 'english';
-            container.innerHTML = results.map(r => {
-                const title = getTitleByLang(r, lang);
-                const subtitle = lang === 'english'
-                    ? (r.title_romaji || r.title_native || '')
-                    : (r.title_english || r.title_romaji || r.title_native || '');
-                const eps = r.episodes ? `${r.episodes} eps` : '?';
-                const isMal = r.source === 'mal';
-                const sourceLabel = isMal ? 'MAL' : 'AniList';
-                // External link to the provider page matching whichever
-                // source served the row. AL rows use the AniList id.
-                // MAL rows need `id_mal` — if a MAL-served row somehow
-                // arrives without one (shouldn't happen from Jikan, but
-                // defensively), fall back to rendering the cover/title
-                // as plain non-link markup rather than an href pointing
-                // at myanimelist.net with an AL id, which 404s.
-                const externalHref = isMal
-                    ? (r.id_mal ? `https://myanimelist.net/anime/${r.id_mal}` : null)
-                    : `https://anilist.co/anime/${r.id}`;
-                const coverMarkup = externalHref
-                    ? `<a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-cover-link" title="Open on ${escAttr(sourceLabel)}">
-                            <img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">
-                        </a>`
-                    : `<img src="${escAttr(r.cover_url)}" alt="" class="anilist-cover" loading="lazy">`;
-                const titleMarkup = externalHref
-                    ? `<a href="${escAttr(externalHref)}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on ${escAttr(sourceLabel)}">${escHtml(title)}</a>`
-                    : escHtml(title);
-                return `
-                    <div class="anilist-result">
-                        ${coverMarkup}
-                        <div class="anilist-info">
-                            <p class="anilist-title">${titleMarkup}</p>
-                            <p class="anilist-subtitle">${escHtml(subtitle)}</p>
-                            <div class="anilist-meta">
-                                <span class="tag tag-res">${escHtml((r.format || 'TBA').replace(/_/g, ' '))}</span>
-                                <span class="tag tag-res">${eps}</span>
-                                <span class="tag tag-status-${escAttr((r.status || "").toLowerCase())}">${escHtml((r.status_display || r.status || "").replace(/_/g, " "))}</span>
-                                <span>${escHtml(sourceLabel)}</span>
-                            </div>
-                        </div>
-                        <button class="btn btn-primary btn-add" onclick="addSeries(${r.id}, this)" data-entry='${escAttr(JSON.stringify(r))}'>Add</button>
-                    </div>
-                `;
-            }).join('');
-        })
-        .catch(err => {
-            container.innerHTML = `<p class="loading-text">Error: ${escHtml(err.message)}</p>`;
-        });
+    // Re-fire the HTMX search with the new source. `htmx.trigger` on a
+    // synthetic event name listed in the input's `hx-trigger` causes
+    // HTMX to re-issue the `hx-get` with the updated `hx-vals`.
+    var input = document.getElementById('anilist-query');
+    if (input && (input.value || '').trim() && window.htmx) {
+        window.htmx.trigger(input, 'ryokan:search');
+    }
 }
 
 var _pendingSeriesId = null;
@@ -263,30 +203,19 @@ function selectMonitorMode(btn) {
     _selectedMonitorMode = btn.dataset.mode;
 }
 
-function confirmMonitoring() {
-    if (!_pendingSeriesId) { location.reload(); return; }
-    const confirmBtn = document.getElementById('monitor-confirm-btn');
-    confirmBtn.disabled = true;
-    confirmBtn.textContent = '...';
-    fetch('/api/library/monitoring', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ series_id: _pendingSeriesId, monitor_mode: _selectedMonitorMode, auto_grab: true })
-    })
-    .then(() => location.reload())
-    .catch(() => location.reload());
-}
-
-function escHtml(s) {
-    if (!s) return '';
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-}
-
-function escAttr(s) {
-    if (!s) return '';
-    return s.replace(/&/g,'&amp;').replace(/'/g,'&#39;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+// Issue #166 — confirmMonitoring moved to declarative hx-post on the
+// monitor-confirm-btn in templates/index.html. The button reads its
+// payload from `confirmMonitoringVals()` via `hx-vals='js:'`, and the
+// server returns `HX-Refresh: true` so htmx reloads the page on
+// success. The pre-migration fallback `if (!_pendingSeriesId)
+// location.reload()` is preserved by `hx-on::response-error="window.
+// location.reload()"` plus the 400 the handler issues on missing id.
+function confirmMonitoringVals() {
+    return {
+        series_id: _pendingSeriesId,
+        monitor_mode: _selectedMonitorMode,
+        auto_grab: true,
+    };
 }
 
 // ── Bulk select (issue #125) ────────────────────────────────────────

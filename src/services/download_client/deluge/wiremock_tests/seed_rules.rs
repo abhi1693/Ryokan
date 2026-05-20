@@ -1,4 +1,4 @@
-//! Issue #28 PR C — `set_seed_rules` against Deluge's
+//! Issue #28 — `set_seed_rules` against Deluge's
 //! `core.set_torrent_options`.
 //!
 //! Wire shape: `core.set_torrent_options([torrent_id], {...})`.

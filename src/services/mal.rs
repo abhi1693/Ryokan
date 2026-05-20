@@ -1,5 +1,5 @@
 //! MyAnimeList watch-list fetch + access-token refresh (issue #62
-//! PR B).
+//!
 //!
 //! The OAuth handlers in `handlers::oauth` already speak MAL for the
 //! token-exchange + `@me` calls during the link flow. This module

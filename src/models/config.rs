@@ -86,7 +86,7 @@ pub struct Config {
     /// from `rss_enabled`, which retains its v1 semantics
     /// (Nyaa-only flag) — see plan decision #8.
     pub rss_master_enabled: bool,
-    /// Phase 7 PR E — opt-out for Nyaa-specific RSS polling without
+    /// opt-out for Nyaa-specific RSS polling without
     /// disabling indexer-RSS (torznab/newznab) feeds. The user has
     /// other indexers configured and only wants those polled —
     /// before this flag, the only way to skip Nyaa was to disable
@@ -98,7 +98,7 @@ pub struct Config {
     pub post_processing_enabled: bool,
     pub post_processing_mode: String,
     pub auto_grab_on_add: bool,
-    /// #1.3.0 UX pass — when true, any update to a series's
+    /// v1.3.0 UX pass — when true, any update to a series's
     /// monitoring mode triggers an auto-search over the newly-
     /// monitored-and-airable episodes. Default off to preserve
     /// existing behavior.
@@ -109,7 +109,7 @@ pub struct Config {
     pub sonarr_api_key: String,
     pub radarr_enabled: bool,
     pub radarr_api_key: String,
-    /// Issue #28 PR D — API key for the autobrr push webhook at
+    /// Issue #28 — API key for the autobrr push webhook at
     /// `POST /api/webhook/autobrr`. Empty string disables the
     /// webhook entirely (the route returns 503 + Retry-After).
     /// Generated via the Settings → Connections → autobrr panel
@@ -149,7 +149,7 @@ pub struct Config {
     /// plan decision — single-file releases have nothing to pick. Any
     /// other string coerces to `batches_only` on save.
     pub grab_preview_mode: String,
-    /// Issue #62 PR B — watch-list sync cadence in minutes. Default
+    /// Issue #62 — watch-list sync cadence in minutes. Default
     /// 30 (decision #5). Valid range 15..=10080 (15 min .. 7 days);
     /// the supervised task clamps on read so a hand-edited DB row
     /// can't push the cadence into "rate-limit-pressure" or

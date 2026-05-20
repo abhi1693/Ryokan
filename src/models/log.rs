@@ -23,7 +23,6 @@ impl LogLevel {
         }
     }
 
-    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "trace" => LogLevel::Trace,
@@ -137,7 +136,6 @@ impl LogCategory {
         }
     }
 
-    #[allow(dead_code)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "search" => Some(LogCategory::Search),
@@ -328,7 +326,9 @@ pub async fn count(db: &SqlitePool) -> Result<i64, sqlx::Error> {
     Ok(row.0)
 }
 
-/// Get the most recent log ID (for polling).
+/// Most recent log ID — only consumed by `handlers::system::endpoint_tests`
+/// as a cursor before seeding more rows; `#[allow(dead_code)]` because
+/// non-test builds don't compile the test module.
 #[allow(dead_code)]
 pub async fn latest_id(db: &SqlitePool) -> Result<i64, sqlx::Error> {
     let row: Option<(i64,)> = sqlx::query_as("SELECT MAX(id) FROM logs")

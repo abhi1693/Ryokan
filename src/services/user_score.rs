@@ -1,4 +1,4 @@
-//! Render-time conversion for user-score badges (issue #62 PR C).
+//! Render-time conversion for user-score badges (issue #62).
 //!
 //! AniList stores a single numeric score per entry; the user picks
 //! which display format they want it rendered in (POINT_10, stars,

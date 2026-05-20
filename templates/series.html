@@ -43,7 +43,7 @@
             {% if let Some(score_text) = detail.average_score_display %}
             <span class="tag tag-score {{ detail.score_class }}">{{ score_text }}</span>
             {% endif %}
-            {# #62 PR C — user's personal score from their linked AL/MAL
+            {# #62 — user's personal score from their linked AL/MAL
                account. Hidden when no account is linked, the series
                isn't on the user's list, or the user hasn't rated it.
                The display string is pre-formatted per
@@ -60,7 +60,7 @@
             {% endfor %}
         </div>
 
-        {# #62 PR D — AL custom-list membership badges. Hidden when
+        {# #62 — AL custom-list membership badges. Hidden when
            the series isn't on any of the user's custom lists (or
            no account is linked). Each badge links back to the
            library filtered to that list so the user can quickly
@@ -178,14 +178,25 @@
         <div class="monitoring-row">
             <span class="folder-label">Monitoring:</span>
             <div class="monitoring-controls">
-                <select id="monitor-mode" class="folder-select monitoring-select" onchange="setMonitoring(this.value)">
+                {# Issue #166 — declarative HTMX. `change` triggers the
+                   POST; the server returns `HX-Refresh: true` for the
+                   HTMX branch so the page reloads (equivalent to the
+                   prior `location.reload()` in JS). The non-HTMX path
+                   still returns JSON for `toggleMonitorAll` callers
+                   in series_episode_actions.js. #}
+                <select id="monitor-mode" class="folder-select monitoring-select"
+                    name="monitor_mode"
+                    hx-post="/api/library/monitoring"
+                    hx-trigger="change"
+                    hx-vals='js:{series_id: parseInt(SD.dbId)}'
+                    hx-swap="none">
                     <option value="all" {% if monitor_mode_select_value == "all" %}selected{% endif %}>All Episodes</option>
                     <option value="future" {% if monitor_mode_select_value == "future" %}selected{% endif %}>Future Episodes</option>
                     <option value="missing" {% if monitor_mode_select_value == "missing" %}selected{% endif %}>Missing Episodes</option>
                     <option value="existing" {% if monitor_mode_select_value == "existing" %}selected{% endif %}>Existing Episodes</option>
                     <option value="none" {% if monitor_mode_select_value == "none" %}selected{% endif %}>None</option>
                     {% if can_sync_from_external_account %}
-                    {# #62 PR B — clearing the manual-override flag.
+                    {# #62 — clearing the manual-override flag.
                        Only visible when the series came from sync; for
                        manually-added series the option would be a
                        no-op. The "follow your AL/MAL list" choice
@@ -202,17 +213,34 @@
         <div class="monitoring-row">
             <span class="folder-label">Upgrades:</span>
             <div class="monitoring-controls">
+                {# Issue #166 — HTMX-driven series-level toggles. The
+                   server takes form data (series_id, allow) and acks
+                   with an empty 200 for the HTMX branch. `hx-swap=none`
+                   keeps the rendered checkbox as the source of truth
+                   for the visual state; the `hx-on::response-error`
+                   handler reverts the click + toasts when the server
+                   rejects (4xx/5xx). `htmx.config.responseHandling`
+                   already skips the swap on error, so the visual
+                   revert is the only client work needed. #}
                 <label class="checkbox-label">
-                    <input type="checkbox" id="allow-upgrades" {% if allow_upgrades %}checked{% endif %} onchange="setAllowUpgrades(this.checked)">
+                    <input type="checkbox" id="allow-upgrades"
+                        {% if allow_upgrades %}checked{% endif %}
+                        hx-post="/api/library/allow-upgrades"
+                        hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
+                        hx-swap="none"
+                        hx-on::response-error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'Upgrades toggle failed', body: 'Failed to update upgrades toggle', log: true})">
                     Allow automatic upgrades when a higher-quality release is found
                 </label>
-                {# Issue #28 PR E — PT upgrade opt-in. Indented under the
+                {# Issue #28 — PT upgrade opt-in. Indented under the
                    parent toggle since "PT upgrades" is a sub-decision of
                    "upgrades at all." #}
                 <label class="checkbox-label" style="margin-top:6px;margin-left:20px">
                     <input type="checkbox" id="allow-pt-upgrades"
                         {% if allow_pt_upgrades %}checked{% endif %}
-                        onchange="setAllowPtUpgrades(this.checked)">
+                        hx-post="/api/library/allow-pt-upgrades"
+                        hx-vals='js:{series_id: parseInt(SD.dbId), allow: this.checked}'
+                        hx-swap="none"
+                        hx-on::response-error="this.checked = !this.checked; window.ryokanToast({kind: 'error', category: 'library', title: 'PT-upgrades toggle failed', body: 'Failed to update PT-upgrades toggle', log: true})">
                     Allow upgrades from private trackers
                 </label>
             </div>
@@ -223,24 +251,35 @@
         <div class="monitoring-divider"></div>
         <details class="monitoring-row" id="advanced-search-panel">
             <summary class="folder-label" style="cursor:pointer">Advanced search overrides</summary>
-            <div class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px">
+            {# Issue #166 — HTMX-driven save. The form posts to
+               `/api/library/search-overrides` with `series_id` as a
+               hidden field; the server returns a rendered
+               `partials/series/save_status_pill.html` partial that
+               swaps into `#series-search-overrides-status`. The CSS
+               on `.save-status-pill-ok` auto-fades the "Saved" pill
+               after 2s, replacing the prior JS setTimeout dance. #}
+            <form class="monitoring-controls" style="display:flex;flex-direction:column;align-items:stretch;gap:14px;margin-top:10px"
+                hx-post="/api/library/search-overrides"
+                hx-target="#series-search-overrides-status"
+                hx-swap="innerHTML">
+                <input type="hidden" name="series_id" value="{% if let Some(db_id_val) = db_id %}{{ db_id_val }}{% endif %}">
                 <div class="form-group" style="margin:0">
                     <label for="series-custom-query-tokens">Custom query tokens</label>
-                    <input type="text" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
+                    <input type="text" name="custom_query_tokens" id="series-custom-query-tokens" value="{{ custom_query_tokens }}"
                         placeholder="{% if !default_custom_query_tokens.is_empty() %}global: {{ default_custom_query_tokens }}{% else %}e.g. bd 1080p{% endif %}">
                     <span class="form-hint">Extra keywords appended to every search for this series (Nyaa and configured torznab / newznab indexers). Leave blank to inherit the global default.</span>
                 </div>
                 <div class="form-group" style="margin:0">
                     <label for="series-restrict-to-group">Restrict to Nyaa uploader <span class="form-hint" style="font-weight:normal">(Nyaa only)</span></label>
-                    <input type="text" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
+                    <input type="text" name="restrict_to_uploader" id="series-restrict-to-group" value="{{ restrict_to_uploader }}"
                         placeholder="{% if !default_restrict_to_uploader.is_empty() %}global: {{ default_restrict_to_uploader }}{% else %}(none){% endif %}">
                     <span class="form-hint">Per-series override of the global default. Ryokan sets <code>?u=&lt;name&gt;</code> on every Nyaa search for this show so only this uploader's releases come back. Torznab / newznab indexers ignore this. Leave blank to inherit the global default.</span>
                 </div>
                 <div style="display:flex;gap:8px;align-items:center">
-                    <button type="button" class="btn btn-primary" onclick="saveSeriesSearchOverrides(this)">Save</button>
+                    <button type="submit" class="btn btn-primary">Save</button>
                     <span class="form-hint" id="series-search-overrides-status"></span>
                 </div>
-            </div>
+            </form>
         </details>
     </div>
 </div>
@@ -599,9 +638,30 @@
             </div>
         </div>
         <div class="modal-footer" style="padding:12px 24px;border-top:1px solid var(--border);gap:8px;display:flex;justify-content:flex-end;flex-wrap:wrap">
-            <button class="btn btn-secondary" type="button" onclick="reclassifyEpisode(this)" title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
-            <button class="btn btn-secondary" type="button" onclick="clearManualOverride()">Clear override</button>
-            <button class="btn btn-primary" type="button" onclick="applyManualOverride()">Apply</button>
+            {# Issue #166 — Re-classify renders the verdict pill into
+               `#override-status` and schedules a 600ms delayed reload
+               via `hx-on::after-request` so the user can read the new
+               tag before the page refreshes. `hx-vals='js:'` reads the
+               current episode from the module-scope tracker that
+               openManualOverride sets. #}
+            <button class="btn btn-secondary" type="button"
+                hx-post="/api/library/reclassify-episode"
+                hx-vals='js:{...manualOverrideReclassifyVals()}'
+                hx-target="#override-status"
+                hx-swap="innerHTML"
+                hx-on::after-request="if (event.detail.successful) setTimeout(function(){ window.location.reload(); }, 600)"
+                title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
+            {# Clear + Apply both POST to manual-override; the server
+               returns `HX-Refresh: true` so htmx triggers a full page
+               reload, equivalent to the prior JS `location.reload()`. #}
+            <button class="btn btn-secondary" type="button"
+                hx-post="/api/library/manual-override"
+                hx-vals='js:{...manualOverrideClearVals()}'
+                hx-swap="none">Clear override</button>
+            <button class="btn btn-primary" type="button"
+                hx-post="/api/library/manual-override"
+                hx-vals='js:{...manualOverrideApplyVals()}'
+                hx-swap="none">Apply</button>
         </div>
     </div>
 </div>

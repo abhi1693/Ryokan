@@ -1,0 +1,11 @@
+{# Inline save status pill. Returned as the HX-Request response from
+   `set_search_overrides` (issue #166). The fade-out animation is CSS-
+   defined on `.save-status-pill` in pages/series.css so the JS doesn't
+   need a setTimeout dance. `ok=false` paths render a styled error
+   variant inside the same shape, so the swap target's structure
+   doesn't change between success and failure. #}
+{% if ok %}
+<span class="save-status-pill save-status-pill-ok">{% if message.is_empty() %}Saved{% else %}{{ message }}{% endif %}</span>
+{% else %}
+<span class="save-status-pill save-status-pill-err">{{ message }}</span>
+{% endif %}

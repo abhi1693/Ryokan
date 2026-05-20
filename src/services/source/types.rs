@@ -180,12 +180,9 @@ impl Resolution {
     /// folds both to `Unknown` since we don't classify them as distinct
     /// tiers and anime releases at those heights are rare.
     ///
-    /// Used by the Custom Formats parser to compile a
-    /// `ResolutionSpecification` into a comparison against
-    /// `ClassificationResult::resolution`. Phase 3 lands the helper in
-    /// isolation; Phase 4 (`src/services/custom_formats.rs`) adds the
-    /// caller, at which point the `#[allow(dead_code)]` comes off.
-    #[allow(dead_code)]
+    /// Used by the Custom Formats parser (`services/custom_formats/parser.rs`)
+    /// to compile a `ResolutionSpecification` into a comparison against
+    /// `ClassificationResult::resolution`.
     pub fn from_int(value: i32) -> Self {
         match value {
             480 => Resolution::R480p,

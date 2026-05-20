@@ -1,4 +1,4 @@
-//! Torznab/newznab indexer registry (issue #28 PR A).
+//! Torznab/newznab indexer registry (issue #28).
 //!
 //! Configured indexers live in the `indexers` table; the search
 //! pipeline reads them at fan-out time and dispatches concurrent
@@ -6,21 +6,21 @@
 //! Nyaa stays out-of-band per plan decision #1 — it never gets a
 //! row here.
 //!
-//! PR A scope: schema + CRUD only. PR B adds the `TorznabIndexer`
-//! trait impl that consumes these rows and the caps-probe path that
-//! populates `caps_json` / `caps_refreshed_at`. PR C wires
-//! `seed_ratio` / `seed_time_minutes` / `min_seeders` into the
-//! `DownloadClient` trait's per-torrent seed rules. Nothing else
-//! in PR A reads these columns yet — they're populated by the
-//! Settings form and lie dormant until later PRs hook in.
+//! Initial scope was schema + CRUD only; the `TorznabIndexer` trait
+//! impl that consumes these rows, the caps-probe path that populates
+//! `caps_json` / `caps_refreshed_at`, and the wiring of `seed_ratio` /
+//! `seed_time_minutes` / `min_seeders` into the `DownloadClient`
+//! trait's per-torrent seed rules all landed in follow-up changes.
+//! Some columns are still written by the Settings form ahead of the
+//! code that reads them.
 
 use serde::Serialize;
 use sqlx::{Row, SqlitePool};
 
 /// Indexer protocol kind. The wire format for torznab and newznab
 /// is identical; the value distinguishes them only for category-
-/// mapping (BitTorrent vs NZB) and download-client routing once
-/// PR F's torrent-vs-usenet split lands. Kept as `String` at the
+/// mapping (BitTorrent vs NZB) and download-client routing under
+/// the torrent-vs-usenet split. Kept as `String` at the
 /// boundary because `kind` is read directly into the row struct;
 /// callers that need to branch on it can `.as_str()` and match.
 pub const KIND_TORZNAB: &str = "torznab";
@@ -50,7 +50,7 @@ pub struct Indexer {
     /// `download_clients` this indexer routes to. `None` means
     /// "fall through to the default client" at grab time.
     pub download_client_id: Option<i64>,
-    /// multi-rss PR 1 — when true, this indexer participates in the
+    /// Multi-RSS — when true, this indexer participates in the
     /// 60s RSS sync fan-out via its torznab/newznab `?t=tvsearch`
     /// endpoint (Option B). Default false so the existing search-
     /// only fan-out is unaffected; users opt in per-row in
@@ -70,8 +70,8 @@ pub struct Indexer {
     /// alongside a fresh error.
     pub rss_last_item_count: i32,
     /// Cached caps response body. Empty until the first probe
-    /// succeeds (PR B). Read with a 7-day TTL — stale caps trigger
-    /// a transparent re-fetch on next read.
+    /// succeeds. Read with a 7-day TTL — stale caps trigger a
+    /// transparent re-fetch on next read.
     pub caps_json: String,
     pub caps_refreshed_at: Option<i64>,
     pub created_at: i64,
@@ -97,7 +97,7 @@ pub struct IndexerForm<'a> {
     /// Multi-client routing pin. `None` = use the default
     /// download client at grab time.
     pub download_client_id: Option<i64>,
-    /// multi-rss PR 1 — opt this indexer into the per-tick RSS
+    /// Multi-RSS — opt this indexer into the per-tick RSS
     /// fan-out via its `?t=tvsearch` (torznab) or `?t=search` /
     /// `?t=tvsearch` (newznab) endpoint. Default false.
     pub rss_enabled: bool,
@@ -176,7 +176,7 @@ pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> 
 }
 
 pub async fn list_rss_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
-    // multi-rss PR 1 — indexers opted into the RSS sync fan-out.
+    // Multi-RSS — indexers opted into the RSS sync fan-out.
     // Both `enabled` and `rss_enabled` must be true: a user can
     // pause an indexer entirely (enabled=0) without losing the
     // RSS opt-in, and a user can keep an indexer search-only
@@ -316,9 +316,8 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
 }
 
 /// Update the cached caps response and bump `caps_refreshed_at` to
-/// the current Unix timestamp. Called by PR B's caps probe after a
-/// successful `t=caps` fetch. PR A defines the helper so the column
-/// shape is decided up front.
+/// the current Unix timestamp. Called by the caps probe after a
+/// successful `t=caps` fetch.
 pub async fn update_caps(db: &SqlitePool, id: i64, caps_json: &str) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE indexers SET caps_json = ?, caps_refreshed_at = strftime('%s','now'), \
@@ -440,7 +439,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_rss_enabled_requires_both_enabled_and_rss_enabled() {
-        // multi-rss PR 1: the RSS fan-out filter is conjunctive —
+        // Multi-RSS: the RSS fan-out filter is conjunctive —
         // an indexer must have BOTH enabled=1 AND rss_enabled=1 to
         // contribute to the per-tick fan-out. A user who paused an
         // indexer entirely (enabled=0) shouldn't see its feed

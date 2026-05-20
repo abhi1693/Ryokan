@@ -211,7 +211,7 @@ pub async fn find_all_for_target(
         run_queries_interactive(&group_queries, ctx, &mut seen, &mut candidates).await;
     }
 
-    // #30 Phase 2: franchise-root aliases + absolute episode number.
+    // #30: franchise-root aliases + absolute episode number.
     // SubsPlease-style releases ("[SubsPlease] Jujutsu Kaisen - 56" for
     // JJK S3 E9) use the base franchise title and an absolute episode
     // number. Phase 1 drops them at the alias-match step because the
@@ -748,7 +748,7 @@ async fn collect_scored_for_target(
         }
     }
 
-    // #30 Phase 4: franchise-root aliases + absolute episode number.
+    // #30: franchise-root aliases + absolute episode number.
     // Mirrors the interactive path — see the equivalent block in
     // `find_all_for_target` for the full rationale. SubsPlease-style
     // absolute-numbered releases for sequel cours ("Jujutsu Kaisen -
@@ -903,7 +903,7 @@ struct AutoQueryCtx<'a> {
     /// hasn't populated yet, which collapses to the legacy
     /// strict-relative behavior.
     absolute_offset: i32,
-    /// Issue #28 PR B — torznab/newznab indexers to fan out to
+    /// Issue #28 — torznab/newznab indexers to fan out to
     /// alongside the Nyaa-direct fetch. Loaded once at the top of
     /// `collect_scored_for_target` so the per-`run_queries` call
     /// doesn't re-read the DB. Empty slice = Nyaa-only behavior
@@ -998,7 +998,7 @@ async fn run_queries(
         .collect()
         .await;
 
-    // Issue #28 PR B — fan out to configured torznab/newznab
+    // Issue #28 — fan out to configured torznab/newznab
     // indexers concurrently with the Nyaa stream. The indexer
     // results land in the same `candidates` Vec via the same
     // dedup/match pipeline; downstream scoring sees a unified

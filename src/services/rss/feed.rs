@@ -194,7 +194,7 @@ pub(crate) async fn read_capped_body(resp: reqwest::Response) -> Result<String, 
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// multi-rss PR 3 — generic RSS fetch for user-configured feeds
+/// Multi-RSS — generic RSS fetch for user-configured feeds
 /// from `models::rss_feeds`. Reuses the same XML parser the
 /// Nyaa-direct path uses, but feeds it the caller's `source` so
 /// every item carries the right `RssSource::UserFeed { id, name
@@ -273,15 +273,15 @@ pub(super) async fn fetch_feeds(
 }
 
 /// Parse an RSS XML body into `RssItem`s. The Nyaa-direct path
-/// passes `RssSource::Nyaa`; user-configured feeds (PR 3) and
-/// torznab/newznab indexer RSS (PR 4) pass their own source so
+/// passes `RssSource::Nyaa`; user-configured feeds and
+/// torznab/newznab indexer RSS pass their own source so
 /// downstream dedup + grab routing knows which feed produced each
 /// release.
 ///
 /// The `nyaa:*` namespaced tags (downloadurl / magneturi / infohash)
 /// are Nyaa-specific extensions; non-Nyaa feeds will read them as
 /// empty strings, and the `link` tag carries the .torrent URL
-/// instead. The torznab path in PR 4 augments this further with
+/// instead. The torznab path augments this further with
 /// `<torznab:attr name="...">` extraction.
 pub(super) fn parse_feed(xml: &str, source: RssSource) -> Vec<RssItem> {
     let mut items = Vec::new();
