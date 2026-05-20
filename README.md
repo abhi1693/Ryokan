@@ -1,11 +1,16 @@
 # Ryokan
 
+[![CI](https://github.com/johnthreekay/Ryokan/actions/workflows/rust.yml/badge.svg)](https://github.com/johnthreekay/Ryokan/actions/workflows/rust.yml)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 A self-hosted anime PVR written in Rust. Searches indexers for releases, scores them by quality, and sends them to your download client from a single web UI. Supports qBittorrent, Deluge, Transmission, rTorrent/ruTorrent, and SABnzbd.
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
-## Documentation 
-- [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started)
+## Documentation
+
+- [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.
+- [Build from source](docs/from-source.md): for development or non-Docker deployments.
 
 ## Screenshots
 
@@ -14,7 +19,25 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/018ecb01-b434-4b3b-93d6-1cad3678bcc5" />
 <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/db443139-e72b-4cca-b220-feeb7b348ee6" />
 
-## This project's being actively developed. Expect some occasional bugs. See [Releases](https://github.com/johnthreekay/Ryokan/releases) for version-to-version changes.
+---
+
+## Status
+
+Actively developed. Expect occasional bugs. See [Releases](https://github.com/johnthreekay/Ryokan/releases) for version-to-version changes.
+
+## Contributing
+
+Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions. Quick version:
+
+```bash
+git clone https://github.com/johnthreekay/Ryokan.git
+cd Ryokan
+cargo run            # serves on 0.0.0.0:8978, creates data/ryokan.db
+```
+
+## Security
+
+Please report security issues privately. See [SECURITY.md](SECURITY.md).
 
 ## License
 
