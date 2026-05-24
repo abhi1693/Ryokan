@@ -71,7 +71,7 @@ async fn replace_relations_table(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     let delete_sql = format!("DELETE FROM {table} WHERE {key_col} = ?");
-    sqlx::query(&delete_sql)
+    sqlx::query(sqlx::AssertSqlSafe(delete_sql))
         .bind(owner_id)
         .execute(&mut *tx)
         .await?;
@@ -96,7 +96,7 @@ async fn replace_relations_table(
         if !seen.insert(key) {
             continue;
         }
-        sqlx::query(&insert_sql)
+        sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()))
             .bind(owner_id)
             .bind(rel.id)
             .bind(rel.id_mal)
@@ -131,7 +131,7 @@ async fn replace_relations_table(
             {
                 continue;
             }
-            sqlx::query(&insert_sql)
+            sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()))
                 .bind(rel.id)
                 .bind(owner.id)
                 .bind(owner.id_mal)
@@ -163,7 +163,10 @@ async fn get_relations_table(
     let sql = format!(
         "SELECT related_provider_id, related_mal_id, title_romaji, title_english, title_native, cover_url, format, status, episodes, relation_type, season_year, media_type FROM {table} WHERE {key_col} = ? ORDER BY relation_type, related_provider_id"
     );
-    let rows = sqlx::query(&sql).bind(owner_id).fetch_all(db).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(owner_id)
+        .fetch_all(db)
+        .await?;
     Ok(rows.into_iter().map(row_to_related).collect())
 }
 
@@ -458,7 +461,7 @@ async fn replace_episode_table(
 ) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
     let delete_sql = format!("DELETE FROM {table} WHERE {key_col} = ?");
-    sqlx::query(&delete_sql)
+    sqlx::query(sqlx::AssertSqlSafe(delete_sql))
         .bind(owner_id)
         .execute(&mut *tx)
         .await?;
@@ -466,7 +469,7 @@ async fn replace_episode_table(
         "INSERT INTO {table} ({key_col}, episode_number, title, title_romaji, title_english, title_native, aired, source, cached_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)"
     );
     for ep in episodes {
-        sqlx::query(&insert_sql)
+        sqlx::query(sqlx::AssertSqlSafe(insert_sql.as_str()))
             .bind(owner_id)
             .bind(ep.episode_number)
             .bind(&ep.title)
@@ -491,7 +494,10 @@ async fn get_episode_table(
     let sql = format!(
         "SELECT episode_number, title, title_romaji, title_english, title_native, aired, source FROM {table} WHERE {key_col} = ? ORDER BY episode_number ASC"
     );
-    let rows = sqlx::query(&sql).bind(owner_id).fetch_all(db).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(owner_id)
+        .fetch_all(db)
+        .await?;
     let mut out = HashMap::new();
     for row in rows {
         let ep = CachedEpisodeMetadata {

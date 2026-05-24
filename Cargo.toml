@@ -166,17 +166,28 @@ tower-http = { version = "0.6", features = ["fs", "trace", "compression-br", "co
 askama = "0.16"
 
 # Database
-# default-features = false drops sqlx's `any`/`macros`/`migrate`/`json`
-# defaults — none of which Ryokan uses (queries are all runtime strings,
+# default-features = false drops sqlx's `any`/`migrate`/`json` defaults
+# — none of which Ryokan uses (queries are all runtime strings,
 # migrations live in models/mod.rs::migrate(), JSON goes through
-# serde_json directly). Without this opt-out, sqlx's `any` feature
-# pulls sqlx-mysql + sqlx-postgres into the lock for runtime backend
-# selection, which in turn drags in `rsa` (the MySQL crypto crate
-# affected by RUSTSEC-2023-0071, the Marvin Attack timing sidechannel)
-# even though we never compile or link it. Pruning the feature set
-# removes the phantom advisory at the source instead of papering over
-# it with `cargo audit ignore`.
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+# serde_json directly). `macros` is re-added below only for the derive
+# macros (FromRow / Type); there are zero compile-time-checked
+# `sqlx::query!` invocations.
+#
+# The opt-out exists for RUSTSEC-2023-0071: sqlx-mysql can pull `rsa`
+# (the MySQL crypto crate hit by the Marvin Attack timing sidechannel).
+# With default-features off, `rsa` stays out of the lock entirely, so
+# cargo-audit stays green. NOTE (0.9): unlike 0.8, sqlx-mysql +
+# sqlx-postgres now appear as Cargo.lock entries even with this opt-out,
+# but `cargo tree -i sqlx-mysql` reports "nothing to print" — they are
+# never compiled or linked, and `rsa` is still absent. The advisory
+# prune holds at the source; do not re-enable default features.
+#
+# 0.9 also enforces `SqlSafeStr` on every query*() call: only
+# `&'static str` is accepted implicitly. Our dynamically-built query
+# strings in models/ (placeholder-count splicing for `IN (?, ?, ..)`
+# and `SELECT {COLS}` const interpolation — never user input) are
+# wrapped in `sqlx::AssertSqlSafe(..)` after a manual injection audit.
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 
 # HTTP client
 # 0.13 moved `.query()` and `.form()` behind their own crate features

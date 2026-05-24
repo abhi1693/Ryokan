@@ -830,10 +830,11 @@ pub async fn api_logs_export(
         "SELECT timestamp, level, category, message, detail \
          FROM logs WHERE {since_clause} ORDER BY id ASC"
     );
-    let rows: Vec<(String, String, String, String, String)> = sqlx::query_as(&sql)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let rows: Vec<(String, String, String, String, String)> =
+        sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Tab-separated with a header row. Embedded tabs / newlines / CRs
     // in the message or detail body are escaped to spaces so each entry

@@ -25,7 +25,7 @@ async fn column_exists(db: &SqlitePool, table: &str, column: &str) -> bool {
     // string literal from our own migration code — no user input — so
     // inline interpolation is safe.
     let sql = format!("PRAGMA table_info({})", table);
-    let Ok(rows) = sqlx::query(&sql).fetch_all(db).await else {
+    let Ok(rows) = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(db).await else {
         return false;
     };
     rows.iter()
@@ -83,19 +83,19 @@ async fn reconcile_column_rename_typed(
             let copy = format!(
                 "UPDATE {table} SET {new} = {legacy} WHERE {new} {default_predicate} AND {legacy} IS NOT NULL"
             );
-            let _ = sqlx::query(&copy).execute(db).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(copy)).execute(db).await;
 
             // SQLite ≥ 3.35 supports DROP COLUMN. Silently absorb
             // if it fails — in that case the legacy column stays,
             // duplicating data, but the new column has the live
             // value and that's the one the app reads.
             let drop = format!("ALTER TABLE {table} DROP COLUMN {legacy}");
-            let _ = sqlx::query(&drop).execute(db).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(drop)).execute(db).await;
         }
         (true, false) => {
             // Clean pre-PR-#37 DB with only the legacy name.
             let rename = format!("ALTER TABLE {table} RENAME COLUMN {legacy} TO {new}");
-            let _ = sqlx::query(&rename).execute(db).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(rename)).execute(db).await;
         }
         (false, true) => {
             // Already migrated, nothing to do.
@@ -103,7 +103,7 @@ async fn reconcile_column_rename_typed(
         (false, false) => {
             // Fresh install — ADD with caller-supplied declaration.
             let add = format!("ALTER TABLE {table} ADD COLUMN {new} {add_decl}");
-            let _ = sqlx::query(&add).execute(db).await;
+            let _ = sqlx::query(sqlx::AssertSqlSafe(add)).execute(db).await;
         }
     }
 }

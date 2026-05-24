@@ -162,7 +162,7 @@ pub async fn get_local_urls_batch(
         "#,
         placeholders
     );
-    let mut query = sqlx::query(&sql);
+    let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
     for key in cache_keys {
         query = query.bind(key);
     }

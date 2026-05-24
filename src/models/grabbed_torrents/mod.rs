@@ -281,7 +281,7 @@ pub async fn get_series_routes_for_grabs(
            WHERE grab_id IN ({})"#,
         placeholders
     );
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for id in grab_ids {
         q = q.bind(*id);
     }
@@ -776,7 +776,10 @@ pub async fn get_all_with_series(
            LIMIT ?"#,
         title_expr = title_select_expr(title_language),
     );
-    let rows = sqlx::query(&sql).bind(limit).fetch_all(db).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql))
+        .bind(limit)
+        .fetch_all(db)
+        .await?;
 
     Ok(rows
         .iter()
@@ -820,7 +823,7 @@ pub async fn get_blocked(
            ORDER BY g.grabbed_at DESC"#,
         title_expr = title_select_expr(title_language),
     );
-    let rows = sqlx::query(&sql).fetch_all(db).await?;
+    let rows = sqlx::query(sqlx::AssertSqlSafe(sql)).fetch_all(db).await?;
 
     Ok(rows
         .iter()

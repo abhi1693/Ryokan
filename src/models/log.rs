@@ -413,7 +413,9 @@ async fn build_dynamic_query(
     binds: &[BindValue],
     db: &SqlitePool,
 ) -> Result<Vec<(i64, String, String, String, String, String)>, sqlx::Error> {
-    let mut q = sqlx::query_as::<_, (i64, String, String, String, String, String)>(sql);
+    let mut q = sqlx::query_as::<_, (i64, String, String, String, String, String)>(
+        sqlx::AssertSqlSafe(sql),
+    );
     for b in binds {
         q = match b {
             BindValue::Int(i) => q.bind(*i),

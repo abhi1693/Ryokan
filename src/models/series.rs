@@ -201,7 +201,7 @@ pub async fn get_by_anilist_ids(
     let sql = format!(
         "SELECT id, anilist_id, mal_id, title, title_romaji, title_english, title_native, cover_url, format, status, episodes, season_year, end_year, folder_name, monitor_mode, allow_upgrades, allow_pt_upgrades, custom_query_tokens, restrict_to_uploader, cumulative_prior_episodes, monitor_mode_manual_override, user_score, added_at FROM series WHERE anilist_id IN ({placeholders})"
     );
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for id in anilist_ids {
         q = q.bind(id);
     }
