@@ -112,9 +112,9 @@ fn row_to_feed(row: &sqlx::sqlite::SqliteRow) -> DirectRssFeed {
 /// All feed rows ordered by id. Settings page reads this to
 /// render the management table.
 pub async fn list_all(db: &SqlitePool) -> Result<Vec<DirectRssFeed>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM direct_rss_feeds ORDER BY id ASC"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().map(row_to_feed).collect())
@@ -122,18 +122,18 @@ pub async fn list_all(db: &SqlitePool) -> Result<Vec<DirectRssFeed>, sqlx::Error
 
 /// Enabled feeds only — what the RSS sync loop iterates over.
 pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<DirectRssFeed>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM direct_rss_feeds WHERE enabled = 1 ORDER BY id ASC"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().map(row_to_feed).collect())
 }
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<DirectRssFeed>, sqlx::Error> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM direct_rss_feeds WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(db)
     .await?;

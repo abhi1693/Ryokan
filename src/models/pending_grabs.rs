@@ -139,9 +139,9 @@ const SELECT_COLUMNS: &str = "preview_id, info_hash, client_kind, indexer_id, se
      error_message, we_added_torrent, download_client_id";
 
 pub async fn get(db: &SqlitePool, preview_id: &str) -> Result<Option<PendingGrab>, String> {
-    sqlx::query_as::<_, PendingGrab>(&format!(
+    sqlx::query_as::<_, PendingGrab>(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM pending_grabs WHERE preview_id = ?"
-    ))
+    )))
     .bind(preview_id)
     .fetch_optional(db)
     .await
@@ -167,11 +167,11 @@ pub async fn get_by_hash(db: &SqlitePool, info_hash: &str) -> Result<Option<Pend
     if info_hash.is_empty() {
         return Ok(None);
     }
-    sqlx::query_as::<_, PendingGrab>(&format!(
+    sqlx::query_as::<_, PendingGrab>(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM pending_grabs WHERE info_hash = ? \
          AND error_message = '' \
          ORDER BY created_at DESC LIMIT 1"
-    ))
+    )))
     .bind(info_hash)
     .fetch_optional(db)
     .await
@@ -246,10 +246,10 @@ pub async fn delete(db: &SqlitePool, preview_id: &str) -> Result<(), String> {
 /// list and auto-commits each row.
 pub async fn list_expired(db: &SqlitePool) -> Result<Vec<PendingGrab>, String> {
     let cutoff = now_unix() - HEARTBEAT_TTL_SECS;
-    sqlx::query_as::<_, PendingGrab>(&format!(
+    sqlx::query_as::<_, PendingGrab>(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM pending_grabs \
          WHERE heartbeat_at < ? ORDER BY heartbeat_at ASC"
-    ))
+    )))
     .bind(cutoff)
     .fetch_all(db)
     .await

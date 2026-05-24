@@ -97,9 +97,9 @@ fn map_row(r: sqlx::sqlite::SqliteRow) -> DownloadClientRow {
 }
 
 pub async fn list_all(db: &SqlitePool) -> Result<Vec<DownloadClientRow>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLS} FROM download_clients ORDER BY is_default DESC, name COLLATE NOCASE"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.into_iter().map(map_row).collect())
@@ -110,18 +110,18 @@ pub async fn list_all(db: &SqlitePool) -> Result<Vec<DownloadClientRow>, sqlx::E
 /// the DB so a user can toggle them back on without re-entering
 /// credentials.
 pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<DownloadClientRow>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLS} FROM download_clients WHERE enabled = 1 ORDER BY id"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.into_iter().map(map_row).collect())
 }
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<DownloadClientRow>, sqlx::Error> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLS} FROM download_clients WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(db)
     .await?;
@@ -135,9 +135,9 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<DownloadClient
 /// and a usenet default exist — callers that care about protocol
 /// should use [`get_default_for_protocol`] instead.
 pub async fn get_default(db: &SqlitePool) -> Result<Option<DownloadClientRow>, sqlx::Error> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLS} FROM download_clients WHERE is_default = 1 ORDER BY id LIMIT 1"
-    ))
+    )))
     .fetch_optional(db)
     .await?;
     Ok(row.map(map_row))
@@ -163,7 +163,7 @@ pub async fn get_default_for_protocol(
          WHERE is_default = 1 AND kind IN ({placeholders}) \
          ORDER BY id LIMIT 1"
     );
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for k in kinds {
         q = q.bind(*k);
     }
@@ -314,7 +314,7 @@ pub async fn delete(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
             let placeholders = vec!["?"; kinds.len()].join(", ");
             let sql =
                 format!("SELECT MIN(id) FROM download_clients WHERE kind IN ({placeholders})");
-            let mut q = sqlx::query_scalar::<_, Option<i64>>(&sql);
+            let mut q = sqlx::query_scalar::<_, Option<i64>>(sqlx::AssertSqlSafe(sql));
             for k in kinds {
                 q = q.bind(*k);
             }
@@ -390,7 +390,7 @@ async fn clear_other_defaults_in_protocol(
              WHERE is_default = 1 AND kind IN ({placeholders})"
         ),
     };
-    let mut q = sqlx::query(&sql);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
     for k in kinds {
         q = q.bind(*k);
     }

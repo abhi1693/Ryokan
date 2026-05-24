@@ -660,7 +660,7 @@ pub async fn mark_completed(
            AND episode_number IN ({})",
         placeholders
     );
-    let mut q = sqlx::query(&sql).bind(series_id);
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(series_id);
     for &ep in episode_numbers {
         q = q.bind(ep);
     }

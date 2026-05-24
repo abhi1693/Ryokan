@@ -154,9 +154,9 @@ fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
 /// All indexer rows ordered by `priority` ascending, tiebreaking by
 /// `id`. Mirrors the order auto-search uses for fan-out concurrency.
 pub async fn list_all(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM indexers ORDER BY priority ASC, id ASC"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().map(row_to_indexer).collect())
@@ -167,9 +167,9 @@ pub async fn list_all(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
 /// they pause a flaky indexer; this filter just skips them at search
 /// time.
 pub async fn list_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Error> {
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM indexers WHERE enabled = 1 ORDER BY priority ASC, id ASC"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().map(row_to_indexer).collect())
@@ -181,20 +181,20 @@ pub async fn list_rss_enabled(db: &SqlitePool) -> Result<Vec<Indexer>, sqlx::Err
     // pause an indexer entirely (enabled=0) without losing the
     // RSS opt-in, and a user can keep an indexer search-only
     // (rss_enabled=0) without disabling search.
-    let rows = sqlx::query(&format!(
+    let rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM indexers \
          WHERE enabled = 1 AND rss_enabled = 1 \
          ORDER BY priority ASC, id ASC"
-    ))
+    )))
     .fetch_all(db)
     .await?;
     Ok(rows.iter().map(row_to_indexer).collect())
 }
 
 pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Indexer>, sqlx::Error> {
-    let row = sqlx::query(&format!(
+    let row = sqlx::query(sqlx::AssertSqlSafe(format!(
         "SELECT {SELECT_COLUMNS} FROM indexers WHERE id = ?"
-    ))
+    )))
     .bind(id)
     .fetch_optional(db)
     .await?;
