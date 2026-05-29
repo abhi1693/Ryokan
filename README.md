@@ -10,7 +10,7 @@ I built this because Sonarr doesn't always work well for anime. The RSS sync for
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.
-- [Build from source](docs/from-source.md): for development or non-Docker deployments.
+- [Build from source](https://johnthreekay.github.io/Ryokan/docs/from-source/): for development or non-Docker deployments.
 
 ## Screenshots
 
