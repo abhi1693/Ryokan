@@ -65,6 +65,10 @@ pub(super) struct InteractiveSearchTablePartial {
     /// found."; batch shows "No batch releases found." — matches the
     /// pre-migration JS copy verbatim.
     empty_message: &'static str,
+    /// Direction line under the lead — what to try next, in the same
+    /// voice as the calendar's empty state. An empty result with no
+    /// next step is a dead end.
+    empty_hint: &'static str,
 }
 
 fn build_interactive_search_partial(
@@ -95,15 +99,22 @@ fn build_interactive_search_partial(
             }
         })
         .collect();
-    let empty_message = if grab_episode_number.is_some() {
-        "No results found."
+    let (empty_message, empty_hint) = if grab_episode_number.is_some() {
+        (
+            "No results found.",
+            "Recent episodes can take a while to appear on indexers. A batch search may find a season pack that includes this episode; if the series uses unusual release naming, set a search override on this page.",
+        )
     } else {
-        "No batch releases found."
+        (
+            "No batch releases found.",
+            "Batches usually appear after a season finishes airing. Per-episode searches may still find individual releases.",
+        )
     };
     InteractiveSearchTablePartial {
         rows,
         grab_episode_number,
         empty_message,
+        empty_hint,
     }
 }
 

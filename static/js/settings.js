@@ -803,7 +803,7 @@ async function runCfTest() {
         const parsed = data.parsed || {};
         const rows = [];
         rows.push('<p class="form-hint" style="margin-bottom:8px">Parsed: source=<code>' + esc(parsed.source || 'Unknown') + '</code>, resolution=<code>' + esc(parsed.resolution || 'Unknown') + '</code>, group=<code>' + esc(parsed.group || '(none)') + '</code>' + (parsed.is_remux ? ', <code>remux</code>' : '') + (parsed.is_bdmv ? ', <code>BDMV</code>' : '') + '</p>');
-        rows.push('<p><strong>Total score: ' + Number(data.total_score) + '</strong> — <span class="form-hint">' + Number(data.matched.length) + ' matched, ' + Number(data.not_matched.length) + ' not matched</span></p>');
+        rows.push('<p><strong>Total score: ' + Number(data.total_score) + '</strong> · <span class="form-hint">' + Number(data.matched.length) + ' matched, ' + Number(data.not_matched.length) + ' not matched</span></p>');
         if (data.matched.length > 0) {
             rows.push('<div class="settings-subheading">Matched</div>');
             rows.push('<ul style="list-style:none;padding:0;margin:0 0 12px 0">');
@@ -1226,7 +1226,7 @@ function openExternalAccountPasteModal(provider) {
                 <div class="form-group">
                     <label for="ext-accounts-paste-state">State</label>
                     <input id="ext-accounts-paste-state" type="text" style="width:100%;font-family:monospace;font-size:12px">
-                    <span class="form-hint">CSRF nonce — required. Both fields appear on the callback page.</span>
+                    <span class="form-hint">CSRF nonce; required. Both fields appear on the callback page.</span>
                 </div>
                 <div id="ext-accounts-paste-error" class="form-hint" style="color:var(--red);display:none"></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px">

@@ -579,7 +579,7 @@ function renderScoreBreakdown(r) {
             </li>`;
         }).join('');
         inner = `<ul>${lis}</ul>
-            <div class="form-hint">CF contributions shown here are evaluated against the release's classification alone. SeaDex-based CFs need a tracked AniList series to resolve, so they never fire on the manual search page — open the series page's interactive search for the full breakdown.</div>`;
+            <div class="form-hint">CF contributions shown here are evaluated against the release's classification alone. SeaDex-based CFs need a tracked AniList series to resolve, so they never fire on the manual search page; open the series page's interactive search for the full breakdown.</div>`;
     }
     return `<div class="score-components">
         <div class="score-components-title">Base score breakdown</div>
