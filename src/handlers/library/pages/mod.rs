@@ -787,6 +787,10 @@ pub(super) async fn build_episodes(
     let mut total_size: u64 = 0;
     let mut monitored_count = 0i32;
 
+    // For the unaired-vs-missing split below. Date-only, UTC: provider
+    // air dates are calendar dates, not timestamps.
+    let today = chrono::Utc::now().date_naive();
+
     for ep_num in 1..=ep_count.max(0) {
         let disk_match = disk_files.iter().find(|f| {
             if let Some(s) = f.season_number {
@@ -957,6 +961,22 @@ pub(super) async fn build_episodes(
         if downloaded {
             downloaded_count += 1;
         }
+        // Unaired-vs-missing split (display only). Date-only compare:
+        // an episode whose air date is today counts as aired. Unknown
+        // air date defers to the series status — a still-airing or
+        // upcoming series usually lacks dates for episodes providers
+        // haven't seen yet, while a finished series with missing dates
+        // has certainly aired everything. `quality_state.is_empty()`
+        // keeps failed grabs red: a failed grab on an unaired episode
+        // means someone grabbed a release for it, so "actionable" is
+        // the right read.
+        let unaired = !downloaded
+            && quality_state.is_empty()
+            && match chrono::NaiveDate::parse_from_str(ep_aired.get(..10).unwrap_or(""), "%Y-%m-%d")
+            {
+                Ok(d) => d > today,
+                Err(_) => !detail.is_finished(),
+            };
         episodes.push(Episode {
             number: ep_num,
             title: ep_title,
@@ -973,6 +993,7 @@ pub(super) async fn build_episodes(
             filename,
             can_auto_search: is_tracked,
             monitored,
+            unaired,
             class_source,
             class_resolution,
             class_is_remux,
@@ -1067,6 +1088,8 @@ pub(super) async fn build_episodes(
             filename: f.filename.clone(),
             can_auto_search: is_tracked,
             monitored,
+            // On disk by definition in this pass, so never unaired.
+            unaired: false,
             class_source,
             class_resolution,
             class_is_remux,
@@ -1121,6 +1144,9 @@ pub(super) async fn build_episodes(
                 filename: String::new(),
                 can_auto_search: is_tracked,
                 monitored,
+                // Has a grab tag by definition in this pass (grabbed or
+                // completed), so the unaired display state never applies.
+                unaired: false,
                 class_source: tag.source.clone(),
                 class_resolution: tag.resolution.clone(),
                 class_is_remux: tag.is_remux,

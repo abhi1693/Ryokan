@@ -204,6 +204,15 @@ pub struct Episode {
     pub filename: String,
     pub can_auto_search: bool,
     pub monitored: bool,
+    /// True when the episode has no file AND hasn't aired yet: its
+    /// air date parses to a future date, or the air date is unknown
+    /// while the series is still airing/upcoming (anything but
+    /// FINISHED / FINISHED_AIRING / CANCELLED). Splits the no-file
+    /// display state in two: "Missing" (red, actionable — the episode
+    /// aired and we don't have it) vs "Unaired" (neutral — nothing is
+    /// wrong, there's just nothing to grab yet). Mirrors Sonarr's
+    /// Missing-vs-Unaired episode split.
+    pub unaired: bool,
     /// Phase 4 classification columns — exposed to the template so the
     /// manual override picker can pre-select the current values. The
     /// override dropdown's composite key (e.g. "bluray_remux", "web",
