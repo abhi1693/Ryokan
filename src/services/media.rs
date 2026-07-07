@@ -133,6 +133,30 @@ pub async fn scan_series_folder(media_root: &str, folder_name: &str) -> Vec<Epis
         .unwrap_or_default()
 }
 
+/// Batch variant of `scan_series_folder` for the library index's
+/// per-card completeness bars: one `spawn_blocking` hop for the whole
+/// library instead of one per series. Each entry is (series_id,
+/// folder_name); the result maps series_id to that folder's files.
+/// A readdir per series is cheap (single-digit ms for a whole
+/// library on local disk), but N spawn_blocking hops wouldn't be.
+pub async fn scan_series_folders_batch(
+    media_root: &str,
+    folders: Vec<(i64, String)>,
+) -> std::collections::HashMap<i64, Vec<EpisodeFile>> {
+    if media_root.is_empty() || folders.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    let media_root = media_root.to_string();
+    tokio::task::spawn_blocking(move || {
+        folders
+            .into_iter()
+            .map(|(id, folder)| (id, scan_series_folder_blocking(&media_root, &folder)))
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
+}
+
 fn scan_series_folder_blocking(media_root: &str, folder_name: &str) -> Vec<EpisodeFile> {
     let series_path = Path::new(media_root).join(folder_name);
     if !series_path.is_dir() {

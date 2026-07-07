@@ -26,6 +26,45 @@ function liveLibrarySearch(input) {
     }, 250);
 }
 
+// ── Two-part sort control (key select + direction toggle) ─────────
+//
+// The header renders sort as a key ('recent' / 'title' / 'score')
+// plus a direction arrow; the server and URL keep the canonical
+// six-value ?sort= vocabulary. This recomposes and navigates,
+// preserving ?list= (scope) and the live search text.
+function librarySortNavigate(sortValue) {
+    var url = new URL(window.location.href);
+    if (sortValue === 'recent') url.searchParams.delete('sort');
+    else url.searchParams.set('sort', sortValue);
+    // The search input's live value may be newer than the URL param
+    // (liveLibrarySearch debounces its replaceState by 250ms).
+    var search = document.getElementById('library-search');
+    var q = search ? search.value.trim() : '';
+    if (q) url.searchParams.set('search', q);
+    else url.searchParams.delete('search');
+    window.location.assign(url);
+}
+
+// Picking a key applies that key's default direction — newest first,
+// A to Z, highest score first — matching the select's option values.
+function librarySortKeyChanged(sel) {
+    var defaults = { recent: 'recent', title: 'title_asc', score: 'score' };
+    librarySortNavigate(defaults[sel.value] || 'recent');
+}
+
+// The arrow flips direction within the current key.
+function librarySortDirToggled(btn) {
+    var keySel = document.getElementById('library-sort-key');
+    var key = keySel ? keySel.value : 'recent';
+    var wasDesc = btn.dataset.desc === 'true';
+    var composed = {
+        recent: wasDesc ? 'oldest' : 'recent',
+        title: wasDesc ? 'title_asc' : 'title_desc',
+        score: wasDesc ? 'score_asc' : 'score',
+    };
+    librarySortNavigate(composed[key] || 'recent');
+}
+
 function _liveLibrarySearchImmediate(input) {
     const q = (input.value || '').trim().toLowerCase();
     const grid = document.getElementById('library-grid');
@@ -56,22 +95,6 @@ function _liveLibrarySearchImmediate(input) {
     if (q) url.searchParams.set('search', q);
     else url.searchParams.delete('search');
     window.history.replaceState(null, '', url);
-
-    // Clear button visibility: track whether *any* filter is active,
-    // not just search. The list filter is reflected in the URL.
-    const hasListFilter = !!url.searchParams.get('list');
-    const clear = document.querySelector('.library-filter-clear');
-    if (clear) {
-        const anyActive = !!q || hasListFilter;
-        clear.classList.toggle('library-filter-clear-hidden', !anyActive);
-        if (anyActive) {
-            clear.removeAttribute('aria-hidden');
-            clear.removeAttribute('tabindex');
-        } else {
-            clear.setAttribute('aria-hidden', 'true');
-            clear.setAttribute('tabindex', '-1');
-        }
-    }
 
     // No-matches inline empty state. Built once and toggled — avoids
     // navigation while still telling the user their query found
@@ -586,6 +609,24 @@ if (!window.__ryokanBulkSelectInit) {
         if (!id) return;
         toggleSeriesSelectById(id);
     }, true);
+
+    // "/" focuses the library search from anywhere on the page —
+    // the same muscle memory as Nyaa, GitHub, and the *arr stack.
+    // Skipped while typing in any field so a literal slash still
+    // works there, and no-ops on non-library pages (the input isn't
+    // in the DOM). Document-level for the same hx-boost-survival
+    // reason as the listeners above.
+    document.addEventListener('keydown', function (ev) {
+        if (ev.key !== '/' || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+        var el = document.activeElement;
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' ||
+                   el.tagName === 'SELECT' || el.isContentEditable)) return;
+        var search = document.getElementById('library-search');
+        if (!search) return;
+        ev.preventDefault();
+        search.focus();
+        search.select();
+    });
 
     // Esc: exits the bulk delete modal first if open, then bulk
     // monitor modal, then selecting mode (clears selection on the

@@ -85,10 +85,19 @@ pub async fn index(
         .map(|a| a.score_format)
         .unwrap_or_default();
 
-    // #62 — populate the filter dropdown + apply the active
-    // filter. Distinct list names are alphabetized; empty result
-    // means no memberships synced yet (template hides the dropdown).
-    let custom_list_names = crate::models::series_custom_lists::distinct_list_names(&state.db)
+    // Whole-library counts for the identity row, captured BEFORE any
+    // filter mutates `library` — "31 series · 2 airing" describes the
+    // collection; the chips carry the per-scope counts.
+    let total_count = library.len();
+    let airing_count = library
+        .iter()
+        .filter(|s| matches!(s.status.as_str(), "RELEASING" | "CURRENTLY_AIRING"))
+        .count();
+
+    // #62 — populate the scope-chip row + apply the active
+    // filter. Names+counts are alphabetized; empty result means no
+    // memberships synced yet (template hides the list chips).
+    let list_counts = crate::models::series_custom_lists::list_counts(&state.db)
         .await
         .unwrap_or_default();
     let custom_list_filter = q.list.unwrap_or_default();
@@ -206,17 +215,143 @@ pub async fn index(
         _ => "recent".to_string(),
     };
 
+    // Decompose the canonical sort value into the key+direction pair
+    // the two-part sort control renders. Recomposition happens in
+    // static/js/index.js (librarySortNavigate); the canonical values
+    // in the URL and handler are unchanged.
+    let (sort_key, sort_desc) = match sort_value.as_str() {
+        "oldest" => ("recent", false),
+        "title_asc" => ("title", false),
+        "title_desc" => ("title", true),
+        "score" => ("score", true),
+        "score_asc" => ("score", false),
+        _ => ("recent", true),
+    };
+
+    // Per-card completeness summaries ("do I have what's aired?").
+    // Three sources, each one round-trip and proportional to the
+    // library: a batched folder scan (single spawn_blocking hop), the
+    // aired-count GROUP BY, and the active-tag-state slice. Computed
+    // AFTER filter + sort so only rendered cards pay for it.
+    let media_root = cfg
+        .as_ref()
+        .map(|c| c.media_root.clone())
+        .unwrap_or_default();
+    let folder_list: Vec<(i64, String)> = library
+        .iter()
+        .map(|s| (s.id, s.folder_name.clone()))
+        .collect();
+    let (disk_map, aired_map, tag_rows) = tokio::join!(
+        media::scan_series_folders_batch(&media_root, folder_list),
+        local_metadata::aired_episode_counts(&state.db),
+        episode_tags::active_states_all_series(&state.db),
+    );
+    let aired_map = aired_map.unwrap_or_default();
+    let mut completed_by_series: HashMap<i64, std::collections::HashSet<i32>> = HashMap::new();
+    let mut downloading_series: std::collections::HashSet<i64> = std::collections::HashSet::new();
+    for (sid, ep, tag_state) in tag_rows.unwrap_or_default() {
+        if tag_state == "grabbed" {
+            downloading_series.insert(sid);
+        } else {
+            completed_by_series.entry(sid).or_default().insert(ep);
+        }
+    }
+    let cards: Vec<(series::Series, super::CardProgress)> = library
+        .into_iter()
+        .map(|s| {
+            let total = i64::from(s.episodes.unwrap_or(0));
+            // Downloaded = distinct episode numbers on disk or with a
+            // completed grab tag — same union the series page's
+            // `downloaded` flag uses. The season filter mirrors
+            // build_episodes: with a known episode count, only
+            // season-1 / unseasoned files belong to the main list.
+            let mut have: std::collections::HashSet<i32> = std::collections::HashSet::new();
+            if let Some(files) = disk_map.get(&s.id) {
+                for f in files {
+                    if f.episode_number <= 0 {
+                        continue;
+                    }
+                    if total > 0 && matches!(f.season_number, Some(n) if n != 1) {
+                        continue;
+                    }
+                    have.insert(f.episode_number);
+                }
+            }
+            if let Some(eps) = completed_by_series.get(&s.id) {
+                have.extend(eps);
+            }
+            let downloaded = have.len() as i64;
+            let aired = match aired_map.get(&s.id) {
+                Some(&n) if n > 0 => n,
+                // No cached air dates. NOT_YET_RELEASED genuinely has
+                // nothing aired; everything else counts against the
+                // total (exact for FINISHED, honest degradation for
+                // releasing series with sparse Jikan-fallback data).
+                _ if s.status == "NOT_YET_RELEASED" => 0,
+                _ => total,
+            };
+            let downloading = downloading_series.contains(&s.id);
+            let pct = if aired > 0 {
+                (downloaded * 100 / aired).clamp(0, 100)
+            } else {
+                0
+            };
+            // While downloading, guarantee a visible sliver even at
+            // zero on-disk episodes — an invisible "in flight" state
+            // defeats the point of the bar.
+            let pct = if downloading { pct.max(6) } else { pct };
+            let (card_state, label) = if downloading {
+                if aired > 0 {
+                    (
+                        "downloading",
+                        format!(
+                            "Downloading; {} of {} aired episodes on disk",
+                            downloaded, aired
+                        ),
+                    )
+                } else {
+                    ("downloading", "Downloading".to_string())
+                }
+            } else if aired == 0 {
+                ("idle", "Nothing aired yet".to_string())
+            } else if downloaded >= aired {
+                (
+                    "complete",
+                    format!("All {} aired episodes downloaded", aired),
+                )
+            } else {
+                (
+                    "missing",
+                    format!("{} of {} aired episodes downloaded", downloaded, aired),
+                )
+            };
+            let progress = super::CardProgress {
+                state: card_state.to_string(),
+                downloaded,
+                aired,
+                pct,
+                monitored: s.monitor_mode != "none",
+                label,
+            };
+            (s, progress)
+        })
+        .collect();
+
     let template = IndexTemplate {
         page: "library".to_string(),
-        library,
+        cards,
         title_language: cfg
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
         score_format,
-        custom_list_names,
+        list_counts,
         custom_list_filter,
         search_query,
         sort_value,
+        sort_key: sort_key.to_string(),
+        sort_desc,
+        total_count,
+        airing_count,
     };
     Html(template.render().unwrap_or_default())
 }

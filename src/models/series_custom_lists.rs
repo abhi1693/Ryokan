@@ -118,6 +118,20 @@ pub async fn distinct_list_names(db: &SqlitePool) -> Result<Vec<String>, sqlx::E
     Ok(rows)
 }
 
+/// Distinct list names with their member counts, alphabetized. Powers
+/// the library page's scope-chip row (each chip renders "Name (N)").
+/// Membership rows FK onto `series(id)` with ON DELETE CASCADE, so
+/// counts always reflect series actually present in the library.
+pub async fn list_counts(db: &SqlitePool) -> Result<Vec<(String, i64)>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (String, i64)>(
+        "SELECT list_name, COUNT(DISTINCT series_id) FROM series_custom_lists
+         GROUP BY list_name ORDER BY list_name COLLATE NOCASE",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
 /// Drop every membership row for the given provider. Used on
 /// account unlink so the library filter dropdown stops showing list
 /// names that came from an account the user no longer has linked

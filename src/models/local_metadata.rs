@@ -558,6 +558,32 @@ pub async fn get_episode_map_for_provider(
     get_episode_table(db, "provider_episode_metadata", "provider_id", provider_id).await
 }
 
+/// Per-series count of episodes that have aired, judged by the cached
+/// air-date strings: a parseable leading `YYYY-MM-DD` that's today or
+/// earlier. Powers the library cards' completeness bars ("do I have
+/// what's aired?"), so the denominator must exclude unaired episodes
+/// or a releasing series would read as perpetually incomplete.
+/// Notes on the WHERE shape:
+/// - `episode_number >= 1` skips the negative-cache sentinel row
+///   (episode 0) the Jikan/Kitsu fallback writes.
+/// - `length(aired) >= 10` skips the unknown markers ('' and '-').
+/// - The substr comparison is lexicographic, which is chronological
+///   for ISO dates; `date('now')` renders as `YYYY-MM-DD` in UTC —
+///   same date-only, UTC semantics as the series page's
+///   unaired-vs-missing split.
+pub async fn aired_episode_counts(db: &SqlitePool) -> Result<HashMap<i64, i64>, sqlx::Error> {
+    let rows = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT series_id, COUNT(*) FROM series_episode_metadata
+         WHERE episode_number >= 1
+           AND length(aired) >= 10
+           AND substr(aired, 1, 10) <= date('now')
+         GROUP BY series_id",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
