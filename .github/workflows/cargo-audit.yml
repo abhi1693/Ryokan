@@ -39,7 +39,7 @@ jobs:
     # 10 min is generous headroom against an advisory-DB clone hang.
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

@@ -44,7 +44,7 @@ jobs:
     # slow link or flaky wiremock binding.
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
