@@ -44,7 +44,7 @@ jobs:
     # slow link or flaky wiremock binding.
     timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -71,7 +71,7 @@ jobs:
       # nothing and the script handles the missing-baseline case.
       - name: Restore previous baseline
         id: restore-baseline
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: mutants.baseline.json
           key: mutants-baseline-v1-
@@ -136,7 +136,7 @@ jobs:
       # cache entries after 7 days of no access.
       - name: Save baseline for next run
         if: always()
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: mutants.baseline.json
           key: mutants-baseline-v1-${{ github.run_id }}
