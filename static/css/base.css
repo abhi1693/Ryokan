@@ -159,6 +159,24 @@
     visibility: hidden;
 }
 
+/* Absorb the scrollbar-width error inherent to the two viewport-
+ * breakout shapes (`.detail-banner` on series pages, `.tabbed-page`
+ * on Settings/System): `100vw` includes the vertical scrollbar, so
+ * a full-bleed box's right edge lands ~8px past the client area and
+ * mints a horizontal scrollbar on every page tall enough to scroll.
+ * `clip` (not `hidden`) crops that overhang without creating a
+ * scroll container, so sticky positioning inside the page keeps
+ * working. Both elements need it: on `html` alone the value
+ * propagates to the viewport as `hidden`, which drops the scrollbar
+ * but leaves the page programmatically scrollable (focus jumps and
+ * find-in-page could still shift it sideways); adding `body` clips
+ * the overhang at the source so the scrollable-overflow region is
+ * truly empty. The mobile media query below predates this rule and
+ * keeps its stronger `hidden` form. */
+html, body {
+    overflow-x: clip;
+}
+
 body {
     background: var(--bg);
     color: var(--text);

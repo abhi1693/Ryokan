@@ -59,19 +59,25 @@ fieldset legend {
        left edge to the viewport-left. More robust than the prior
        `margin-left: calc(50% - 50vw)` shape, which depended on the
        parent's content-box width matching the rendered width
-       (broke when `.content`'s padding wasn't accounted for). */
-    width: 100vw;
+       (broke when `.content`'s padding wasn't accounted for).
+
+       The 1564px cap = 200 sidebar + 32 gap + 1052 content + 32 gap
+       + 200 phantom + 48 padding. Below the cap this behaves exactly
+       like the plain breakout; above it the whole unit centers so an
+       ultrawide monitor doesn't strand the sidebar at the far-left
+       edge, meters away from the content it controls. The margin
+       mirrors the width via max() (both negative, so max() picks the
+       smaller magnitude once the cap engages).
+
+       100vw includes the vertical scrollbar, so the uncapped shape
+       overhangs the client area by scrollbar-width; `html
+       { overflow-x: clip }` in base.css crops that overhang. */
+    width: min(100vw, 1564px);
     position: relative;
     left: 50%;
-    margin-left: -50vw;
+    margin-left: max(-50vw, -782px);
     padding-left: 24px;
     padding-right: 24px;
-    /* `.content` doesn't set overflow-x, so the negative margin
-       won't trigger horizontal scroll; the body's natural shape
-       already excludes overflow there. If a future change adds
-       overflow-x: hidden to body or `.content` and clips this
-       breakout, the fix is to lift overflow-x off them, not to
-       roll back this rule. */
 }
 
 .tabbed-page-header {
