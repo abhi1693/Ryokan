@@ -17,6 +17,7 @@ function updateEpisodeRow(epNum, state, group) {
         if (!numCell || parseInt(numCell.textContent.trim()) !== epNum) continue;
 
         if (state === 'grabbed') {
+            row.classList.remove('ep-row-missing', 'ep-row-unaired');
             row.classList.add('ep-row-queued');
             const qualityCell = row.querySelector('.ep-col-quality');
             if (qualityCell) {
@@ -36,14 +37,21 @@ function updateEpisodeRow(epNum, state, group) {
             // refresh arrived — hence the "cancel one visually cancels
             // all" / "stuck queued" marker.
             row.classList.remove('ep-row-have', 'ep-row-queued');
-            row.classList.add('ep-row-missing');
+            // A cancelled grab on a not-yet-aired episode goes back to
+            // the neutral Unaired state, not red Missing. The row's
+            // data-unaired attribute mirrors Episode.unaired (stamped
+            // server-side and kept fresh by syncEpisodeDataset).
+            var wasUnaired = row.dataset.unaired === 'true';
+            row.classList.add(wasUnaired ? 'ep-row-unaired' : 'ep-row-missing');
             const statusCell = row.querySelector('.ep-col-status');
             if (statusCell) {
-                statusCell.innerHTML = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+                statusCell.innerHTML = wasUnaired ? STATUS_ICON_UNAIRED : STATUS_ICON_MISSING;
             }
             const qualityCell = row.querySelector('.ep-col-quality');
             if (qualityCell) {
-                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+                qualityCell.innerHTML = wasUnaired
+                    ? '<span class="ep-unaired-label">Unaired</span>'
+                    : '<span class="ep-missing-label">Missing</span>';
                 // Drop the cached `originalHtml` stash so future
                 // showings of a progress bar on this row don't restore
                 // the stale queued HTML.
@@ -257,6 +265,7 @@ var dlPoll = (window.__ryokanSeriesDlPoll = window.__ryokanSeriesDlPoll || {
 
 var STATUS_ICON_HAVE = '<span class="ep-status-icon ep-have" title="On disk"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg></span>';
 var STATUS_ICON_MISSING = '<span class="ep-status-icon ep-missing" title="Missing"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></span>';
+var STATUS_ICON_UNAIRED = '<span class="ep-status-icon ep-unaired" title="Unaired"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>';
 var DL_PROGRESS_HTML_ZERO = '<div class="dl-progress-wrap"><div class="dl-progress-bar"><div class="dl-progress-fill" style="width:0%"></div></div><span class="dl-progress-text">0.0%</span></div>';
 
 // Sync the episode table with the server's authoritative state.
@@ -326,6 +335,11 @@ function refreshEpisodeRows(options) {
 // every patch call regardless of force/showingProgress gating
 // because the dataset is read on demand, not on every poll tick.
 function syncEpisodeDataset(row, ep) {
+    // Keep the row's unaired marker fresh so optimistic patches
+    // (updateEpisodeRow's 'deleted' flip) restore the right state.
+    if (typeof ep.unaired === 'boolean') {
+        row.dataset.unaired = ep.unaired ? 'true' : 'false';
+    }
     const titleBtn = row.querySelector('.ep-title-btn');
     if (!titleBtn) return;
     if (typeof ep.size_display === 'string') {
@@ -386,7 +400,7 @@ function patchEpisodeRows(episodes, force) {
         const statusCell = row.querySelector('.ep-col-status');
 
         if (ep.on_disk) {
-            row.classList.remove('ep-row-missing', 'ep-row-queued');
+            row.classList.remove('ep-row-missing', 'ep-row-unaired', 'ep-row-queued');
             row.classList.add('ep-row-have');
             if (statusCell) statusCell.innerHTML = STATUS_ICON_HAVE;
             const quality = ep.quality || 'UNKNOWN';
@@ -396,7 +410,7 @@ function patchEpisodeRows(episodes, force) {
             // Episode was just grabbed (or is still queued). Show a 0%
             // progress bar — the poller will update it once the
             // download client reports real progress.
-            row.classList.remove('ep-row-have', 'ep-row-missing');
+            row.classList.remove('ep-row-have', 'ep-row-missing', 'ep-row-unaired');
             row.classList.add('ep-row-queued');
             if (!showingProgress) {
                 if (!qualityCell.dataset.originalHtml) {
@@ -413,13 +427,15 @@ function patchEpisodeRows(episodes, force) {
             // even though on_disk is false. Without this branch, a
             // completed row falls through to the missing fallback below
             // and flashes back to "Missing" mid-poll.
-            row.classList.remove('ep-row-missing', 'ep-row-queued');
+            row.classList.remove('ep-row-missing', 'ep-row-unaired', 'ep-row-queued');
             row.classList.add('ep-row-have');
             if (statusCell) statusCell.innerHTML = STATUS_ICON_HAVE;
             qualityCell.innerHTML = `<span class="tag tag-quality">${escHtml(ep.quality || 'UNKNOWN')}</span>`;
             delete qualityCell.dataset.originalHtml;
         } else if (ep.quality_state === 'failed') {
-            row.classList.remove('ep-row-queued', 'ep-row-have');
+            // Failed stays red even on an unaired episode — a grab
+            // existed for it, so there's something to act on.
+            row.classList.remove('ep-row-queued', 'ep-row-have', 'ep-row-unaired');
             row.classList.add('ep-row-missing');
             if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
             qualityCell.innerHTML = `<span class="tag tag-quality-failed">${escHtml(ep.quality || '')} ✗</span>`;
@@ -436,9 +452,20 @@ function patchEpisodeRows(episodes, force) {
             // is the bug the user reports as "stays at 0% after
             // deleting in qBit / on the downloads page."
             row.classList.remove('ep-row-have', 'ep-row-queued');
-            row.classList.add('ep-row-missing');
-            if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
-            qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+            // Unaired-vs-missing split mirrors the server template:
+            // neutral state for episodes that haven't aired yet, red
+            // Missing for aired-but-absent.
+            if (ep.unaired) {
+                row.classList.remove('ep-row-missing');
+                row.classList.add('ep-row-unaired');
+                if (statusCell) statusCell.innerHTML = STATUS_ICON_UNAIRED;
+                qualityCell.innerHTML = '<span class="ep-unaired-label">Unaired</span>';
+            } else {
+                row.classList.remove('ep-row-unaired');
+                row.classList.add('ep-row-missing');
+                if (statusCell) statusCell.innerHTML = STATUS_ICON_MISSING;
+                qualityCell.innerHTML = '<span class="ep-missing-label">Missing</span>';
+            }
             delete qualityCell.dataset.originalHtml;
         }
     }

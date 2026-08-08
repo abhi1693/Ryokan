@@ -12,11 +12,40 @@ pub mod pages;
 pub mod reconcile;
 pub mod search;
 
+/// Per-card completeness summary for the library grid's status bar.
+/// Answers exactly one question — "do I have what's aired?" — in
+/// three states, reusing the episode table's color vocabulary
+/// (green complete / red missing-and-actionable / accent in-flight).
+/// Airing status deliberately isn't encoded here: the card's
+/// RELEASING/FINISHED text chip already carries it.
+#[derive(Debug, Clone, Default)]
+pub struct CardProgress {
+    /// `complete` | `missing` | `downloading` | `idle` (nothing
+    /// aired yet, or the series has no episode data at all).
+    pub state: String,
+    /// Distinct episodes on disk or with a completed grab tag.
+    pub downloaded: i64,
+    /// Episodes aired so far (cached air dates <= today), falling
+    /// back to the total episode count when no air dates are cached
+    /// (honest fallback for Jikan-added series with sparse data).
+    pub aired: i64,
+    /// Fill percentage, `downloaded / aired` clamped to 0..=100.
+    pub pct: i64,
+    /// False when `monitor_mode == "none"` — the bar renders dimmed:
+    /// "I'm ignoring this" is a modifier, not a fourth color.
+    pub monitored: bool,
+    /// Pre-built tooltip text for the bar.
+    pub label: String,
+}
+
 #[derive(Template)]
 #[template(path = "index.html")]
 struct IndexTemplate {
     page: String,
-    library: Vec<series::Series>,
+    /// One entry per rendered card: the series plus its completeness
+    /// summary. Tupled (rather than a wrapper struct) so the card
+    /// template's dense `s.*` field references stay untouched.
+    cards: Vec<(series::Series, CardProgress)>,
     title_language: String,
     /// #62 — the linked external account's `score_format`,
     /// used by `Series::user_score_display(...)` to render per-row
@@ -24,24 +53,41 @@ struct IndexTemplate {
     /// which case `user_score_display` always returns `None` and
     /// the template renders no badge.
     score_format: String,
-    /// #62 — distinct AL custom-list names across the whole
-    /// library. Powers the filter-dropdown next to the search box.
+    /// #62 — AL custom-list names with member counts, across the
+    /// whole library. Powers the scope-chip row under the title.
     /// Empty when no memberships have synced yet, in which case the
-    /// template hides the dropdown entirely.
-    custom_list_names: Vec<String>,
+    /// template hides the chip row's list entries (the "All" chip
+    /// alone would be noise).
+    list_counts: Vec<(String, i64)>,
     /// Currently-active filter value from `?list=<name>`. Empty
     /// means "no filter, show everything." The handler has already
-    /// applied the filter to `library`; this field drives the
-    /// dropdown's selected-option state on render.
+    /// applied the filter to `library`; this field drives which
+    /// chip renders as active.
     custom_list_filter: String,
     /// Currently-active library search query from `?search=<text>`.
     /// Echoed back so the input's `value` persists across
     /// navigations.
     search_query: String,
-    /// #62 — `recent` (default) or `score`. The handler has
-    /// already applied the sort to `library`; this field drives the
-    /// dropdown's selected-option state.
+    /// Canonical sort value (`recent` / `oldest` / `title_asc` /
+    /// `title_desc` / `score` / `score_asc`). The handler has
+    /// already applied it to `library`; chips carry it through
+    /// their hrefs so switching scope keeps the ordering.
     sort_value: String,
+    /// Sort UI decomposition of `sort_value`: which key the select
+    /// shows (`recent` / `title` / `score`)...
+    sort_key: String,
+    /// ...and whether the direction toggle points descending. The
+    /// key+direction pair recomposes to the canonical value in
+    /// static/js/index.js (librarySortNavigate).
+    sort_desc: bool,
+    /// Whole-library size, computed before any filter is applied —
+    /// the identity row describes the collection, not the current
+    /// view (chips carry the per-scope counts).
+    total_count: usize,
+    /// How many of those are currently airing (AL `RELEASING` /
+    /// MAL `CURRENTLY_AIRING`). Renders as "· N airing" next to the
+    /// total; hidden at zero.
+    airing_count: usize,
 }
 
 #[derive(Template)]
@@ -204,6 +250,15 @@ pub struct Episode {
     pub filename: String,
     pub can_auto_search: bool,
     pub monitored: bool,
+    /// True when the episode has no file AND hasn't aired yet: its
+    /// air date parses to a future date, or the air date is unknown
+    /// while the series is still airing/upcoming (anything but
+    /// FINISHED / FINISHED_AIRING / CANCELLED). Splits the no-file
+    /// display state in two: "Missing" (red, actionable — the episode
+    /// aired and we don't have it) vs "Unaired" (neutral — nothing is
+    /// wrong, there's just nothing to grab yet). Mirrors Sonarr's
+    /// Missing-vs-Unaired episode split.
+    pub unaired: bool,
     /// Phase 4 classification columns — exposed to the template so the
     /// manual override picker can pre-select the current values. The
     /// override dropdown's composite key (e.g. "bluray_remux", "web",

@@ -393,7 +393,11 @@
                    because the post-processing-off case
                    (`downloaded=true, on_disk=false, quality_state="completed"`)
                    should render as on-hand, not queued. #}
-                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else %}ep-row-missing{% endif %}">
+                {# `data-unaired` mirrors Episode.unaired so client-side
+                   optimistic patches (cancel-pending's "deleted" flip in
+                   series.js) can restore the correct no-file state
+                   without waiting for the next /episodes poll. #}
+                <tr class="{% if ep.downloaded %}ep-row-have{% else if ep.quality_state == "grabbed" %}ep-row-queued{% else if ep.unaired %}ep-row-unaired{% else %}ep-row-missing{% endif %}" data-unaired="{{ ep.unaired }}">
                     <td class="ep-col-status">
                         {% if ep.on_disk %}
                         <span class="ep-status-icon ep-have" title="On disk">
@@ -402,6 +406,13 @@
                         {% else if ep.downloaded %}
                         <span class="ep-status-icon ep-have" title="Downloaded (post-processing disabled; file not in library root)">
                             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+                        </span>
+                        {% else if ep.unaired %}
+                        {# Clock icon, neutral color: nothing is wrong,
+                           the episode just hasn't aired yet. Red X is
+                           reserved for aired-but-absent (actionable). #}
+                        <span class="ep-status-icon ep-unaired" title="Unaired">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
                         </span>
                         {% else %}
                         <span class="ep-status-icon ep-missing" title="Missing">
@@ -479,11 +490,13 @@
                             {% endif %}
                         {% else if ep.on_disk %}
                         <span class="tag tag-quality">UNKNOWN</span>
+                        {% else if ep.unaired %}
+                        <span class="ep-unaired-label">Unaired</span>
                         {% else %}
                         <span class="ep-missing-label">Missing</span>
                         {% endif %}
                         {% if ep.needs_review && !ep.manual_override %}
-                        <span class="tag tag-needs-review" title="Classifier wasn't confident — click override to tag manually">⚠ review</span>
+                        <span class="tag tag-needs-review" title="Classifier wasn't confident; click override to tag manually">⚠ review</span>
                         {% endif %}
                     </td>
                     <td class="ep-col-actions">
@@ -650,7 +663,7 @@
                 hx-target="#override-status"
                 hx-swap="innerHTML"
                 hx-on::after-request="if (event.detail.successful) setTimeout(function(){ window.location.reload(); }, 600)"
-                title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats — skip the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
+                title="Re-run the full-pipeline classifier against this episode's on-disk file. Useful after editing Release Groups or Custom Formats; skips the 6-hour sweep. Pinned rows are rejected; clear the override first.">Re-classify</button>
             {# Clear + Apply both POST to manual-override; the server
                returns `HX-Refresh: true` so htmx triggers a full page
                reload, equivalent to the prior JS `location.reload()`. #}

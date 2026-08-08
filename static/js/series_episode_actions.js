@@ -35,14 +35,14 @@ function toggleMonitorAll(dbId, currentlyAllMonitored) {
         document.querySelectorAll('.ep-mon-btn').forEach(monBtn => {
             monBtn.textContent = newState ? 'Yes' : 'No';
             monBtn.className = 'ep-mon-btn ' + (newState ? 'ep-mon-yes' : 'ep-mon-no');
-            monBtn.title = newState ? 'Monitored — click to unmonitor' : 'Not monitored — click to monitor';
+            monBtn.title = newState ? 'Monitored; click to unmonitor' : 'Not monitored; click to monitor';
         });
         // Update the monitor-all button
         if (btn) {
             btn.disabled = false;
             btn.classList.toggle('is-active', newState);
             btn.onclick = function() { toggleMonitorAll(dbId, newState); };
-            btn.title = newState ? 'All monitored — click to unmonitor all' : 'Click to monitor all episodes';
+            btn.title = newState ? 'All monitored; click to unmonitor all' : 'Click to monitor all episodes';
             btn.innerHTML = newState
                 ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>'
                 : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>';

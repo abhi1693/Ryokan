@@ -142,23 +142,13 @@
         <a href="/" class="nav-brand"><span class="brand-kanji">旅館</span><span class="brand-latin">Ryokan</span></a>
         <div class="nav-links">
             <a href="/" class="{% if page == "library" %}active{% endif %}">Library</a>
-            {# Bulk-select toggle. Library-only — hidden on every other
-               page since it acts on the library card grid. Lives
-               immediately after the Library link so the affordance
-               sits at the natural read-order start of the nav.
-               Library page only; on every other page the button is not
-               in the DOM at all and toggleBulkSelectMode() (defined
-               in index.js) is undefined since index.js doesn't load
-               either. #}
-            {% if page == "library" %}
-            <button type="button" id="bulk-select-toggle" class="nav-action bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select multiple series for bulk actions">
-                <svg class="bulk-select-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                    <polyline points="9 11 12 14 22 4"/>
-                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
-                </svg>
-                <span class="bulk-select-toggle-label">Select</span>
-            </button>
-            {% endif %}
+            {# The bulk-select toggle used to live here (library-only,
+               after the Library link). It moved into the library
+               toolbar next to "+ Add Series" (templates/index.html)
+               so the topbar's item positions stay identical on every
+               page — a page-scoped action in persistent chrome made
+               the whole nav shift left/right between library and
+               non-library pages under hx-boost's instant swaps. #}
             {# Issue #116 — Calendar entry. Desktop variant always
                visible in the topbar; the library-only mobile-icon
                variant lives in the library-only block below so

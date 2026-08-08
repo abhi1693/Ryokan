@@ -4,90 +4,103 @@
 {% block title %} - Library{% endblock %}
 
 {% block content %}
-<div class="page-header">
-    <div class="page-header-row library-header-row">
-        <div>
+<div class="page-header library-header">
+    {# ── Row 1: identity + primary. Title with ambient collection
+       counts on the left; search (the highest-frequency control) and
+       the page's one primary action on the right. Each row has ONE
+       flexible element (here: the search input) so resizing never
+       wraps controls into ambiguous positions. #}
+    <div class="library-identity-row">
+        <div class="library-title-group">
             <h2>Anime Library</h2>
+            <span class="library-count">{{ total_count }} series{% if airing_count > 0 %} &middot; {{ airing_count }} airing{% endif %}</span>
         </div>
-        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-            {# All filter controls in one form so they share state
-               without hidden-input mirrors. Visual order is list →
-               search → sort → clear, putting the search box between
-               the two dropdowns. Each control auto-submits on its
-               own native event; the search input uses a 250ms
-               debounce on `input` so each keystroke isn't a fresh
-               navigation. #}
-            <form method="get" action="/" class="library-filter-form" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-                {% if !custom_list_names.is_empty() %}
-                <label for="library-list-filter" class="visually-hidden">Filter by custom list</label>
-                <select id="library-list-filter" name="list" class="folder-select" onchange="this.form.submit()">
-                    <option value="">All custom lists</option>
-                    {% for name in custom_list_names %}
-                    <option value="{{ name }}"{% if name.as_str() == custom_list_filter.as_str() %} selected{% endif %}>{{ name }}</option>
-                    {% endfor %}
-                </select>
+        {# Search form: the server GET is the no-JS fallback; with JS,
+           liveLibrarySearch filters the rendered grid client-side and
+           mirrors ?search= into the URL via replaceState. Hidden
+           inputs carry scope + sort so a no-JS submit doesn't drop
+           them. Enter is prevented so the live filter stays canonical
+           when JS runs. Press / anywhere on the page to focus. #}
+        <form method="get" action="/" class="library-search-form">
+            {% if !custom_list_filter.is_empty() %}<input type="hidden" name="list" value="{{ custom_list_filter }}">{% endif %}
+            {% if sort_value.as_str() != "recent" %}<input type="hidden" name="sort" value="{{ sort_value }}">{% endif %}
+            <label for="library-search" class="visually-hidden">Search library</label>
+            <input type="search"
+                   id="library-search"
+                   name="search"
+                   placeholder="Search library&hellip;"
+                   title="Press / to search"
+                   class="library-search-input"
+                   value="{{ search_query }}"
+                   autocomplete="off"
+                   oninput="liveLibrarySearch(this)"
+                   onkeydown="if(event.key==='Enter'){event.preventDefault();}">
+        </form>
+        <button class="btn btn-primary library-add-btn" onclick="openAddModal()">+ Add Series</button>
+    </div>
+    {# ── Row 2: scope + presentation. Custom-list chips make the
+       active scope visible at a glance (the old closed dropdown hid
+       the one piece of state that changes what the whole grid means)
+       and replace the Clear pill outright: clearing is clicking
+       "All". Chip hrefs carry sort through because sort is
+       presentation, not a filter; search is deliberately NOT carried
+       because switching scope restarts browsing. The chip strip
+       scrolls horizontally when space runs out. #}
+    <div class="library-scope-row">
+        {% if !list_counts.is_empty() %}
+        <nav class="library-chips" aria-label="Filter by custom list">
+            <a class="library-chip{% if custom_list_filter.is_empty() %} active{% endif %}" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}">All <span class="library-chip-count">{{ total_count }}</span></a>
+            {% for (name, count) in list_counts %}
+            <a class="library-chip{% if name.as_str() == custom_list_filter.as_str() %} active{% endif %}" href="/?list={{ name|urlencode }}{% if sort_value.as_str() != "recent" %}&amp;sort={{ sort_value }}{% endif %}">{{ name }} <span class="library-chip-count">{{ count }}</span></a>
+            {% endfor %}
+        </nav>
+        {% else %}
+        {# No lists synced yet: a lone "All" chip would be noise, but
+           the row itself stays so sort + Select keep a stable
+           position. The spacer holds them against the right edge. #}
+        <div class="library-chips-spacer"></div>
+        {% endif %}
+        <div class="library-scope-tools">
+            {# Two-part sort: key select + direction toggle. Option
+               values are each key's DEFAULT direction (recent =
+               newest first, title = A to Z, score = high first) so
+               picking a key is one interaction; the arrow flips
+               within the key. librarySortNavigate in index.js
+               recomposes the canonical ?sort= value and preserves
+               ?list= + the live search text. #}
+            <label for="library-sort-key" class="visually-hidden">Sort</label>
+            <select id="library-sort-key" class="folder-select library-sort-key" onchange="librarySortKeyChanged(this)">
+                <option value="recent"{% if sort_key.as_str() == "recent" %} selected{% endif %}>Recently added</option>
+                <option value="title"{% if sort_key.as_str() == "title" %} selected{% endif %}>Title</option>
+                {% if !score_format.is_empty() %}
+                <option value="score"{% if sort_key.as_str() == "score" %} selected{% endif %}>My score</option>
                 {% endif %}
-                <label for="library-search" class="visually-hidden">Search library</label>
-                {# Search runs entirely client-side: `liveLibrarySearch`
-                   filters the already-rendered .series-card grid in
-                   place and stamps `?search=foo` into the URL via
-                   replaceState, so a reload still loads the right
-                   subset (the server handler stays as the no-JS
-                   fallback). Enter is prevented on the input so the
-                   form doesn't navigate; the dropdowns still
-                   submit-on-change because list and sort genuinely
-                   need server work. #}
-                <input type="search"
-                       id="library-search"
-                       name="search"
-                       placeholder="Search library…"
-                       class="library-search-input{% if custom_list_names.is_empty() %} library-search-input-wide{% endif %}"
-                       value="{{ search_query }}"
-                       autocomplete="off"
-                       oninput="liveLibrarySearch(this)"
-                       onkeydown="if(event.key==='Enter'){event.preventDefault();}">
-                {# Sort dropdown always renders so the universal
-                   options (Recently added, oldest first, A→Z, Z→A)
-                   stay available regardless of linkage. The two
-                   score-based options only appear when an external
-                   account is linked (`score_format` non-empty);
-                   without one there's nothing to sort against. #}
-                <label for="library-sort" class="visually-hidden">Sort</label>
-                <select id="library-sort" name="sort" class="folder-select" onchange="this.form.submit()">
-                    <option value="recent"{% if sort_value.as_str() == "recent" %} selected{% endif %}>Recently added</option>
-                    <option value="oldest"{% if sort_value.as_str() == "oldest" %} selected{% endif %}>Oldest first</option>
-                    <option value="title_asc"{% if sort_value.as_str() == "title_asc" %} selected{% endif %}>Title (A → Z)</option>
-                    <option value="title_desc"{% if sort_value.as_str() == "title_desc" %} selected{% endif %}>Title (Z → A)</option>
-                    {% if !score_format.is_empty() %}
-                    <option value="score"{% if sort_value.as_str() == "score" %} selected{% endif %}>My score (high → low)</option>
-                    <option value="score_asc"{% if sort_value.as_str() == "score_asc" %} selected{% endif %}>My score (low → high)</option>
-                    {% endif %}
-                </select>
-                {# Always rendered so its layout slot is reserved;
-                   visibility flips on/off so its presence doesn't
-                   shift neighbors when a filter becomes active. The
-                   element is also aria-hidden + tabindex=-1 in the
-                   inactive state so a screen-reader / keyboard user
-                   can't reach a "Clear" link that does nothing.
-
-                   The href carries the current sort through because
-                   sort is presentation, not a filter — clearing
-                   filters shouldn't snap the user back to the
-                   default "Recently added" order. The default
-                   ("recent") is omitted to keep the cleared URL
-                   tidy. #}
-                {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
-                <a class="btn btn-pill library-filter-clear" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" title="Clear filters">Clear</a>
-                {% else %}
-                <a class="btn btn-pill library-filter-clear library-filter-clear-hidden" href="/{% if sort_value.as_str() != "recent" %}?sort={{ sort_value }}{% endif %}" tabindex="-1" aria-hidden="true">Clear</a>
-                {% endif %}
-            </form>
-            <button class="btn btn-primary" style="margin-left: 32px;" onclick="openAddModal()">+ Add Series</button>
+            </select>
+            <button type="button"
+                    id="library-sort-dir"
+                    class="library-sort-dir"
+                    data-desc="{{ sort_desc }}"
+                    onclick="librarySortDirToggled(this)"
+                    title="{% if sort_desc %}Descending; click for ascending{% else %}Ascending; click for descending{% endif %}"
+                    aria-label="Toggle sort direction">
+                <svg class="library-sort-dir-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
+            </button>
+            {# Bulk-select toggle (issue #125): a mode, not an action,
+               so it sits last among the quiet tools. index.js owns
+               the mode; this button gets .active + the "Cancel" label
+               swap while selecting. #}
+            <button type="button" id="bulk-select-toggle" class="btn btn-secondary bulk-select-toggle" onclick="toggleBulkSelectMode()" title="Select multiple series for bulk actions">
+                <svg class="bulk-select-toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <polyline points="9 11 12 14 22 4"/>
+                    <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+                </svg>
+                <span class="bulk-select-toggle-label">Select</span>
+            </button>
         </div>
     </div>
 </div>
 
-{% if library.is_empty() %}
+{% if cards.is_empty() %}
 <div class="empty-state">
     {% if !search_query.is_empty() || !custom_list_filter.is_empty() %}
     {# Distinguish "filter excluded everything" from "library is
@@ -117,7 +130,7 @@
 </div>
 {% else %}
 <div class="library-grid" id="library-grid">
-    {% for s in library %}
+    {% for (s, prog) in cards %}
     <a href="/series/{{ s.id }}" class="series-card" id="series-{{ s.id }}">
         {# Bulk-select checkbox overlay (issue #125). Hidden until the
            library grid enters .selecting mode (see static/js/index.js
@@ -144,6 +157,18 @@
             <div class="series-cover-placeholder">No Image</div>
             {% endif %}
         </div>
+        {# Completeness bar: its own strip between poster and card
+           body (not overlaid on the artwork, which buried the color
+           against busy posters). One question — "do I have what's
+           aired?" — in three states that reuse the episode table's
+           vocabulary: green = every aired episode on disk, green
+           fill with red remainder = missing aired episodes, accent
+           pulse = download in flight. Airing status is NOT encoded
+           here; the RELEASING/FINISHED chip below already carries
+           it. Unmonitored series render the bar dimmed. #}
+        <div class="card-progress card-progress-{{ prog.state }}{% if !prog.monitored %} card-progress-unmonitored{% endif %}" title="{{ prog.label }}">
+            <div class="card-progress-fill" style="width: {{ prog.pct }}%"></div>
+        </div>
         <div class="series-info">
             <p class="series-title title-switcher" title="{{ s.title }}">
                 <span class="title-option" data-title-lang="english">{% if !s.title_english.is_empty() %}{{ s.title_english }}{% else if !s.title_romaji.is_empty() %}{{ s.title_romaji }}{% else if !s.title_native.is_empty() %}{{ s.title_native }}{% else %}{{ s.title }}{% endif %}</span>
@@ -153,6 +178,11 @@
             <div class="series-meta">
                 <span class="tag tag-res">{% if !s.format.is_empty() %}{{ s.format.replace("_", " ") }}{% else %}TBA{% endif %}</span>
                 {% if let Some(eps) = s.episodes %}<span class="tag tag-res series-eps">{{ eps }} eps</span>{% endif %}
+                {# Numeric readout for the bar's missing state — the
+                   colorblind-safe fallback and the "how bad" answer.
+                   Complete/idle cards skip it; absence means nothing
+                   to act on. #}
+                {% if prog.state.as_str() == "missing" %}<span class="tag tag-progress-missing" title="{{ prog.label }}">{{ prog.downloaded }}/{{ prog.aired }}</span>{% endif %}
                 <span class="tag tag-status-{{ s.status|lowercase }}">{{ s.status.replace("_", " ") }}</span>
                 {# #62 — user's personal score from their linked
                    AL/MAL account. Hidden when no account is linked or

@@ -162,7 +162,8 @@ function openInteractiveSearch(epNum, btn) {
     const modal = document.getElementById('isearch-modal');
     const titleEl = document.getElementById('isearch-title');
     const body = document.getElementById('isearch-body');
-    titleEl.textContent = `Interactive Search — Episode ${epNum}`;
+    // ASCII separator: house style bans em dashes in user-facing text.
+    titleEl.textContent = `Interactive Search: Episode ${epNum}`;
     body.innerHTML = '<div class="isearch-loading"><span class="isearch-loading-spinner" aria-hidden="true"></span><span>Searching indexers for episode ' + epNum + '</span></div>';
     modal.style.display = 'flex';
 

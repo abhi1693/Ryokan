@@ -7,7 +7,10 @@
    `grabInteractiveBatchResult` can read it on click without keeping a
    `_isearchResults` JS array in lockstep with the rendered DOM. #}
 {% if rows.is_empty() %}
-<div class="isearch-empty">{{ empty_message }}</div>
+<div class="isearch-empty">
+    <p>{{ empty_message }}</p>
+    <p class="isearch-empty-hint">{{ empty_hint }}</p>
+</div>
 {% else %}
 <table class="interactive-search-table">
     <thead>

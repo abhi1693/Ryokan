@@ -74,7 +74,8 @@ function openManualOverride(epNumber, currentSource, currentResolution, isRemux,
     const srcSelect = document.getElementById('override-source');
     const resSelect = document.getElementById('override-resolution');
     const status = document.getElementById('override-status');
-    if (title) title.textContent = `Override classification — Episode ${epNumber}`;
+    // ASCII separator: house style bans em dashes in user-facing text.
+    if (title) title.textContent = `Override classification: Episode ${epNumber}`;
     if (srcSelect) {
         const key = overrideKeyFromClassification(currentSource, isRemux, isBdmv, webKind);
         srcSelect.value = OVERRIDE_SOURCE_MAP[key] ? key : 'bluray';

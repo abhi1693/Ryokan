@@ -139,6 +139,20 @@ pub struct DownloadsQuery {
     tab: Option<String>,
 }
 
+/// User-facing label for a `download_clients.kind` value. Matches the
+/// option labels in the Settings → Download Clients add/edit forms so
+/// error copy and the form speak the same names.
+fn client_kind_display(kind: &str) -> &'static str {
+    match kind {
+        "qbittorrent" => "qBittorrent",
+        "deluge" => "Deluge",
+        "transmission" => "Transmission",
+        "rtorrent" => "rTorrent",
+        "sabnzbd" => "SABnzbd",
+        _ => "download client",
+    }
+}
+
 fn normalize_tab(tab: Option<String>) -> String {
     match tab.as_deref() {
         Some("history") => "history".to_string(),
@@ -170,14 +184,17 @@ pub async fn downloads_page(
         // whole tab — it logs and the other clients still render.
         let pool = state.download_clients.read().await.clone();
         if pool.clients.is_empty() {
-            (Vec::new(), "Download client is not configured.".to_string())
+            (
+                Vec::new(),
+                "No download client is configured. Add one under Settings → Download Clients to see its queue here.".to_string(),
+            )
         } else {
             let mut torrents: Vec<crate::services::download_client::DownloadItem> = Vec::new();
-            let mut errors: Vec<String> = Vec::new();
+            let mut errors: Vec<(i64, String)> = Vec::new();
             for (id, c) in pool.clients.iter() {
                 match c.list_scoped().await {
                     Ok(mut items) => torrents.append(&mut items),
-                    Err(e) => errors.push(format!("client #{}: {}", id, e)),
+                    Err(e) => errors.push((*id, e)),
                 }
             }
             let is_downloading = |k: DownloadItemState| {
@@ -202,7 +219,53 @@ pub async fn downloads_page(
             let error_msg = if errors.is_empty() {
                 String::new()
             } else {
-                format!("Could not load queue from: {}", errors.join("; "))
+                // Interface-voice summary: identify the failing
+                // client(s) by configured name AND kind — with a
+                // multi-client pool a bare row name like "qbit" is
+                // ambiguous — and say whether the rest of the queue
+                // still rendered. The raw transport error (reqwest
+                // URL, connect detail) goes to the DB log instead of
+                // the page; it's diagnostic material, not direction.
+                let rows = crate::models::download_clients::list_all(&state.db)
+                    .await
+                    .unwrap_or_default();
+                let describe = |id: i64| {
+                    rows.iter()
+                        .find(|r| r.id == id)
+                        .map(|r| format!("\"{}\" ({})", r.name, client_kind_display(&r.kind)))
+                        .unwrap_or_else(|| format!("download client #{}", id))
+                };
+                let detail = errors
+                    .iter()
+                    .map(|(id, e)| format!("{}: {}", describe(*id), e))
+                    .collect::<Vec<_>>()
+                    .join("; ");
+                crate::services::logger::warn(
+                    &state.db,
+                    crate::models::log::LogCategory::DownloadClient,
+                    "Queue load failed for one or more download clients",
+                    &detail,
+                )
+                .await;
+                let names = errors
+                    .iter()
+                    .map(|(id, _)| describe(*id))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let lead = if errors.len() == 1 {
+                    format!("Can't reach the download client {}.", names)
+                } else {
+                    format!("Can't reach {} download clients: {}.", errors.len(), names)
+                };
+                let partial = if errors.len() < pool.clients.len() {
+                    " Queues from the other clients are still shown."
+                } else {
+                    ""
+                };
+                format!(
+                    "{}{} Check the connection details under Settings → Download Clients; the full error is in System → Logs.",
+                    lead, partial
+                )
             };
             (views, error_msg)
         }

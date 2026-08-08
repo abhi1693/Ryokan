@@ -427,7 +427,7 @@
             <div class="form-check">
                 <label class="checkbox-row">
                     <input type="checkbox" name="force_mal_fallback" id="force_mal_fallback" {% if force_mal_fallback %}checked{% endif %}>
-                    <span>Force MAL/Jikan fallback for search and tracked fallback entries</span>
+                    <span>Force MAL/Tenrai fallback for search and tracked fallback entries</span>
                 </label>
                 <span class="form-hint">Debug option for testing the fallback path after AniList comes back. AniList-only entries without a MAL ID cannot be forced into fallback mode.</span>
             </div>
@@ -436,7 +436,7 @@
                     <input type="checkbox" name="force_kitsu_fallback" id="force_kitsu_fallback" {% if force_kitsu_fallback %}checked{% endif %}>
                     <span>Force Kitsu fallback for episode titles and air dates</span>
                 </label>
-                <span class="form-hint">Debug option for testing Kitsu episode metadata even when Jikan returns titles. This only affects series episode metadata on the detail page.</span>
+                <span class="form-hint">Debug option for testing Kitsu episode metadata even when Tenrai (MAL) returns titles. This only affects series episode metadata on the detail page.</span>
             </div>
         </div>
 
@@ -466,7 +466,7 @@
         <div class="cf-section-header">
             <h3>Maintenance actions</h3>
         </div>
-        <p class="cf-section-desc">One-shot operations against the library and metadata cache. Each runs immediately — independent of the Save button below.</p>
+        <p class="cf-section-desc">One-shot operations against the library and metadata cache. Each runs immediately, independent of the Save button below.</p>
         <div class="debug-actions-group">
             <div class="debug-action-row">
                 <button type="button" class="btn btn-secondary" onclick="rebuildAniListCache(this)">Rebuild metadata cache</button>
@@ -552,7 +552,7 @@
             Series identity, episode counts, airing status, titles in three languages, and the relationship graphs that let Ryokan follow a franchise through its sequels all come from <a href="https://anilist.co" target="_blank" rel="noopener noreferrer">AniList</a>.
         </p>
         <p>
-            AniList gets rate-limited or goes down occasionally, and its per-episode titles (sourced from Crunchyroll) are brittle: on multi-season series they usually only surface for season one. Ryokan fills those gaps by calling <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a> through <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>'s unofficial wrapper. <a href="https://kitsu.app" target="_blank" rel="noopener noreferrer">Kitsu</a> is only consulted when MAL also doesn't return titles for a given series.
+            AniList gets rate-limited or goes down occasionally, and its per-episode titles (sourced from Crunchyroll) are brittle: on multi-season series they usually only surface for season one. Ryokan fills those gaps by calling <a href="https://myanimelist.net" target="_blank" rel="noopener noreferrer">MyAnimeList</a> through <a href="https://tenrai.org" target="_blank" rel="noopener noreferrer">Tenrai</a>, a free community continuation of <a href="https://jikan.moe" target="_blank" rel="noopener noreferrer">Jikan</a>'s unofficial API. <a href="https://kitsu.app" target="_blank" rel="noopener noreferrer">Kitsu</a> is only consulted when MAL also doesn't return titles for a given series.
         </p>
     </section>
 

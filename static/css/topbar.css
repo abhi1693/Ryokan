@@ -59,6 +59,30 @@
     font-size: 14px;
     font-weight: 500;
     transition: color 0.15s, background 0.15s;
+    white-space: nowrap;
+}
+
+/* The 641-900px band: too narrow for the full-size nav (7 links at
+   14px/14px-padding overflow the right edge and clip Logout off the
+   viewport entirely), too wide for the mobile tabbar takeover at
+   640px. Compress instead of clipping: drop the Latin half of the
+   brand (the kanji mark stands alone), tighten link padding + gap,
+   and step the font down a notch. Verified to fit all seven links
+   at 641px. */
+@media (max-width: 900px) and (min-width: 641px) {
+    .nav {
+        padding: 0 12px;
+    }
+    .nav-brand .brand-latin {
+        display: none;
+    }
+    .nav-links {
+        gap: 2px;
+    }
+    .nav-links a {
+        padding: 6px 8px;
+        font-size: 13px;
+    }
 }
 
 .nav-links a:hover { color: var(--text); background: var(--bg-elevated); }
@@ -116,16 +140,18 @@
 
 @media (max-width: 640px) {
     /* Keep .nav-links flexed on mobile but hide every child except
-       (a) the mobile logout icon and (b) the bulk-select toggle on
-       the library page. Primary nav lives in the bottom
-       mobile-tabbar; the topbar's right slot is reserved for
-       page-mode actions (Select) and account actions (Logout). */
+       the mobile logout and calendar icons. Primary nav lives in
+       the bottom mobile-tabbar; the topbar's right slot is reserved
+       for account actions (Logout) and the calendar shortcut. The
+       bulk-select toggle used to be whitelisted here too; it now
+       lives in the library toolbar (templates/index.html) instead
+       of the topbar. */
     .nav-links {
         display: flex;
         gap: 6px;
         align-items: center;
     }
-    .nav-links > *:not(.nav-logout-mobile):not(.bulk-select-toggle):not(.nav-calendar-mobile) {
+    .nav-links > *:not(.nav-logout-mobile):not(.nav-calendar-mobile) {
         display: none;
     }
     .nav-logout-mobile {

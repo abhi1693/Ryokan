@@ -325,6 +325,24 @@ pub async fn get_for_series(
     Ok(rows.into_iter().map(|t| (t.episode_number, t)).collect())
 }
 
+/// Library-wide slice of active tag states for the index page's
+/// per-card completeness bars: every (series_id, episode_number,
+/// state) row whose state is 'completed' (counts toward downloaded,
+/// unioned with on-disk files) or 'grabbed' (flips the card into the
+/// downloading state). Failed tags are irrelevant to the bar — a
+/// failed grab leaves the episode missing — so they're filtered
+/// server-side to keep the row count proportional to the library.
+pub async fn active_states_all_series(
+    db: &SqlitePool,
+) -> Result<Vec<(i64, i32, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (i64, i32, String)>(
+        "SELECT series_id, episode_number, state FROM episode_quality_tags
+         WHERE state IN ('completed', 'grabbed')",
+    )
+    .fetch_all(db)
+    .await
+}
+
 /// Get grab history for a specific episode, newest first. No LIMIT — the
 /// modal UI scrolls past the first 10 entries, and there are no known
 /// series with enough grabs for an unbounded SELECT to be a problem.

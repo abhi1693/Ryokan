@@ -496,6 +496,11 @@
 
 .ep-missing { color: var(--red); opacity: 0.5; }
 
+/* Unaired (no file, air date in the future or unknown on a still-
+   airing series): deliberately neutral. Red is reserved for
+   aired-but-absent episodes, where "go grab it" is a real action. */
+.ep-unaired { color: var(--text-dim); opacity: 0.5; }
+
 .ep-row-have .ep-col-num { color: var(--text); }
 
 .ep-title-name {
@@ -513,6 +518,12 @@
     font-size: 11px;
     color: var(--red);
     opacity: 0.6;
+}
+
+.ep-unaired-label {
+    font-size: 11px;
+    color: var(--text-dim);
+    opacity: 0.8;
 }
 
 @media (max-width: 640px) {
@@ -1153,6 +1164,16 @@
     text-align: center;
     color: var(--text-dim);
     padding: 32px;
+}
+
+.isearch-empty-hint {
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--text-dim);
+    opacity: 0.75;
+    max-width: 520px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 /* Inline save-status pill returned by the HTMX-aware

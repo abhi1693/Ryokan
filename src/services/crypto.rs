@@ -214,16 +214,16 @@ fn write_key_file(path: &Path, key: &[u8; 32]) -> Result<(), String> {
 /// representation (logs, debug dumps), base64-encode the output
 /// separately.
 pub fn encrypt(plaintext: &[u8]) -> Result<Vec<u8>, String> {
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*KEY));
+    let cipher = ChaCha20Poly1305::new(&Key::from(*KEY));
     // 96-bit random nonce, generated through the same rand 0.10 path
     // `generate_random_key` uses (rather than chacha20poly1305's own
     // re-export of rand_core 0.6's OsRng, which doesn't match rand
     // 0.10's trait surface).
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| format!("AEAD encrypt failed: {e}"))?;
 
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
@@ -242,10 +242,11 @@ pub fn decrypt(ciphertext_with_nonce: &[u8]) -> Result<Vec<u8>, String> {
         return Err("ciphertext too short — missing nonce prefix".into());
     }
     let (nonce_bytes, body) = ciphertext_with_nonce.split_at(NONCE_LEN);
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&*KEY));
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let cipher = ChaCha20Poly1305::new(&Key::from(*KEY));
+    let nonce =
+        Nonce::try_from(nonce_bytes).map_err(|_| "nonce prefix has wrong length".to_string())?;
     cipher
-        .decrypt(nonce, body)
+        .decrypt(&nonce, body)
         .map_err(|e| format!("AEAD decrypt failed: {e}"))
 }
 

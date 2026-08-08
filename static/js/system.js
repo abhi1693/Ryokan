@@ -400,7 +400,7 @@ function reconcileFallbacks(btn) {
 async function rebuildAniListCache(btn) {
     const confirmed = await window.ryokanConfirm({
         title: 'Rebuild metadata cache',
-        body: 'Rebuild cached metadata, relations, episode data, and artwork for tracked series using the best currently available provider data? This can use MAL/Jikan fallback when AniList is unavailable.',
+        body: 'Rebuild cached metadata, relations, episode data, and artwork for tracked series using the best currently available provider data? This can use MAL/Tenrai fallback when AniList is unavailable.',
         yesLabel: 'Rebuild',
     });
     if (!confirmed.ok) return;

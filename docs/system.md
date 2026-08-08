@@ -85,7 +85,7 @@ The full third-party license texts are bundled into the binary at compile time a
 Runtime toggles and diagnostic actions that don't fit cleanly under Settings.
 
 - **Allow non-English releases**: when off, Nyaa search restricts to category `1_2` (English-translated). When on, Ryokan also pulls from category `1_0` (Anime All; includes untranslated and multi-sub releases). Music releases always search categories `1_1` + `2_0` regardless. Lives here rather than under Settings because flipping it changes how in-flight searches resolve, not stored configuration.
-- **Force MAL fallback**: temporarily skip AniList and go straight to Jikan (MAL) for metadata fetches. Useful when AniList is rate-limited or returning stale data; flip back off after the issue clears.
+- **Force MAL fallback**: temporarily skip AniList and go straight to the MAL provider (Tenrai; any Jikan-v4-compatible API via `JIKAN_API_BASE`) for metadata fetches. Useful when AniList is rate-limited or returning stale data; flip back off after the issue clears.
 - **Force Kitsu fallback**: same idea, for the Kitsu provider further down the metadata chain.
 - **Auto-grab on add**: when on, adding a series to the library kicks off an immediate auto-search for the first episode (and existing episodes if the series is partially-aired). When off, you have to manually trigger the search per episode.
 
