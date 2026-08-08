@@ -8,8 +8,13 @@ use tokio::sync::RwLock;
 
 use crate::services::anilist::{AnimeDetail, AnimeEntry, RelatedEntry, StreamingEpisode};
 
-/// Base URL for Jikan. Change to your self-hosted instance if desired.
-const JIKAN_API: &str = "https://api.jikan.moe/v4";
+/// Default base URL for the MAL metadata fallback. Tenrai's v1 API is a
+/// drop-in continuation of Jikan v4 (identical response schema, authless);
+/// Jikan's public API at api.jikan.moe is being discontinued October 1,
+/// 2026 and its search endpoint is already failing intermittently (#193).
+/// Point `JIKAN_API_BASE` at any Jikan-v4-compatible base (e.g. a
+/// self-hosted Jikan) to override.
+const JIKAN_API: &str = "https://api.tenrai.org/v1";
 
 /// Cache TTL in seconds (7 days).
 const CACHE_TTL_SECS: i64 = 7 * 24 * 60 * 60;
