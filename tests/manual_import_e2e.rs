@@ -74,6 +74,7 @@ fn group() -> SeriesGroup {
         skipped: false,
         existing: None,
         mapping_note: None,
+        search_results: Vec::new(),
     }
 }
 
@@ -240,6 +241,82 @@ async fn absolute_numbering_walks_the_sequel_chain() {
         out[2].mapping_note.as_deref(),
         Some("Absolute numbering; episodes 55 to 55 through the sequel chain")
     );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}
+
+#[tokio::test]
+async fn live_search_ranks_hits_and_pick_by_id_promotes_one() {
+    use ryokan::services::manual_import::session;
+    use ryokan::test_support::{build_test_app_state, in_memory_pool};
+
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+    let mock = MockServer::start().await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("SEARCH_MATCH"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(&[
+            (7, "Bleach", "Bleach"),
+            (
+                8,
+                "Bleach: Sennen Kessen-hen",
+                "BLEACH: Thousand-Year Blood War",
+            ),
+        ])))
+        .mount(&mock)
+        .await;
+
+    let db = in_memory_pool().await;
+    let state = build_test_app_state(db, None);
+    let mut g = group();
+    g.candidates = vec![];
+    g.pick = None;
+    let mut s = ryokan::services::manual_import::ImportSession::new(
+        session::mint_id(),
+        PathBuf::from("/src"),
+        ryokan::services::manual_import::ImportMode::Hardlink,
+        false,
+        false,
+    );
+    s.status = ryokan::services::manual_import::SessionStatus::Ready;
+    s.groups.push(g);
+    let sid = s.id.clone();
+    session::insert(&state.import_sessions, s);
+
+    let hits = manual_import::live_search(&state, &sid, 0, "Bleach")
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 2);
+    let stored = session::get(&state.import_sessions, &sid).unwrap();
+    assert_eq!(
+        stored.groups[0].search_results.len(),
+        2,
+        "kept for the pick"
+    );
+    assert!(stored.groups[0].pick.is_none(), "searching doesn't pick");
+
+    manual_import::pick_by_id(&state, &sid, 0, 8).await.unwrap();
+    let stored = session::get(&state.import_sessions, &sid).unwrap();
+    assert_eq!(
+        stored.groups[0].picked().map(|e| e.id),
+        Some(8),
+        "promoted from the search results"
+    );
+    let err = manual_import::pick_by_id(&state, &sid, 0, 9)
+        .await
+        .unwrap_err();
+    assert!(err.contains("Unknown candidate"), "{err}");
+    let err = manual_import::live_search(&state, &sid, 0, "  ")
+        .await
+        .unwrap_err();
+    assert!(err.contains("Type a title"), "{err}");
 
     unsafe {
         std::env::remove_var("RYOKAN_ANILIST_API_BASE");

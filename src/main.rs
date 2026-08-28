@@ -609,6 +609,10 @@ async fn main() {
             post(handlers::system::manual_import::group_action),
         )
         .route(
+            "/system/import/{session_id}/group/{idx}/candidates",
+            get(handlers::system::manual_import::picker_candidates),
+        )
+        .route(
             "/system/import/{session_id}/discard",
             post(handlers::system::manual_import::discard),
         )

@@ -52,3 +52,17 @@ ryokanRegisterPageInit('import-progress', {
         }
     }
 });
+
+// Focus the picker's search box when a card's <details> opens. `toggle`
+// doesn't bubble, so listen in the capture phase on the document; the
+// handler is idempotent across boost re-executions because
+// document-level listeners are replaced with the page's script.
+if (!window.__importPickerFocusBound) {
+    window.__importPickerFocusBound = true;
+    document.addEventListener('toggle', function (ev) {
+        var d = ev.target;
+        if (!d || !d.matches || !d.matches('details.import-picker') || !d.open) return;
+        var input = d.querySelector('input[type="search"]');
+        if (input) { try { input.focus(); input.select(); } catch (_) {} }
+    }, true);
+}

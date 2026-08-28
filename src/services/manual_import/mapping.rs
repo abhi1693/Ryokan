@@ -226,6 +226,7 @@ mod tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         }
     }
 
@@ -613,6 +614,7 @@ mod absolute_tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         };
         // Fits: no fetch, no change (a fetch here would hit the
         // network, so this doubles as a guard on the trigger).

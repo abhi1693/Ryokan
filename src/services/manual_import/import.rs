@@ -729,6 +729,7 @@ mod tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         }
     }
 

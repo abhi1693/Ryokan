@@ -68,6 +68,15 @@ pub struct GroupActionForm {
     pub file: Option<usize>,
     #[serde(default)]
     pub query: String,
+    /// `pick_id`: provider id (positive AniList, negative MAL).
+    #[serde(default)]
+    pub id: Option<i64>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct PickerQuery {
+    #[serde(default)]
+    pub q: String,
 }
 
 /// Start-form echo so a validation error keeps what was typed.
@@ -78,9 +87,11 @@ struct StartFormView {
     include_hidden: bool,
 }
 
-/// One AL candidate as the card shows it.
+/// One provider candidate as the picker shows it.
 struct CandidateView {
+    #[allow(dead_code)]
     index: usize,
+    id: i64,
     title: String,
     subtitle: String,
     cover_url: String,
@@ -88,6 +99,27 @@ struct CandidateView {
     year: String,
     episodes: String,
     external_href: String,
+    /// `AniList` / `MAL`.
+    source_label: &'static str,
+    /// The group's current pick.
+    is_current: bool,
+}
+
+/// The picker's result list, swapped into the card by the
+/// search-as-you-type input. `g` mirrors the fields the include reads
+/// off a `GroupCard` so one partial serves both renders.
+struct PickerCtx {
+    idx: usize,
+    query: String,
+    picker_rows: Vec<CandidateView>,
+    picker_error: String,
+}
+
+#[derive(Template)]
+#[template(path = "partials/system/import_picker_results.html")]
+struct PickerResultsPartial {
+    session_id: String,
+    g: PickerCtx,
 }
 
 /// Everything the group card partial needs. Built from a
@@ -104,7 +136,10 @@ struct GroupCard {
     kind: &'static str,
     kind_label: &'static str,
     pick: Option<CandidateView>,
-    alternatives: Vec<CandidateView>,
+    /// Ranked candidates for the picker's initial list, current
+    /// pick marked.
+    picker_rows: Vec<CandidateView>,
+    picker_error: String,
     low_confidence: bool,
     search_error: String,
     skipped: bool,
@@ -224,6 +259,7 @@ fn candidate_view(index: usize, entry: &AnimeEntry, pref: &str) -> CandidateView
     };
     CandidateView {
         index,
+        id: entry.id,
         title,
         subtitle,
         cover_url: entry.cover_url.clone(),
@@ -234,7 +270,26 @@ fn candidate_view(index: usize, entry: &AnimeEntry, pref: &str) -> CandidateView
             None => "? ep".to_string(),
         },
         external_href,
+        source_label: if entry.source == "mal" {
+            "MAL"
+        } else {
+            "AniList"
+        },
+        is_current: false,
     }
+}
+
+fn picker_rows(group: &manual_import::SeriesGroup, pref: &str) -> Vec<CandidateView> {
+    group
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let mut v = candidate_view(i, e, pref);
+            v.is_current = group.pick == Some(i);
+            v
+        })
+        .collect()
 }
 
 /// Library state the projection reads, gathered once per render.
@@ -307,11 +362,8 @@ fn build_card(
         pick: group
             .pick
             .and_then(|i| group.candidates.get(i).map(|e| candidate_view(i, e, pref))),
-        alternatives: group
-            .alternatives()
-            .into_iter()
-            .map(|(i, e)| candidate_view(i, e, pref))
-            .collect(),
+        picker_rows: picker_rows(group, pref),
+        picker_error: String::new(),
         low_confidence: group.low_confidence,
         search_error: group.search_error.clone().unwrap_or_default(),
         skipped: group.skipped,
@@ -633,6 +685,12 @@ async fn apply_group_action(
             manual_import::pick_candidate(state, session_id, idx, Some(candidate)).await
         }
         "unpick" => manual_import::pick_candidate(state, session_id, idx, None).await,
+        "pick_id" => {
+            let Some(id) = form.id else {
+                return Err("Pick a series".to_string());
+            };
+            manual_import::pick_by_id(state, session_id, idx, id).await
+        }
         "research" => manual_import::research_group(state, session_id, idx, &form.query).await,
         "toggle_file" => {
             let Some(file) = form.file else {
@@ -696,6 +754,66 @@ pub async fn group_action(
         g: card,
     };
     Html(partial.render().unwrap_or_default()).into_response()
+}
+
+/// The picker's result list: the ranked candidates when `q` is empty,
+/// a live provider search otherwise. Always 200 so the swap lands;
+/// failures render inline.
+pub async fn picker_candidates(
+    State(state): State<AppState>,
+    Path((session_id, idx)): Path<(String, usize)>,
+    Query(q): Query<PickerQuery>,
+) -> Html<String> {
+    let query = q.q.trim().to_string();
+    let ctx = render_context(&state).await;
+    let group = if session::is_valid_id(&session_id) {
+        session::get(&state.import_sessions, &session_id).and_then(|s| s.groups.get(idx).cloned())
+    } else {
+        None
+    };
+    let Some(group) = group else {
+        let partial = PickerResultsPartial {
+            session_id,
+            g: PickerCtx {
+                idx,
+                query,
+                picker_rows: Vec::new(),
+                picker_error: "This preview has expired. Start a new scan.".to_string(),
+            },
+        };
+        return Html(partial.render().unwrap_or_default());
+    };
+    let (rows, error) = if query.is_empty() {
+        (picker_rows(&group, &ctx.title_pref), String::new())
+    } else {
+        match manual_import::live_search(&state, &session_id, idx, &query).await {
+            Ok(hits) => {
+                let current = group.picked().map(|e| e.id);
+                (
+                    hits.iter()
+                        .enumerate()
+                        .map(|(i, e)| {
+                            let mut v = candidate_view(i, e, &ctx.title_pref);
+                            v.is_current = current == Some(e.id);
+                            v
+                        })
+                        .collect(),
+                    String::new(),
+                )
+            }
+            Err(e) => (Vec::new(), format!("Search failed: {e}")),
+        }
+    };
+    let partial = PickerResultsPartial {
+        session_id,
+        g: PickerCtx {
+            idx,
+            query,
+            picker_rows: rows,
+            picker_error: error,
+        },
+    };
+    Html(partial.render().unwrap_or_default())
 }
 
 /// Confirm: start the import job for a Ready preview with something
@@ -881,6 +999,10 @@ mod router_tests {
                 "/system/import/{session_id}/group/{idx}",
                 post(group_action),
             )
+            .route(
+                "/system/import/{session_id}/group/{idx}/candidates",
+                get(picker_candidates),
+            )
             .route("/system/import/{session_id}/discard", post(discard))
             .with_state(state)
     }
@@ -1000,6 +1122,7 @@ mod router_tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         });
         let id = s.id.clone();
         session::insert(&state.import_sessions, s);
@@ -1244,12 +1367,61 @@ mod router_tests {
         let body = body_text(post_form(&app, &uri, "action=pick&candidate=9", true).await).await;
         assert!(body.contains("Unknown candidate"), "inline error: {body}");
         let body = body_text(post_form(&app, &uri, "action=unpick", true).await).await;
-        assert!(body.contains("No AniList match"), "{body}");
+        assert!(body.contains("No match found"), "{body}");
         assert!(body.contains("import-group-nomatch"));
 
         // Empty re-search is refused inline without touching AL.
         let body = body_text(post_form(&app, &uri, "action=research&query=+", true).await).await;
         assert!(body.contains("Type a title to search for"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn picker_lists_ranked_candidates_and_pick_id_switches() {
+        let db = in_memory_pool().await;
+        seed_media_root(&db, "/media").await;
+        let state = build_test_app_state(db, None);
+        let id = ready_session(&state);
+        let app = router(state.clone());
+
+        // The card embeds the picker with the current pick marked.
+        let (_, body) = get_page(&app, &format!("/system/import?session={id}")).await;
+        assert!(body.contains("import-picker"), "{body}");
+        assert!(body.contains("Change match"));
+        assert!(
+            body.contains("import-picker-current-label\">Current"),
+            "{body}"
+        );
+        assert!(
+            body.contains("name=\"id\" value=\"101\""),
+            "alternative offered with a Use button"
+        );
+
+        // The candidates endpoint serves the same list on its own.
+        let (status, body) =
+            get_page(&app, &format!("/system/import/{id}/group/0/candidates")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Show Alternative"), "{body}");
+        assert!(body.contains(">Use<"));
+        assert!(!body.contains("tabbed-page"), "a fragment, not a page");
+
+        // pick_id switches the card; an unknown id is refused inline.
+        let uri = format!("/system/import/{id}/group/0");
+        let body = body_text(post_form(&app, &uri, "action=pick_id&id=101", true).await).await;
+        assert!(body.contains("anilist.co/anime/101"), "{body}");
+        assert_eq!(
+            session::get(&state.import_sessions, &id).unwrap().groups[0].pick,
+            Some(1)
+        );
+        let body = body_text(post_form(&app, &uri, "action=pick_id&id=999", true).await).await;
+        assert!(body.contains("Unknown candidate"), "{body}");
+
+        // A no-match card opens the picker by itself.
+        let body = body_text(post_form(&app, &uri, "action=unpick", true).await).await;
+        assert!(
+            body.contains("<details class=\"import-picker\" open>"),
+            "{body}"
+        );
+        assert!(body.contains("Find a match"));
     }
 
     #[tokio::test]
@@ -1463,6 +1635,7 @@ mod import_router_tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         });
         let id = s.id.clone();
         session::insert(&state.import_sessions, s);

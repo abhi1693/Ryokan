@@ -50,42 +50,52 @@
         </div>
         {% else %}
         <div class="import-match-info">
-            <p class="import-match-title">{% if !g.search_error.is_empty() %}AniList search failed{% else %}No AniList match{% endif %}</p>
+            <p class="import-match-title">{% if !g.search_error.is_empty() %}Search failed{% else %}No match found{% endif %}</p>
             {% if !g.search_error.is_empty() %}
             <p class="form-hint">{{ g.search_error }}</p>
             {% else %}
-            <p class="form-hint">Nothing came back for &ldquo;{{ g.query }}&rdquo;. Try another title below, or skip this series.</p>
+            <p class="form-hint">Nothing came back for &ldquo;{{ g.query }}&rdquo;. Search for a different title, or skip this series.</p>
             {% endif %}
         </div>
         {% endif %}
     </div>
 
-    <div class="import-pickers">
-        {% if !g.alternatives.is_empty() %}
-        <div class="import-alternatives">
-            <span class="import-pickers-label">{% if g.pick.is_some() %}Not right? Pick another:{% else %}Other results:{% endif %}</span>
-            {% for a in g.alternatives %}
-            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
-                <input type="hidden" name="action" value="pick">
-                <input type="hidden" name="candidate" value="{{ a.index }}">
-                <button type="submit" class="btn btn-secondary btn-sm" title="{{ a.subtitle }}">{{ a.title }}{% if !a.year.is_empty() %} ({{ a.year }}){% endif %} &middot; {{ a.format }}</button>
-            </form>
-            {% endfor %}
+    {# The picker: one panel for "change the match". Opens closed on a
+       matched card and open on a no-match card. The search box swaps
+       the list below it as you type; the list starts as the ranked
+       candidates. Native <details>, so it works without JS; the
+       <noscript> form is the JS-less search. #}
+    <details class="import-picker"{% if g.pick.is_none() %} open{% endif %}>
+        <summary class="btn btn-secondary btn-sm import-picker-toggle">{% if g.pick.is_some() %}Change match{% else %}Find a match{% endif %}</summary>
+        <div class="import-picker-body">
+            <div class="search-bar import-picker-search">
+                <label for="import-picker-q-{{ g.idx }}" class="visually-hidden">Search for a different title</label>
+                <input type="search" id="import-picker-q-{{ g.idx }}" name="q" value="{{ g.query }}" placeholder="Search for a title&hellip;" autocomplete="off" spellcheck="false"
+                       hx-get="/system/import/{{ session_id }}/group/{{ g.idx }}/candidates"
+                       hx-trigger="keyup changed delay:400ms, search"
+                       hx-target="#import-picker-results-{{ g.idx }}"
+                       hx-swap="innerHTML"
+                       hx-indicator="#import-picker-spinner-{{ g.idx }}">
+                <span id="import-picker-spinner-{{ g.idx }}" class="anilist-search-spinner htmx-indicator" aria-hidden="true"></span>
+            </div>
+            <noscript>
+                <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" class="import-research-form">
+                    <input type="hidden" name="action" value="research">
+                    <input type="text" name="query" value="{{ g.query }}" autocomplete="off">
+                    <button type="submit" class="btn btn-secondary btn-sm">Search</button>
+                </form>
+            </noscript>
+            <div id="import-picker-results-{{ g.idx }}" class="anilist-results import-picker-results">
+                {% include "partials/system/import_picker_results.html" %}
+            </div>
             {% if g.pick.is_some() %}
-            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form import-picker-none">
                 <input type="hidden" name="action" value="unpick">
                 <button type="submit" class="btn btn-ghost btn-sm">None of these</button>
             </form>
             {% endif %}
         </div>
-        {% endif %}
-        <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-research-form">
-            <input type="hidden" name="action" value="research">
-            <label for="import-query-{{ g.idx }}" class="visually-hidden">Search AniList for a different title</label>
-            <input type="text" id="import-query-{{ g.idx }}" name="query" value="{{ g.query }}" autocomplete="off" spellcheck="false">
-            <button type="submit" class="btn btn-secondary btn-sm">Search again</button>
-        </form>
-    </div>
+    </details>
 
     {% if g.kind == "new" || g.kind == "merge" %}
     <p class="import-group-counts">

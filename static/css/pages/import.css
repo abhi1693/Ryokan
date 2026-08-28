@@ -421,6 +421,93 @@
     border-color: var(--accent);
 }
 
+/* The picker: a native <details> whose summary is styled as the
+   card's "Change match" button; the body holds the search box and
+   the Add-modal-style result rows. */
+.import-picker {
+    margin: 12px 0;
+}
+
+.import-picker-toggle {
+    display: inline-flex;
+    list-style: none;
+    cursor: pointer;
+}
+
+.import-picker-toggle::-webkit-details-marker {
+    display: none;
+}
+
+.import-picker[open] .import-picker-toggle {
+    background: var(--bg-elevated);
+    border-color: var(--border-accent);
+}
+
+.import-picker-body {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.import-picker-search {
+    margin-bottom: 10px;
+}
+
+/* The shared .search-bar rule themes type="text" only; the picker's
+   box is type="search" so the browser gives it a clear button. */
+.import-picker-search input[type="search"] {
+    width: 100%;
+    padding: 8px 12px;
+    background-color: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    font-family: var(--font-body);
+    transition: border-color 0.15s;
+}
+
+.import-picker-search input[type="search"]:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.import-picker-results {
+    max-height: 360px;
+    overflow-y: auto;
+}
+
+.import-picker-row {
+    padding: 8px 10px;
+}
+
+.import-picker-current {
+    border-color: var(--accent);
+}
+
+.import-picker-current-label {
+    align-self: center;
+    flex-shrink: 0;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent);
+    padding: 2px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 3px;
+}
+
+.import-cover-empty {
+    background: var(--bg-card);
+    border: 1px dashed var(--border);
+}
+
+.import-picker-none {
+    margin-top: 8px;
+}
+
 /* In-flight feedback: htmx adds .htmx-request to the requesting form. */
 .import-group form.htmx-request button,
 .import-group form.htmx-request input {

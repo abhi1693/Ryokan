@@ -1,6 +1,6 @@
 # Importing an existing library
 
-If you already have anime on disk, you do not have to download it again. **System → Import Library** points Ryokan at a folder you already have, reads the filenames, matches each series on AniList, shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.
+If you already have anime on disk, you do not have to download it again. **System → Import Library** points Ryokan at a folder you already have, reads the filenames, matches each series against AniList (with MAL as the fallback, so a title AniList doesn't carry still resolves), shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.
 
 ## Before you start
 
@@ -74,9 +74,8 @@ Files land at `<media root>/<series folder>/Season 01/<original filename>`. File
 
 Every card has the same controls, and each one updates just that card:
 
-- **Pick another**: the next-best AniList results, one click each.
-- **None of these**: drop the match. The card becomes a no-match card until you search again.
-- **Search again**: type any title and Ryokan re-runs the AniList search for that series only. Your file ticks survive the re-search.
+- **Change match** opens the picker: the other candidates the search found, in the same rows as the Add Series dialog, each with a **Use** button. Type into its search box to look up any other title (AniList first, MAL as the fallback); results replace the list as you type. A card with no match opens with the picker already expanded. Picking by hand overrides anything the TMDB mapping or sequel chain decided for that card, so its files go back to their parsed episode numbers.
+- **None of these**: drop the match. The card becomes a no-match card until you pick something.
 - **Skip**: exclude the whole series. **Include** brings it back.
 - The checkbox on each row excludes or includes that file; **All** and **None** in the header do the whole table.
 

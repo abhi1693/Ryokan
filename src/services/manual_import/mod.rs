@@ -178,6 +178,9 @@ pub struct SeriesGroup {
     pub existing: Option<ExistingSeries>,
     /// How the TMDB mapping shaped this group, for the card.
     pub mapping_note: Option<String>,
+    /// Results of the picker's last live search, so a "Use" click can
+    /// promote one into `candidates` without a second lookup.
+    pub search_results: Vec<AnimeEntry>,
 }
 
 impl SeriesGroup {
@@ -361,7 +364,7 @@ async fn run_preview(state: AppState, id: String) -> Result<(), String> {
     progress::emit(
         "match",
         "info",
-        "Matching series on AniList",
+        "Matching series",
         Some(format!("0 of {}", groups.len())),
         false,
     )
@@ -475,6 +478,7 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
                 skipped: false,
                 existing: None,
                 mapping_note: None,
+                search_results: Vec::new(),
             }
         });
         g.files.push(f);
@@ -611,7 +615,7 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
         progress::emit(
             "match",
             "info",
-            "Matching series on AniList",
+            "Matching series",
             Some(format!("{} of {}", finished.len(), total)),
             false,
         )
@@ -708,6 +712,90 @@ pub async fn resolve_existing_all(db: &SqlitePool, groups: &mut [SeriesGroup]) {
     }
 }
 
+/// Undo resolver renumbering on a group's files: a candidate the user
+/// picked by hand overrides whatever the TMDB mapping or the sequel
+/// chain decided, and the parsed numbers are the only ones that still
+/// mean anything for it.
+fn revert_renumbering(group: &mut SeriesGroup) {
+    for f in &mut group.files {
+        if let Some(src) = f.source_episode.take() {
+            f.episode = Some(src);
+        }
+    }
+    group.mapping_note = None;
+}
+
+/// The picker's live search: rank the provider hits for `query`
+/// against the group's file evidence and remember them on the group
+/// so a pick can promote one. Doesn't touch the current pick.
+pub async fn live_search(
+    state: &AppState,
+    session_id: &str,
+    idx: usize,
+    query: &str,
+) -> Result<Vec<AnimeEntry>, String> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Err("Type a title to search for".to_string());
+    }
+    let Some(group) =
+        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
+    else {
+        return Err("Preview session not found".to_string());
+    };
+    let hits = anilist::search_anime(query).await?;
+    let input = matching::RankInput {
+        title: &group.parsed_title,
+        season: group.season,
+        year: group.year,
+        file_count: group.files.len(),
+    };
+    let ranked = matching::rank_entries(&input, hits);
+    session::update(&state.import_sessions, session_id, |s| {
+        if let Some(slot) = s.groups.get_mut(idx) {
+            slot.search_results = ranked.clone();
+        }
+    });
+    Ok(ranked)
+}
+
+/// Pick a candidate by provider id (positive AniList, negative MAL):
+/// from the ranked candidates, or promoted from the last live search.
+/// A hand pick clears the resolver's renumbering and notes.
+pub async fn pick_by_id(
+    state: &AppState,
+    session_id: &str,
+    idx: usize,
+    id: i64,
+) -> Result<(), String> {
+    let Some(mut group) =
+        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
+    else {
+        return Err("Preview session not found".to_string());
+    };
+    let pick = match group.candidates.iter().position(|e| e.id == id) {
+        Some(i) => i,
+        None => {
+            let Some(entry) = group.search_results.iter().find(|e| e.id == id).cloned() else {
+                return Err("Unknown candidate".to_string());
+            };
+            group.candidates.push(entry);
+            group.candidates.len() - 1
+        }
+    };
+    group.pick = Some(pick);
+    group.skipped = false;
+    group.low_confidence = false;
+    revert_renumbering(&mut group);
+    resolve_existing(&state.db, &mut group).await;
+    session::update(&state.import_sessions, session_id, |s| {
+        if let Some(slot) = s.groups.get_mut(idx) {
+            *slot = group;
+        }
+    })
+    .ok_or_else(|| "Preview session not found".to_string())
+}
+
 /// Re-search one group with a user-typed query, then re-resolve the
 /// library row for the new pick. The AL call runs outside the store
 /// lock; only the swap-in is locked.
@@ -728,6 +816,7 @@ pub async fn research_group(
     };
     group.query = query.to_string();
     group.skipped = false;
+    revert_renumbering(&mut group);
     search_and_rank(&mut group, false).await;
     resolve_existing(&state.db, &mut group).await;
     session::update(&state.import_sessions, session_id, |s| {
@@ -762,13 +851,11 @@ pub async fn pick_candidate(
     group.pick = pick;
     group.skipped = false;
     group.low_confidence = false;
+    revert_renumbering(&mut group);
     resolve_existing(&state.db, &mut group).await;
     session::update(&state.import_sessions, session_id, |s| {
         if let Some(slot) = s.groups.get_mut(idx) {
-            slot.pick = group.pick;
-            slot.skipped = false;
-            slot.low_confidence = false;
-            slot.existing = group.existing;
+            *slot = group;
         }
     })
     .ok_or_else(|| "Preview session not found".to_string())
@@ -888,6 +975,7 @@ mod tests {
             skipped: false,
             existing: None,
             mapping_note: None,
+            search_results: Vec::new(),
         };
         let alts: Vec<usize> = g.alternatives().into_iter().map(|(i, _)| i).collect();
         assert_eq!(alts, vec![0, 1, 3, 4]);
