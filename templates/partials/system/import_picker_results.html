@@ -22,7 +22,7 @@
         </div>
     </div>
     {% if r.is_current %}
-    <span class="import-picker-current-label">Current</span>
+    <button type="button" class="btn btn-primary btn-sm btn-add" disabled aria-current="true">Current</button>
     {% else %}
     <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
         <input type="hidden" name="action" value="pick_id">

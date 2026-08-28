@@ -1377,7 +1377,7 @@ mod router_tests {
         assert!(body.contains("import-picker"), "{body}");
         assert!(body.contains("Change match"));
         assert!(
-            body.contains("import-picker-current-label\">Current"),
+            body.contains("disabled aria-current=\"true\">Current<"),
             "{body}"
         );
         assert!(
