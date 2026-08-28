@@ -1,0 +1,617 @@
+//! Outcome projection for the manual-import preview (#122): given a
+//! matched [`SeriesGroup`] and the library's current state, what would
+//! the import do to each file?
+//!
+//! Pure functions over the session. The wizard renders one card per
+//! group from a [`GroupView`]; the override controls mutate the group
+//! and re-project. Nothing here touches the disk beyond the
+//! folder-collision check the caller feeds in.
+
+use std::collections::HashSet;
+
+use super::{ImportSession, SeriesGroup};
+use crate::services::library_link::pick_title;
+use crate::services::recycle::human_bytes;
+use crate::services::{media, source};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GroupKind {
+    /// AL match, not in the library: the import creates the series.
+    New,
+    /// AL match that resolves to a tracked series.
+    Merge,
+    /// AL had nothing (or the search failed).
+    NoMatch,
+    /// The user excluded the whole group.
+    Skipped,
+}
+
+impl GroupKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Merge => "merge",
+            Self::NoMatch => "nomatch",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::New => "New series",
+            Self::Merge => "Already in library",
+            Self::NoMatch => "No match",
+            Self::Skipped => "Skipped",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileStatus {
+    /// Would be imported.
+    Import,
+    /// Ryokan already has this episode at equal or better quality.
+    AlreadyPresent,
+    /// A grab for this episode is in flight.
+    Downloading,
+    /// Ryokan has it at lower quality; the import would replace it.
+    WouldReplace,
+    /// The existing tag is a manual override; never touched.
+    Pinned,
+    /// No episode number could be read from the filename.
+    NoEpisodeNumber,
+    /// Unticked by the user.
+    Deselected,
+    /// The group has no AL match.
+    Unmatched,
+    /// The group is skipped.
+    Skipped,
+}
+
+impl FileStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Import => "import",
+            Self::AlreadyPresent => "present",
+            Self::Downloading => "downloading",
+            Self::WouldReplace => "replace",
+            Self::Pinned => "pinned",
+            Self::NoEpisodeNumber => "no-episode",
+            Self::Deselected => "deselected",
+            Self::Unmatched => "unmatched",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Import => "Import",
+            Self::AlreadyPresent => "Already have",
+            Self::Downloading => "Downloading",
+            Self::WouldReplace => "Replace",
+            Self::Pinned => "Pinned",
+            Self::NoEpisodeNumber => "No episode number",
+            Self::Deselected => "Excluded",
+            Self::Unmatched => "No match",
+            Self::Skipped => "Skipped",
+        }
+    }
+
+    /// Counts toward "will be written".
+    pub fn writes(self) -> bool {
+        matches!(self, Self::Import | Self::WouldReplace)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileView {
+    pub idx: usize,
+    pub rel_path: String,
+    pub file_name: String,
+    /// `S01E07`, or `-` when no episode number parsed.
+    pub episode_label: String,
+    pub quality_label: String,
+    /// What Ryokan holds for this episode already, for the Replace /
+    /// Already-have rows. Empty otherwise.
+    pub existing_quality: String,
+    pub status: FileStatus,
+    pub status_class: &'static str,
+    pub status_label: &'static str,
+    /// Projected destination under the media root. Empty when nothing
+    /// would be written.
+    pub dest: String,
+    pub selected: bool,
+    pub size: String,
+    pub size_bytes: u64,
+    pub title_from_folder: bool,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GroupCounts {
+    pub import: usize,
+    pub present: usize,
+    pub downloading: usize,
+    pub replace: usize,
+    pub pinned: usize,
+    pub no_episode: usize,
+    pub deselected: usize,
+    /// Bytes across the files that would be written.
+    pub write_bytes: u64,
+}
+
+impl GroupCounts {
+    pub fn writes(&self) -> usize {
+        self.import + self.replace
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupView {
+    pub kind: GroupKind,
+    /// Folder under the media root the files would land in. For a new
+    /// series this is the auto-generated name (suffixed on collision).
+    pub folder_name: String,
+    /// A folder of the plain name already exists under the media root
+    /// and no series row owns it, so the import would suffix.
+    pub folder_collision: bool,
+    pub files: Vec<FileView>,
+    pub counts: GroupCounts,
+}
+
+/// Library state the projection needs, gathered once per render.
+pub struct ProjectionContext<'a> {
+    pub media_root: &'a str,
+    /// `series.folder_name` for every tracked series.
+    pub owned_folders: &'a HashSet<String>,
+    /// Top-level directories currently under the media root.
+    pub disk_folders: &'a HashSet<String>,
+    /// `config.title_language`.
+    pub title_pref: &'a str,
+}
+
+/// The folder name `series::upsert` would generate for an AL entry.
+/// Same english → romaji → native preference the insert path uses, so
+/// the preview shows the folder the import actually creates.
+pub fn default_folder_name(entry: &crate::services::anilist::AnimeEntry) -> String {
+    let raw = if !entry.title_english.is_empty() {
+        &entry.title_english
+    } else if !entry.title_romaji.is_empty() {
+        &entry.title_romaji
+    } else {
+        &entry.title_native
+    };
+    media::sanitize_folder_name(raw)
+}
+
+/// A folder name that collides with nothing: the plain name when it is
+/// free (or owned by a series row, which is a merge not a collision),
+/// otherwise ` (2)`, ` (3)`, ... Returns whether a suffix was needed.
+pub fn unique_folder_name(base: &str, ctx: &ProjectionContext<'_>) -> (String, bool) {
+    let taken = |name: &str| ctx.disk_folders.contains(name) && !ctx.owned_folders.contains(name);
+    if !taken(base) {
+        return (base.to_string(), false);
+    }
+    for n in 2..1000 {
+        let candidate = format!("{base} ({n})");
+        if !taken(&candidate) {
+            return (candidate, true);
+        }
+    }
+    (format!("{base} ({})", ctx.disk_folders.len() + 2), true)
+}
+
+fn episode_label(season: Option<i32>, episode: Option<i32>) -> String {
+    match episode {
+        Some(e) => format!("S{:02}E{:02}", season.unwrap_or(1), e),
+        None => "-".to_string(),
+    }
+}
+
+fn dest_for(media_root: &str, folder: &str, file_name: &str) -> String {
+    if media_root.is_empty() {
+        return String::new();
+    }
+    std::path::Path::new(media_root)
+        .join(folder)
+        .join("Season 01")
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupView {
+    let picked = group.picked();
+    let kind = if group.skipped {
+        GroupKind::Skipped
+    } else if picked.is_none() {
+        GroupKind::NoMatch
+    } else if group.existing.is_some() {
+        GroupKind::Merge
+    } else {
+        GroupKind::New
+    };
+
+    let (folder_name, folder_collision) = match (&group.existing, picked) {
+        (Some(existing), _) => (existing.folder_name.clone(), false),
+        (None, Some(entry)) => unique_folder_name(&default_folder_name(entry), ctx),
+        (None, None) => (String::new(), false),
+    };
+
+    let mut counts = GroupCounts::default();
+    let files = group
+        .files
+        .iter()
+        .enumerate()
+        .map(|(idx, f)| {
+            let mut existing_quality = String::new();
+            let status = match kind {
+                GroupKind::Skipped => FileStatus::Skipped,
+                GroupKind::NoMatch => FileStatus::Unmatched,
+                GroupKind::New | GroupKind::Merge => {
+                    if !f.selected {
+                        FileStatus::Deselected
+                    } else if f.episode.is_none() {
+                        FileStatus::NoEpisodeNumber
+                    } else {
+                        let tag = group
+                            .existing
+                            .as_ref()
+                            .and_then(|e| e.tags.get(&f.episode.unwrap_or_default()));
+                        match tag {
+                            None => FileStatus::Import,
+                            Some(t) => {
+                                existing_quality = t.quality_label.clone();
+                                if t.manual_override {
+                                    FileStatus::Pinned
+                                } else if t.state == "grabbed" {
+                                    FileStatus::Downloading
+                                } else if t.state != "completed" {
+                                    // A failed / cleared tag holds no
+                                    // file; import as new.
+                                    FileStatus::Import
+                                } else {
+                                    let incoming =
+                                        source::classify_release_sync(&f.file_name, None);
+                                    if source::is_valid_upgrade(&t.classification, &incoming) {
+                                        FileStatus::WouldReplace
+                                    } else {
+                                        FileStatus::AlreadyPresent
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            match status {
+                FileStatus::Import => counts.import += 1,
+                FileStatus::AlreadyPresent => counts.present += 1,
+                FileStatus::Downloading => counts.downloading += 1,
+                FileStatus::WouldReplace => counts.replace += 1,
+                FileStatus::Pinned => counts.pinned += 1,
+                FileStatus::NoEpisodeNumber => counts.no_episode += 1,
+                FileStatus::Deselected => counts.deselected += 1,
+                FileStatus::Unmatched | FileStatus::Skipped => {}
+            }
+            if status.writes() {
+                counts.write_bytes += f.size_bytes;
+            }
+            let dest = if status.writes() {
+                dest_for(ctx.media_root, &folder_name, &f.file_name)
+            } else {
+                String::new()
+            };
+            FileView {
+                idx,
+                rel_path: f.rel_path.clone(),
+                file_name: f.file_name.clone(),
+                episode_label: episode_label(f.season, f.episode),
+                quality_label: f.quality_label.clone(),
+                existing_quality,
+                status,
+                status_class: status.as_str(),
+                status_label: status.label(),
+                dest,
+                selected: f.selected,
+                size: human_bytes(f.size_bytes),
+                size_bytes: f.size_bytes,
+                title_from_folder: f.title_source == super::parse::TitleSource::ParentFolder,
+            }
+        })
+        .collect();
+
+    GroupView {
+        kind,
+        folder_name,
+        folder_collision,
+        files,
+        counts,
+    }
+}
+
+/// Display title for an AL entry in the user's preferred language.
+pub fn entry_title<'a>(entry: &'a crate::services::anilist::AnimeEntry, pref: &str) -> &'a str {
+    pick_title(
+        pref,
+        &entry.title_english,
+        &entry.title_romaji,
+        &entry.title_native,
+    )
+}
+
+/// Roll-up across the whole preview for the summary strip.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionSummary {
+    pub groups: usize,
+    pub new_series: usize,
+    pub merge: usize,
+    pub no_match: usize,
+    pub skipped: usize,
+    pub files: usize,
+    pub writes: usize,
+    pub present: usize,
+    pub replace: usize,
+    pub no_episode: usize,
+    pub unmatched_files: usize,
+    pub write_bytes: u64,
+    /// Series that need the user's eye: low-confidence matches and
+    /// search errors on non-skipped groups.
+    pub needs_attention: usize,
+}
+
+pub fn summarize(session: &ImportSession, views: &[GroupView]) -> SessionSummary {
+    let mut s = SessionSummary {
+        groups: session.groups.len(),
+        files: session.stats.files,
+        unmatched_files: session.unmatched_files.len(),
+        ..Default::default()
+    };
+    for (g, v) in session.groups.iter().zip(views) {
+        match v.kind {
+            GroupKind::New => s.new_series += 1,
+            GroupKind::Merge => s.merge += 1,
+            GroupKind::NoMatch => s.no_match += 1,
+            GroupKind::Skipped => s.skipped += 1,
+        }
+        s.writes += v.counts.writes();
+        s.present += v.counts.present;
+        s.replace += v.counts.replace;
+        s.no_episode += v.counts.no_episode;
+        s.write_bytes += v.counts.write_bytes;
+        if !g.skipped && (g.low_confidence || g.search_error.is_some()) {
+            s.needs_attention += 1;
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::anilist::AnimeEntry;
+    use crate::services::manual_import::{
+        CandidateFile, ExistingSeries, ExistingTag, parse::TitleSource,
+    };
+    use crate::services::source::{ClassificationResult, Resolution, Source};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn entry(id: i64, english: &str, romaji: &str) -> AnimeEntry {
+        AnimeEntry {
+            id,
+            id_mal: None,
+            title_romaji: romaji.into(),
+            title_english: english.into(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".into(),
+            status: "FINISHED".into(),
+            status_display: String::new(),
+            episodes: Some(12),
+            season_year: Some(2020),
+            source: "anilist".into(),
+            average_score: None,
+        }
+    }
+
+    fn file(name: &str, episode: Option<i32>) -> CandidateFile {
+        CandidateFile {
+            path: PathBuf::from(name),
+            rel_path: format!("Show/{name}"),
+            file_name: name.into(),
+            size_bytes: 100,
+            parsed_title: Some("Show".into()),
+            title_source: TitleSource::Filename,
+            season: None,
+            episode,
+            year: None,
+            group: None,
+            quality_label: source::classify_release_sync(name, None).label(),
+            selected: true,
+        }
+    }
+
+    fn group(
+        files: Vec<CandidateFile>,
+        candidates: Vec<AnimeEntry>,
+        pick: Option<usize>,
+    ) -> SeriesGroup {
+        SeriesGroup {
+            key: "show".into(),
+            parsed_title: "Show".into(),
+            season: None,
+            year: None,
+            query: "Show".into(),
+            files,
+            candidates,
+            pick,
+            low_confidence: false,
+            search_error: None,
+            skipped: false,
+            existing: None,
+        }
+    }
+
+    fn stored(source: Source, res: Resolution, state: &str, pinned: bool) -> ExistingTag {
+        let classification = ClassificationResult {
+            source,
+            resolution: res,
+            ..source::classify_release_sync("", None)
+        };
+        ExistingTag {
+            quality_label: classification.label(),
+            state: state.into(),
+            manual_override: pinned,
+            classification,
+        }
+    }
+
+    fn ctx<'a>(owned: &'a HashSet<String>, disk: &'a HashSet<String>) -> ProjectionContext<'a> {
+        ProjectionContext {
+            media_root: "/media",
+            owned_folders: owned,
+            disk_folders: disk,
+            title_pref: "english",
+        }
+    }
+
+    #[test]
+    fn new_series_projects_import_rows_with_dest_and_folder() {
+        let owned = HashSet::new();
+        let disk = HashSet::new();
+        let g = group(
+            vec![
+                file("[G] Show - 01 [1080p].mkv", Some(1)),
+                file("[G] Show - NCOP.mkv", None),
+            ],
+            vec![entry(1, "Show: The Series", "Show")],
+            Some(0),
+        );
+        let v = project_group(&g, &ctx(&owned, &disk));
+        assert_eq!(v.kind, GroupKind::New);
+        assert_eq!(v.folder_name, "Show_ The Series");
+        assert!(!v.folder_collision);
+        assert_eq!(v.files[0].status, FileStatus::Import);
+        assert_eq!(v.files[0].episode_label, "S01E01");
+        assert_eq!(
+            v.files[0].dest,
+            "/media/Show_ The Series/Season 01/[G] Show - 01 [1080p].mkv"
+        );
+        assert_eq!(v.files[1].status, FileStatus::NoEpisodeNumber);
+        assert!(v.files[1].dest.is_empty());
+        assert_eq!(v.counts.import, 1);
+        assert_eq!(v.counts.no_episode, 1);
+        assert_eq!(v.counts.write_bytes, 100);
+    }
+
+    #[test]
+    fn folder_collision_suffixes_unless_owned() {
+        let mut disk = HashSet::new();
+        disk.insert("Show".to_string());
+        let owned = HashSet::new();
+        let (name, collided) = unique_folder_name("Show", &ctx(&owned, &disk));
+        assert_eq!(name, "Show (2)");
+        assert!(collided);
+
+        let mut owned = HashSet::new();
+        owned.insert("Show".to_string());
+        let (name, collided) = unique_folder_name("Show", &ctx(&owned, &disk));
+        assert_eq!(name, "Show");
+        assert!(!collided);
+    }
+
+    #[test]
+    fn merge_projects_present_replace_pinned_downloading() {
+        let owned = HashSet::new();
+        let disk = HashSet::new();
+        let mut tags = HashMap::new();
+        tags.insert(
+            1,
+            stored(Source::BluRay, Resolution::R1080p, "completed", false),
+        );
+        tags.insert(
+            2,
+            stored(Source::Web, Resolution::R720p, "completed", false),
+        );
+        tags.insert(3, stored(Source::Web, Resolution::R720p, "completed", true));
+        tags.insert(4, stored(Source::Web, Resolution::R1080p, "grabbed", false));
+        tags.insert(5, stored(Source::Web, Resolution::R1080p, "failed", false));
+        let mut g = group(
+            vec![
+                file("[G] Show - 01 [WEB 1080p].mkv", Some(1)),
+                file("[G] Show - 02 [BD 1080p].mkv", Some(2)),
+                file("[G] Show - 03 [BD 1080p].mkv", Some(3)),
+                file("[G] Show - 04 [BD 1080p].mkv", Some(4)),
+                file("[G] Show - 05 [BD 1080p].mkv", Some(5)),
+                file("[G] Show - 06 [BD 1080p].mkv", Some(6)),
+            ],
+            vec![entry(1, "Show", "Show")],
+            Some(0),
+        );
+        g.existing = Some(ExistingSeries {
+            id: 7,
+            anilist_id: 1,
+            title: "Show".into(),
+            folder_name: "Show Folder".into(),
+            tags,
+        });
+        let v = project_group(&g, &ctx(&owned, &disk));
+        assert_eq!(v.kind, GroupKind::Merge);
+        assert_eq!(v.folder_name, "Show Folder");
+        let statuses: Vec<FileStatus> = v.files.iter().map(|f| f.status).collect();
+        assert_eq!(
+            statuses,
+            vec![
+                FileStatus::AlreadyPresent,
+                FileStatus::WouldReplace,
+                FileStatus::Pinned,
+                FileStatus::Downloading,
+                FileStatus::Import,
+                FileStatus::Import,
+            ]
+        );
+        assert_eq!(v.files[0].existing_quality, "BD-1080p");
+        assert_eq!(
+            v.files[1].dest,
+            "/media/Show Folder/Season 01/[G] Show - 02 [BD 1080p].mkv"
+        );
+        assert_eq!(v.counts.present, 1);
+        assert_eq!(v.counts.replace, 1);
+        assert_eq!(v.counts.pinned, 1);
+        assert_eq!(v.counts.downloading, 1);
+        assert_eq!(v.counts.import, 2);
+        assert_eq!(v.counts.writes(), 3);
+    }
+
+    #[test]
+    fn deselected_skipped_and_nomatch_rows() {
+        let owned = HashSet::new();
+        let disk = HashSet::new();
+        let mut g = group(
+            vec![
+                file("Show - 01.mkv", Some(1)),
+                file("Show - 02.mkv", Some(2)),
+            ],
+            vec![entry(1, "Show", "Show")],
+            Some(0),
+        );
+        g.files[1].selected = false;
+        let v = project_group(&g, &ctx(&owned, &disk));
+        assert_eq!(v.files[1].status, FileStatus::Deselected);
+        assert_eq!(v.counts.deselected, 1);
+        assert_eq!(v.counts.import, 1);
+
+        g.skipped = true;
+        let v = project_group(&g, &ctx(&owned, &disk));
+        assert_eq!(v.kind, GroupKind::Skipped);
+        assert!(v.files.iter().all(|f| f.status == FileStatus::Skipped));
+        assert_eq!(v.counts.writes(), 0);
+
+        g.skipped = false;
+        g.pick = None;
+        let v = project_group(&g, &ctx(&owned, &disk));
+        assert_eq!(v.kind, GroupKind::NoMatch);
+        assert!(v.files.iter().all(|f| f.status == FileStatus::Unmatched));
+        assert!(v.folder_name.is_empty());
+    }
+}

@@ -1,0 +1,146 @@
+{# One series in the manual-import preview (#122). Rendered inside the
+   groups loop on import.html and returned whole by the group-action
+   handler for an outerHTML swap. Every control is a real form so the
+   page works without JS; the hx-* attributes swap just this card. #}
+<section class="import-group import-group-{{ g.kind }}" id="import-group-{{ g.idx }}">
+    <header class="import-group-head">
+        <div class="import-group-title">
+            <span class="import-kind-badge import-kind-{{ g.kind }}">{{ g.kind_label }}</span>
+            <h3>{{ g.parsed_title }}{% if !g.season_label.is_empty() %} <span class="import-season">{{ g.season_label }}</span>{% endif %}</h3>
+            <span class="import-group-meta">{{ g.file_count }} file{% if g.file_count != 1 %}s{% endif %} &middot; {{ g.size }}{% if !g.year_label.is_empty() %} &middot; {{ g.year_label }}{% endif %}</span>
+        </div>
+        <div class="import-group-actions">
+            {% if g.skipped %}
+            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
+                <input type="hidden" name="action" value="unskip">
+                <button type="submit" class="btn btn-secondary btn-sm">Include</button>
+            </form>
+            {% else %}
+            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
+                <input type="hidden" name="action" value="skip">
+                <button type="submit" class="btn btn-secondary btn-sm">Skip</button>
+            </form>
+            {% endif %}
+        </div>
+    </header>
+
+    {% if !g.action_error.is_empty() %}
+    <div class="alert alert-error import-action-error" role="alert">{{ g.action_error }}</div>
+    {% endif %}
+
+    {% if !g.skipped %}
+    <div class="import-match">
+        {% if let Some(p) = g.pick %}
+        {% if !p.cover_url.is_empty() %}<img class="import-cover" src="{{ p.cover_url }}" alt="" loading="lazy">{% endif %}
+        <div class="import-match-info">
+            <p class="import-match-title">
+                {% if !p.external_href.is_empty() %}<a href="{{ p.external_href }}" target="_blank" rel="noopener">{{ p.title }}</a>{% else %}{{ p.title }}{% endif %}
+            </p>
+            {% if !p.subtitle.is_empty() %}<p class="import-match-sub">{{ p.subtitle }}</p>{% endif %}
+            <div class="import-match-meta">
+                <span class="tag tag-res">{{ p.format }}</span>
+                {% if !p.year.is_empty() %}<span class="tag tag-res">{{ p.year }}</span>{% endif %}
+                <span class="tag tag-res">{{ p.episodes }}</span>
+                {% if g.kind == "merge" %}<span class="tag import-tag-merge">In your library as <a href="/series/{{ g.existing_anilist_id }}">{{ g.existing_title }}</a></span>{% endif %}
+                {% if g.low_confidence %}<span class="tag import-tag-warn" title="The matched title shares little with the parsed one">Check this match</span>{% endif %}
+                {% if !g.duplicate_of.is_empty() %}<span class="tag import-tag-warn" title="Two folders resolved to the same series; both would import into it">Also matched by &ldquo;{{ g.duplicate_of }}&rdquo;</span>{% endif %}
+            </div>
+            <p class="form-hint">Files go to <code>{{ g.folder_name }}</code> under the media root{% if g.folder_collision %}. A folder with the plain name already exists and no series owns it, so the import uses this name{% endif %}.</p>
+        </div>
+        {% else %}
+        <div class="import-match-info">
+            <p class="import-match-title">{% if !g.search_error.is_empty() %}AniList search failed{% else %}No AniList match{% endif %}</p>
+            {% if !g.search_error.is_empty() %}
+            <p class="form-hint">{{ g.search_error }}</p>
+            {% else %}
+            <p class="form-hint">Nothing came back for &ldquo;{{ g.query }}&rdquo;. Try another title below, or skip this series.</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="import-pickers">
+        {% if !g.alternatives.is_empty() %}
+        <div class="import-alternatives">
+            <span class="import-pickers-label">{% if g.pick.is_some() %}Not right? Pick another:{% else %}Other results:{% endif %}</span>
+            {% for a in g.alternatives %}
+            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                <input type="hidden" name="action" value="pick">
+                <input type="hidden" name="candidate" value="{{ a.index }}">
+                <button type="submit" class="btn btn-secondary btn-sm" title="{{ a.subtitle }}">{{ a.title }}{% if !a.year.is_empty() %} ({{ a.year }}){% endif %} &middot; {{ a.format }}</button>
+            </form>
+            {% endfor %}
+            {% if g.pick.is_some() %}
+            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                <input type="hidden" name="action" value="unpick">
+                <button type="submit" class="btn btn-ghost btn-sm">None of these</button>
+            </form>
+            {% endif %}
+        </div>
+        {% endif %}
+        <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-research-form">
+            <input type="hidden" name="action" value="research">
+            <label for="import-query-{{ g.idx }}" class="visually-hidden">Search AniList for a different title</label>
+            <input type="text" id="import-query-{{ g.idx }}" name="query" value="{{ g.query }}" autocomplete="off" spellcheck="false">
+            <button type="submit" class="btn btn-secondary btn-sm">Search again</button>
+        </form>
+    </div>
+
+    {% if g.kind == "new" || g.kind == "merge" %}
+    <p class="import-group-counts">
+        <strong>{{ g.counts.import }}</strong> to import{% if g.counts.replace > 0 %}, <strong>{{ g.counts.replace }}</strong> to replace{% endif %}{% if g.counts.present > 0 %}, {{ g.counts.present }} already have{% endif %}{% if g.counts.downloading > 0 %}, {{ g.counts.downloading }} downloading{% endif %}{% if g.counts.pinned > 0 %}, {{ g.counts.pinned }} pinned{% endif %}{% if g.counts.no_episode > 0 %}, {{ g.counts.no_episode }} without an episode number{% endif %}{% if g.counts.deselected > 0 %}, {{ g.counts.deselected }} excluded{% endif %}.
+    </p>
+    {% endif %}
+
+    <div class="rss-table-wrap">
+        <table class="rss-table import-files">
+            <thead>
+                <tr>
+                    <th class="import-col-check">
+                        <span class="import-select-all">
+                            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                                <input type="hidden" name="action" value="select_all">
+                                <button type="submit" class="btn btn-ghost btn-sm" title="Include every file">All</button>
+                            </form>
+                            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                                <input type="hidden" name="action" value="select_none">
+                                <button type="submit" class="btn btn-ghost btn-sm" title="Exclude every file">None</button>
+                            </form>
+                        </span>
+                    </th>
+                    <th>File</th>
+                    <th>Episode</th>
+                    <th>Quality</th>
+                    <th>Result</th>
+                    <th>Destination</th>
+                    <th>Size</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for f in g.files %}
+                <tr class="import-file import-file-{{ f.status_class }}">
+                    <td class="import-col-check">
+                        <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                            <input type="hidden" name="action" value="toggle_file">
+                            <input type="hidden" name="file" value="{{ f.idx }}">
+                            <input type="checkbox" name="on" value="1"{% if f.selected %} checked{% endif %} onchange="this.form.requestSubmit()" aria-label="Include {{ f.file_name }}">
+                            {# No-JS fallback: the checkbox alone can't submit. #}
+                            <button type="submit" class="btn btn-ghost btn-sm import-nojs-apply">Apply</button>
+                        </form>
+                    </td>
+                    <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span>{% if f.title_from_folder %} <span class="tag import-tag-dim" title="Series name read from the folder, not the filename">folder</span>{% endif %}</td>
+                    <td class="import-nowrap">{{ f.episode_label }}</td>
+                    <td class="import-nowrap">{{ f.quality_label }}</td>
+                    <td class="import-nowrap">
+                        <span class="import-status import-status-{{ f.status_class }}">{{ f.status_label }}</span>
+                        {% if !f.existing_quality.is_empty() %}<span class="import-have">have {{ f.existing_quality }}</span>{% endif %}
+                    </td>
+                    <td>{% if !f.dest.is_empty() %}<span class="import-path" title="{{ f.dest }}">{{ f.dest }}</span>{% endif %}</td>
+                    <td class="import-nowrap">{{ f.size }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>

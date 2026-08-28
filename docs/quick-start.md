@@ -479,6 +479,7 @@ If you want Ryokan to add new shows automatically when you mark them watching on
 ## What next?
 
 - **[Configuration](configuration.md)** explains every Settings tab so you can tune scoring, choose between hardlink and copy, set up a quality profile, and so on.
+- **[Importing an existing library](manual-import.md)** is the answer to "I already have 2 TB of anime". Point Ryokan at the folder and it previews how each series would come in, no re-downloading.
 - **[Stack builder](stack-builder.md)** generates the rest of the homelab stack (Seerr for requests, Caddy / Traefik for HTTPS, Gluetun for VPN-routed grabs) in the same shape if you want to grow beyond the basics.
 - **[Troubleshooting](troubleshooting.md)** has the most common stumbles and their fixes.
 

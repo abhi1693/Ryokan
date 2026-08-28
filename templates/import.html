@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+
+{% block title %} - Import Library{% endblock %}
+
+{% block content %}
+<div class="page-header import-header">
+    <h2>Import Existing Library</h2>
+    <a href="/" class="btn btn-secondary">Back to Library</a>
+</div>
+
+{% if step == "start" %}
+<p class="page-desc">Point Ryokan at a folder of anime you already have. It reads the filenames, matches each series on AniList, and shows what it would import before anything changes on disk.</p>
+
+{% if media_root.is_empty() %}
+<div class="alert alert-warn" role="status">
+    <strong>No media root set.</strong>
+    Imported files are placed under your media root. Set one under <a href="/settings">Settings &rarr; General</a> first.
+</div>
+{% endif %}
+{% if !error.is_empty() %}
+<div class="alert alert-error" role="alert">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/library/import" class="import-start-form settings-form">
+    <div class="form-group">
+        <label for="import-path">Folder to scan</label>
+        <input type="text" id="import-path" name="path" value="{{ form.path }}" placeholder="/mnt/anime" autocomplete="off" spellcheck="false" required>
+        <p class="form-hint">Scanned recursively, up to eight levels deep. {% if !media_root.is_empty() %}Your media root (<code>{{ media_root }}</code>) and recycle bin are skipped automatically.{% endif %}</p>
+    </div>
+    <div class="form-group">
+        <label for="import-mode">How files reach the media root</label>
+        <select id="import-mode" name="mode">
+            <option value="hardlink"{% if form.mode == "hardlink" %} selected{% endif %}>Hardlink (recommended)</option>
+            <option value="copy"{% if form.mode == "copy" %} selected{% endif %}>Copy</option>
+            <option value="move"{% if form.mode == "move" %} selected{% endif %}>Move</option>
+        </select>
+        <p class="form-hint">Hardlink keeps the original in place and uses no extra space when both folders are on the same filesystem. Copy doubles the disk use. Move frees the source folder.</p>
+    </div>
+    <label class="checkbox-row import-checkbox">
+        <input type="checkbox" name="follow_symlinks" value="1"{% if form.follow_symlinks %} checked{% endif %}>
+        <span>
+            <strong>Follow symlinks</strong>
+            <span class="form-hint">Off by default. Libraries that symlink into a downloads folder would otherwise import the same file twice.</span>
+        </span>
+    </label>
+    <label class="checkbox-row import-checkbox">
+        <input type="checkbox" name="include_hidden" value="1"{% if form.include_hidden %} checked{% endif %}>
+        <span>
+            <strong>Include hidden files and folders</strong>
+            <span class="form-hint">Dot-prefixed entries. NAS sidecar folders such as <code>@eaDir</code> are always skipped.</span>
+        </span>
+    </label>
+    <div class="import-start-actions">
+        <button type="submit" class="btn btn-primary"{% if media_root.is_empty() %} disabled{% endif %}>Scan folder</button>
+    </div>
+</form>
+
+{% else if step == "scanning" %}
+<div class="import-scanning" id="import-scanning" data-session="{{ session_id }}">
+    <div class="import-spinner" aria-hidden="true"></div>
+    <div class="import-scanning-text">
+        <strong>Scanning <code>{{ root }}</code></strong>
+        <p class="form-hint">Reading filenames and matching each series on AniList. Large libraries take a few minutes because AniList allows about thirty lookups a minute. This page updates itself when the preview is ready.</p>
+    </div>
+    <div class="import-scanning-actions">
+        <a href="/library/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/library/import/{{ session_id }}/discard">
+            <button type="submit" class="btn btn-secondary btn-sm">Cancel</button>
+        </form>
+    </div>
+</div>
+
+{% else if step == "failed" %}
+<div class="alert alert-error" role="alert">
+    <strong>The scan of <code>{{ root }}</code> failed.</strong> {{ failed_message }}
+</div>
+<a href="/library/import" class="btn btn-primary">Start over</a>
+
+{% else %}
+<div class="import-summary">
+    <div class="import-summary-main">
+        <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
+        <span class="import-summary-line">
+            <strong>{{ summary.groups }}</strong> series across <strong>{{ stats.files }}</strong> file{% if stats.files != 1 %}s{% endif %} ({{ total_size }}) in {{ stats.dirs }} folder{% if stats.dirs != 1 %}s{% endif %}.
+            Mode: <strong>{{ mode_label }}</strong>.
+        </span>
+        <span class="import-summary-counts">
+            <span class="import-count import-count-new"><strong>{{ summary.new_series }}</strong> new</span>
+            <span class="import-count import-count-merge"><strong>{{ summary.merge }}</strong> already in library</span>
+            <span class="import-count import-count-nomatch"><strong>{{ summary.no_match }}</strong> unmatched</span>
+            {% if summary.skipped > 0 %}<span class="import-count import-count-skipped"><strong>{{ summary.skipped }}</strong> skipped</span>{% endif %}
+            {% if summary.needs_attention > 0 %}<span class="import-count import-count-attention"><strong>{{ summary.needs_attention }}</strong> to check</span>{% endif %}
+        </span>
+        <span class="import-summary-line">
+            Would write <strong>{{ summary.writes }}</strong> file{% if summary.writes != 1 %}s{% endif %} ({{ write_size }}){% if summary.replace > 0 %}, including {{ summary.replace }} upgrade{% if summary.replace != 1 %}s{% endif %} of episodes you already have{% endif %}.
+            {% if summary.present > 0 %}{{ summary.present }} already present at equal or better quality.{% endif %}
+            {% if summary.no_episode > 0 %}{{ summary.no_episode }} with no episode number.{% endif %}
+        </span>
+        {% if stats.skipped_symlinks > 0 || stats.skipped_hidden > 0 || stats.skipped_excluded > 0 || stats.errors > 0 || stats.truncated %}
+        <span class="import-summary-line form-hint">
+            Skipped:
+            {% if stats.skipped_symlinks > 0 %}{{ stats.skipped_symlinks }} symlink{% if stats.skipped_symlinks != 1 %}s{% endif %} (follow symlinks is off).{% endif %}
+            {% if stats.skipped_hidden > 0 %}{{ stats.skipped_hidden }} hidden.{% endif %}
+            {% if stats.skipped_excluded > 0 %}{{ stats.skipped_excluded }} inside Ryokan's own folders.{% endif %}
+            {% if stats.errors > 0 %}{{ stats.errors }} unreadable (permissions).{% endif %}
+            {% if stats.truncated %}The scan stopped at the file limit; import in smaller batches.{% endif %}
+        </span>
+        {% endif %}
+    </div>
+    <form method="post" action="/library/import/{{ session_id }}/discard" class="import-summary-actions">
+        <button type="submit" class="btn btn-secondary">Discard preview</button>
+    </form>
+</div>
+
+{% if cross_fs_warning %}
+<div class="alert alert-warn" role="status">
+    <strong>The source folder and your media root are on different filesystems.</strong>
+    Hardlinks cannot cross filesystems, so the import will <strong>copy</strong> instead, using about {{ write_size }} of extra space. Discard and choose Move if you want the source space freed.
+</div>
+{% endif %}
+
+<div class="alert alert-warn import-readonly-note" role="status">
+    <strong>Preview only for now.</strong> Nothing has been written. Correct any wrong matches below, untick files to leave out, and skip whole series. The import step lands in the next part of this feature.
+</div>
+
+<div id="import-groups">
+{% for g in groups %}
+{% include "partials/library/import_group.html" %}
+{% endfor %}
+</div>
+
+{% if !unmatched.is_empty() %}
+<section class="import-group import-group-nomatch">
+    <header class="import-group-head">
+        <div class="import-group-title">
+            <span class="import-kind-badge import-kind-nomatch">No series name</span>
+            <h3>Files with no series hint</h3>
+            <span class="import-group-meta">{{ unmatched.len() }} file{% if unmatched.len() != 1 %}s{% endif %}</span>
+        </div>
+    </header>
+    <p class="form-hint">Neither the filename nor any folder above it names a series. Rename the file or move it into a folder named after the show, then scan again.</p>
+    <div class="rss-table-wrap">
+        <table class="rss-table import-files">
+            <thead><tr><th>File</th><th>Episode</th><th>Quality</th><th>Size</th></tr></thead>
+            <tbody>
+            {% for f in unmatched %}
+            <tr class="import-file import-file-unmatched">
+                <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span></td>
+                <td class="import-nowrap">{{ f.episode_label }}</td>
+                <td class="import-nowrap">{{ f.quality_label }}</td>
+                <td class="import-nowrap">{{ f.size }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block page_js %}<script src="/static/js/import.js" defer></script>{% endblock %}

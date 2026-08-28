@@ -111,6 +111,7 @@ pub fn build_test_app_state(
         tasks: crate::services::task_registry::TaskRegistry::new(),
         dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         notification_providers: crate::services::notifications::empty_cache(),
+        import_sessions: crate::services::manual_import::session::new_store(),
     }
 }
 

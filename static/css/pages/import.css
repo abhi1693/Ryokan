@@ -1,0 +1,474 @@
+/* Manual import wizard (/library/import, issue #122). Tables reuse the
+   shared .rss-table styling; this file covers the start form, the
+   scanning state, the summary strip, and the per-series cards. */
+
+.import-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+/* ── Start form ─────────────────────────────────────────────────── */
+
+.import-start-form {
+    max-width: 640px;
+}
+
+.import-start-form input[type="text"] {
+    font-family: var(--font-mono);
+}
+
+.import-checkbox {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
+    margin: 0 0 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.import-checkbox input {
+    margin-top: 3px;
+}
+
+.import-checkbox strong {
+    display: block;
+    color: var(--text-bright);
+    font-size: 14px;
+}
+
+.import-checkbox .form-hint {
+    display: block;
+    margin-top: 2px;
+}
+
+.import-start-actions {
+    margin-top: 18px;
+}
+
+/* ── Scanning ───────────────────────────────────────────────────── */
+
+.import-scanning {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 18px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.import-scanning-text {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.import-scanning-text code {
+    font-size: 13px;
+}
+
+.import-scanning-actions {
+    display: flex;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+.import-spinner {
+    width: 22px;
+    height: 22px;
+    flex-shrink: 0;
+    border: 3px solid var(--border-accent);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: import-spin 0.9s linear infinite;
+}
+
+@keyframes import-spin {
+    to { transform: rotate(360deg); }
+}
+
+/* ── Summary strip ──────────────────────────────────────────────── */
+
+.import-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 12px 18px;
+    margin: 0 0 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.import-summary-main {
+    flex: 1 1 360px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 14px;
+}
+
+.import-summary-root {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.import-summary-root code {
+    font-size: 12px;
+}
+
+.import-summary-counts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    font-size: 13px;
+}
+
+.import-count strong {
+    font-variant-numeric: tabular-nums;
+}
+
+.import-count-new strong { color: var(--green); }
+.import-count-merge strong { color: var(--blue); }
+.import-count-nomatch strong { color: var(--text-dim); }
+.import-count-skipped strong { color: var(--text-dim); }
+.import-count-attention strong { color: var(--yellow); }
+
+.import-summary-actions {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.import-readonly-note {
+    margin-bottom: 18px;
+}
+
+/* ── Series cards ───────────────────────────────────────────────── */
+
+.import-group {
+    margin: 0 0 18px;
+    padding: 14px 16px 12px;
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--border-accent);
+    border-radius: var(--radius);
+    background: var(--bg-card);
+}
+
+.import-group-new { border-left-color: var(--green); }
+.import-group-merge { border-left-color: var(--blue); }
+.import-group-nomatch { border-left-color: var(--text-dim); }
+.import-group-skipped {
+    border-left-color: var(--border-accent);
+    opacity: 0.7;
+}
+
+.import-group-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.import-group-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    min-width: 0;
+}
+
+.import-group-title h3 {
+    margin: 0;
+    font-size: 16px;
+    overflow-wrap: anywhere;
+}
+
+.import-season {
+    font-weight: 500;
+    color: var(--text-dim);
+    font-size: 14px;
+}
+
+.import-group-meta {
+    color: var(--text-dim);
+    font-size: 13px;
+    white-space: nowrap;
+}
+
+.import-kind-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 3px;
+    border: 1px solid var(--border-accent);
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.import-kind-new {
+    color: var(--green);
+    border-color: rgba(125, 211, 147, 0.4);
+    background: var(--green-bg);
+}
+
+.import-kind-merge {
+    color: var(--blue);
+    border-color: rgba(125, 174, 211, 0.4);
+    background: var(--blue-bg);
+}
+
+.import-group-actions {
+    flex-shrink: 0;
+}
+
+.import-action-error {
+    margin: 10px 0 0;
+}
+
+/* Match block: cover + title + tags. */
+.import-match {
+    display: flex;
+    gap: 14px;
+    margin-top: 12px;
+}
+
+.import-cover {
+    width: 56px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 4px;
+    flex-shrink: 0;
+    background: var(--bg-elevated);
+}
+
+.import-match-info {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.import-match-title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-bright);
+}
+
+.import-match-title a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.import-match-title a:hover {
+    color: var(--accent);
+}
+
+.import-match-sub {
+    margin: 2px 0 0;
+    color: var(--text-dim);
+    font-size: 13px;
+}
+
+.import-match-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.import-match-info .form-hint {
+    margin-top: 8px;
+}
+
+.import-tag-merge {
+    color: var(--blue);
+    background: var(--blue-bg);
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--font-body);
+    font-size: 11px;
+}
+
+.import-tag-merge a {
+    color: inherit;
+    text-decoration: underline;
+}
+
+.import-tag-warn {
+    color: var(--yellow);
+    background: rgba(224, 201, 125, 0.12);
+    text-transform: none;
+    letter-spacing: 0;
+    font-family: var(--font-body);
+    font-size: 11px;
+}
+
+.import-tag-dim {
+    color: var(--text-dim);
+    background: var(--bg-elevated);
+    font-weight: 500;
+    letter-spacing: 0;
+    text-transform: none;
+}
+
+/* Override pickers: alternatives row + re-search box. */
+.import-pickers {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 12px 0;
+}
+
+.import-alternatives {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.import-pickers-label {
+    color: var(--text-dim);
+    font-size: 13px;
+    margin-right: 4px;
+}
+
+.import-inline-form {
+    display: inline-flex;
+    align-items: center;
+    margin: 0;
+}
+
+.import-research-form {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    max-width: 520px;
+}
+
+.import-research-form input[type="text"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* In-flight feedback: htmx adds .htmx-request to the requesting form. */
+.import-group form.htmx-request button,
+.import-group form.htmx-request input {
+    opacity: 0.55;
+    pointer-events: none;
+}
+
+.import-group-counts {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: var(--text-dim);
+}
+
+.import-group-counts strong {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ── File table ─────────────────────────────────────────────────── */
+
+.import-files {
+    width: 100%;
+    min-width: 900px;
+}
+
+.import-col-check {
+    width: 1%;
+    white-space: nowrap;
+}
+
+.import-select-all {
+    display: inline-flex;
+    gap: 2px;
+}
+
+.import-nojs-apply {
+    display: none;
+}
+
+@media (scripting: none) {
+    .import-nojs-apply {
+        display: inline-flex;
+    }
+}
+
+.import-path {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--font-mono);
+    font-size: 12px;
+}
+
+/* File and destination absorb the width; the rest hug their content. */
+.import-files td:nth-child(2),
+.import-files th:nth-child(2),
+.import-files td:nth-child(6),
+.import-files th:nth-child(6) {
+    max-width: 0;
+    width: 50%;
+}
+
+.import-nowrap {
+    white-space: nowrap;
+}
+
+.import-status {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--bg-elevated);
+    color: var(--text-dim);
+}
+
+.import-status-import { color: var(--green); background: var(--green-bg); }
+.import-status-replace { color: var(--accent); background: var(--purple-bg); }
+.import-status-present { color: var(--blue); background: var(--blue-bg); }
+.import-status-downloading { color: var(--blue); background: var(--blue-bg); }
+.import-status-pinned { color: var(--orange); }
+.import-status-no-episode { color: var(--yellow); }
+
+.import-have {
+    margin-left: 6px;
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.import-file-deselected td,
+.import-file-skipped td,
+.import-file-unmatched td {
+    color: var(--text-dim);
+}
+
+.import-file-deselected .import-path {
+    text-decoration: line-through;
+}
+
+@media (max-width: 640px) {
+    .import-match {
+        flex-direction: column;
+    }
+    .import-scanning {
+        flex-wrap: wrap;
+    }
+    .import-summary-actions {
+        margin-left: 0;
+    }
+}

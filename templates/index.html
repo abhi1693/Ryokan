@@ -36,6 +36,10 @@
                    oninput="liveLibrarySearch(this)"
                    onkeydown="if(event.key==='Enter'){event.preventDefault();}">
         </form>
+        {# Manual import (#122) sits beside the primary add: both are
+           "get a series into the library" entry points; import is the
+           quieter one because it is a one-time onboarding job. #}
+        <a href="/library/import" class="btn btn-secondary library-import-btn" title="Import an existing library from a folder">Import</a>
         <button class="btn btn-primary library-add-btn" onclick="openAddModal()">+ Add Series</button>
     </div>
     {# ── Row 2: scope + presentation. Custom-list chips make the
