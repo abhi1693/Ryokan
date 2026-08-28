@@ -162,7 +162,26 @@
 /* Recycle Bin link shares the icon-button footprint; as an <a> it needs
    the anchor defaults cleared. */
 .library-recycle-link {
+    position: relative;
     text-decoration: none;
+}
+
+.library-recycle-count {
+    position: absolute;
+    top: -7px;
+    right: -7px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--bg);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 16px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    box-sizing: border-box;
 }
 
 .library-sort-dir[data-desc="false"] .library-sort-dir-icon {

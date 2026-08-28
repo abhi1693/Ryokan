@@ -341,6 +341,16 @@ pub async fn index(
         .as_ref()
         .map(|c| !c.recycle_bin_path.trim().is_empty())
         .unwrap_or(false);
+    let recycle_count = if recycle_enabled {
+        crate::services::recycle::cached_entry_count(
+            cfg.as_ref()
+                .map(|c| c.recycle_bin_path.as_str())
+                .unwrap_or(""),
+        )
+        .await
+    } else {
+        0
+    };
     let template = IndexTemplate {
         page: "library".to_string(),
         cards,
@@ -348,6 +358,7 @@ pub async fn index(
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
         recycle_enabled,
+        recycle_count,
         score_format,
         list_counts,
         custom_list_filter,

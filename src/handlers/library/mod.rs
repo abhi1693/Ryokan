@@ -90,9 +90,13 @@ struct IndexTemplate {
     /// total; hidden at zero.
     airing_count: usize,
     /// Recycle bin configured (#123): switches the bulk-delete modal's
-    /// "cannot be undone" copy to "moves to the recycle bin" and shows
-    /// the Recycle Bin link in the toolbar.
+    /// "cannot be undone" copy to "moves to the recycle bin".
     recycle_enabled: bool,
+    /// Entries currently in the bin (cached a minute). The toolbar's
+    /// bin control renders only when this is non-zero, with the count as
+    /// a badge, so the control exists exactly when there is something to
+    /// get back.
+    recycle_count: u64,
 }
 
 #[derive(Template)]

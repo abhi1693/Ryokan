@@ -31,7 +31,9 @@ mod tests;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, Utc};
 use sqlx::SqlitePool;
@@ -50,6 +52,37 @@ pub static RECYCLE_UNWRITABLE: AtomicBool = AtomicBool::new(false);
 
 pub fn is_unwritable() -> bool {
     RECYCLE_UNWRITABLE.load(Ordering::Relaxed)
+}
+
+/// `(when, bin path, entry count)` behind [`cached_entry_count`]. The
+/// Library page shows the bin control only when the bin is non-empty, and
+/// walking the bin on every Library render would be a directory scan per
+/// page load; one scan a minute is plenty, and every mutating call here
+/// drops the cache so the badge never lags a delete or restore.
+static ENTRY_COUNT_CACHE: Mutex<Option<(Instant, String, u64)>> = Mutex::new(None);
+const ENTRY_COUNT_TTL: Duration = Duration::from_secs(60);
+
+pub async fn cached_entry_count(bin_path: &str) -> u64 {
+    let bin = bin_path.trim().to_string();
+    if bin.is_empty() {
+        return 0;
+    }
+    if let Some((at, cached_bin, n)) = ENTRY_COUNT_CACHE.lock().unwrap().as_ref()
+        && cached_bin == &bin
+        && at.elapsed() < ENTRY_COUNT_TTL
+    {
+        return *n;
+    }
+    let n = list_entries(&bin)
+        .await
+        .map(|v| v.len() as u64)
+        .unwrap_or(0);
+    *ENTRY_COUNT_CACHE.lock().unwrap() = Some((Instant::now(), bin, n));
+    n
+}
+
+fn invalidate_entry_count() {
+    *ENTRY_COUNT_CACHE.lock().unwrap() = None;
 }
 
 /// Live health probe for the banners (recycle page, System page). Returns
@@ -139,6 +172,7 @@ pub async fn recycle(
     match inner {
         Ok(Inner::Recycled { entry_id, manifest }) => {
             RECYCLE_UNWRITABLE.store(false, Ordering::Relaxed);
+            invalidate_entry_count();
             logger::info(
                 db,
                 LogCategory::Library,
@@ -466,6 +500,7 @@ pub async fn restore(bin_path: &str, entry_id: &str) -> Result<RestoreOutcome, S
     let Some(entry) = find_entry(bin_path, entry_id).await? else {
         return Err("recycle entry not found".to_string());
     };
+    invalidate_entry_count();
     tokio::task::spawn_blocking(move || restore_blocking(&entry))
         .await
         .map_err(|e| format!("restore task panicked: {e}"))?
@@ -545,6 +580,7 @@ pub async fn delete_entry(bin_path: &str, entry_id: &str) -> Result<u64, String>
     let Some(entry) = find_entry(bin_path, entry_id).await? else {
         return Err("recycle entry not found".to_string());
     };
+    invalidate_entry_count();
     tokio::task::spawn_blocking(move || {
         let bytes = entry.manifest.size_bytes;
         fs::remove_dir_all(&entry.dir)
@@ -567,6 +603,7 @@ pub async fn purge_old(bin_path: &str, age_days: i64) -> Result<PurgeReport, Str
         return Ok(PurgeReport::default());
     }
     let today = Utc::now().date_naive();
+    invalidate_entry_count();
     tokio::task::spawn_blocking(move || purge_blocking(Path::new(&bin), today, Some(age_days)))
         .await
         .map_err(|e| format!("purge task panicked: {e}"))?
@@ -579,6 +616,7 @@ pub async fn empty(bin_path: &str) -> Result<PurgeReport, String> {
         return Ok(PurgeReport::default());
     }
     let today = Utc::now().date_naive();
+    invalidate_entry_count();
     tokio::task::spawn_blocking(move || purge_blocking(Path::new(&bin), today, None))
         .await
         .map_err(|e| format!("empty task panicked: {e}"))?
