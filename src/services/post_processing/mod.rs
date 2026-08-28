@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -73,6 +73,121 @@ pub(crate) fn grab_claims_episode(
         || file_in_routes
         || grab_episode_numbers.is_empty()
         || grab_episode_numbers.contains(&raw_ep_num)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedEpisode {
+    raw_episode: i32,
+    episode: i32,
+}
+
+fn resolve_episode(
+    parsed_season: Option<i32>,
+    raw_episode: i32,
+    route_offset: Option<i32>,
+    cumulative_prior_episodes: i32,
+) -> Result<ResolvedEpisode, String> {
+    let episode_offset = route_offset.unwrap_or_else(|| {
+        if parsed_season.is_some() {
+            0
+        } else {
+            fallback_ep_offset(raw_episode, cumulative_prior_episodes)
+        }
+    });
+    let episode = raw_episode - episode_offset;
+    if episode <= 0 {
+        return Err(format!(
+            "episode {} minus offset {} is non-positive",
+            raw_episode, episode_offset
+        ));
+    }
+    Ok(ResolvedEpisode {
+        raw_episode,
+        episode,
+    })
+}
+
+/// Validate every wanted video in a batch before the import loop performs
+/// upgrades or file operations. Inputs carry the exact route and series
+/// cumulative offset used by execution, and the resolved plan returned here is
+/// consumed by the loop. Validation and execution therefore cannot drift onto
+/// different destination slots.
+///
+/// Unparseable and non-positive files are excluded from the plan rather than
+/// failing it: batches routinely ship NCOP/NCED/PV/CM/menu extras that parse
+/// to `None` by design, and an excluded file moves nothing, so skipping is
+/// non-destructive. (The import loop re-derives the same verdict for files
+/// absent from the plan and logs a per-file warning with series context.)
+/// Two files resolving to the same destination slot still fail the whole
+/// batch before any mutation — that ambiguity has no safe per-file answer,
+/// and importing either file could destroy the other.
+pub(crate) fn validate_batch_episode_map(
+    files: &[(usize, i64, Option<i32>, i32, String)],
+) -> Result<HashMap<usize, ResolvedEpisode>, String> {
+    let mut destinations: HashMap<(i64, i32), &str> = HashMap::new();
+    let mut plan = HashMap::new();
+
+    for (file_idx, series_id, route_offset, cumulative_prior_episodes, name) in files {
+        let filename = Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(name);
+        let Some((parsed_season, raw_episode)) =
+            media::parse_episode_number(&filename.to_lowercase())
+        else {
+            continue;
+        };
+        let Ok(resolved) = resolve_episode(
+            parsed_season,
+            raw_episode,
+            *route_offset,
+            *cumulative_prior_episodes,
+        ) else {
+            continue;
+        };
+
+        if let Some(previous) = destinations.insert((*series_id, resolved.episode), filename) {
+            return Err(format!(
+                "batch preflight mapped both '{}' and '{}' to series {} episode {}; no files were changed",
+                previous, filename, series_id, resolved.episode
+            ));
+        }
+        plan.insert(*file_idx, resolved);
+    }
+
+    Ok(plan)
+}
+
+pub(crate) fn requires_episode_map_preflight(is_batch: bool, video_file_count: usize) -> bool {
+    is_batch || video_file_count > 1
+}
+
+/// Return the wanted video indices only when every one is complete. Unwanted
+/// files are never imported, and a partially complete wanted batch waits rather
+/// than committing a partial library state.
+pub(crate) fn ready_wanted_video_indices(
+    files: &[crate::services::download_client::DownloadFile],
+) -> Result<Vec<usize>, String> {
+    let wanted: Vec<(usize, &crate::services::download_client::DownloadFile)> = files
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| file.wanted && is_video_file(&file.name))
+        .collect();
+    if wanted.is_empty() {
+        return Err("no wanted video files are visible yet".to_string());
+    }
+    let incomplete = wanted
+        .iter()
+        .filter(|(_, file)| file.progress < 1.0)
+        .count();
+    if incomplete > 0 {
+        return Err(format!(
+            "{} of {} wanted video files are incomplete",
+            incomplete,
+            wanted.len()
+        ));
+    }
+    Ok(wanted.into_iter().map(|(idx, _)| idx).collect())
 }
 
 /// Validate an untrusted relative path fragment from a download client's
@@ -659,33 +774,101 @@ async fn import_torrent(
         }
     }
 
-    let video_files: Vec<(usize, &crate::services::download_client::DownloadFile)> = files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.progress >= 1.0 && is_video_file(&f.name))
-        .collect();
-
-    if video_files.is_empty() {
-        // #27 — log this at debug rather than silently looping. qBit
-        // reported the torrent state as complete but nothing here looks
-        // like a finished video file. Most of the time this is a race
-        // where the post-proc tick beat qBit's per-file progress update;
-        // the next tick will find the files. Rare pathological case is
-        // a samples/.nfo-only torrent that stays NotReady forever —
-        // those would need the stuck-pending timeout fix (future work,
-        // tracked separately from this commit).
-        logger::debug(
-            &state.db,
-            LogCategory::PostProcess,
-            &format!(
-                "No complete video files yet for '{}' — retrying next tick",
-                grab.torrent_name
-            ),
-            "",
-        )
-        .await;
-        return Ok(ImportOutcome::NotReady);
+    // Reject attacker-controlled path fragments before readiness and batch
+    // planning. Unsafe entries are not part of the importable video set: they
+    // must neither block a legitimate sibling nor make an otherwise single
+    // video look like a batch. Keep the original vector untouched so route
+    // indices still match the download client's canonical file indices.
+    let mut files_for_readiness = files.clone();
+    let mut unsafe_video_indices = HashSet::new();
+    for (file_idx, file) in files.iter().enumerate() {
+        if !file.wanted || !is_video_file(&file.name) {
+            continue;
+        }
+        if let Err(reason) = validate_relative_path_fragment(&file.name) {
+            logger::warn(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Rejected suspicious file-list entry '{}' from grab #{}: {}",
+                    file.name, grab.id, reason
+                ),
+                &format!("hash={}", grab.hash),
+            )
+            .await;
+            files_for_readiness[file_idx].wanted = false;
+            unsafe_video_indices.insert(file_idx);
+        }
     }
+
+    let wanted_video_indices = match ready_wanted_video_indices(&files_for_readiness) {
+        Ok(indices) => indices,
+        Err(reason) => {
+            // #27 — log this at debug rather than silently looping. qBit
+            // reported the torrent complete but its wanted file list may
+            // still be finalizing. Waiting for the whole wanted video set is
+            // what prevents a batch from being marked imported after only a
+            // completed subset landed.
+            logger::debug(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Wanted video files are not ready for '{}' — retrying next tick",
+                    grab.torrent_name
+                ),
+                &reason,
+            )
+            .await;
+            return Ok(ImportOutcome::NotReady);
+        }
+    };
+    let video_files: Vec<(usize, &crate::services::download_client::DownloadFile)> =
+        wanted_video_indices
+            .iter()
+            .map(|file_idx| (*file_idx, &files[*file_idx]))
+            .collect();
+
+    // Resolve and validate the complete batch mapping before loading series
+    // context, deleting an upgrade target, or moving/copying any source.
+    // Duplicate destination slots fail the whole import without mutation;
+    // unparseable extras (NCOP/PV/CM/menu files) are merely absent from the
+    // plan and get skipped with a per-file warning in the loop below.
+    // Trust the files we actually received over the stored classifier. Older
+    // grabs can predate (or have missed) batch classification; allowing a
+    // multi-video import through the single-file path would reintroduce the
+    // duplicate-destination overwrite that this preflight prevents.
+    let batch_episode_plan = if requires_episode_map_preflight(grab.is_batch, video_files.len()) {
+        let mut cumulative_by_series = HashMap::new();
+        let mut batch_files = Vec::with_capacity(video_files.len());
+        for (file_idx, file) in &video_files {
+            let route = routes_by_file.get(file_idx).copied();
+            let target_series_id = route
+                .map(|(series_id, _)| series_id)
+                .unwrap_or(grab.series_id);
+            let cumulative_prior_episodes =
+                if let Some(value) = cumulative_by_series.get(&target_series_id) {
+                    *value
+                } else {
+                    let value = series::get_by_id(&state.db, target_series_id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("series {} not found", target_series_id))?
+                        .cumulative_prior_episodes;
+                    cumulative_by_series.insert(target_series_id, value);
+                    value
+                };
+            batch_files.push((
+                *file_idx,
+                target_series_id,
+                route.map(|(_, offset)| offset),
+                cumulative_prior_episodes,
+                file.name.clone(),
+            ));
+        }
+        validate_batch_episode_map(&batch_files)?
+    } else {
+        HashMap::new()
+    };
 
     // Lazily-loaded per-series context cache. The single-series case
     // fills exactly one entry; a multi-series routed batch fills one
@@ -745,6 +928,7 @@ async fn import_torrent(
         std::collections::HashSet::new();
 
     for (file_idx, file) in &video_files {
+        debug_assert!(!unsafe_video_indices.contains(file_idx));
         // Route this file: prefer the routes table (Phase 2 batch
         // auto-expansion), fall back to `grab.series_id` for legacy
         // grabs and for any completed video file whose index wasn't
@@ -861,95 +1045,54 @@ async fn import_torrent(
             .and_then(|n| n.to_str())
             .unwrap_or(&file.name);
 
-        // Parse episode number from the filename. The `grab.episode_numbers`
-        // fallback only makes sense for the legacy single-series path —
-        // in a routed batch the routes rows already carry per-sibling
-        // episode numbers and the parent grab's list doesn't apply to
-        // sibling files.
-        //
-        // Captures the season alongside the episode so the offset path
-        // below can skip the absolute-numbering compensation when the
-        // filename used explicit `SxxEyy`. A file like
-        // `Mob.Psycho.100.S02E13.mkv` parses as `(Some(2), 13)` — the
-        // S02 marker says "this is episode 13 *within season 2*", so
-        // applying `cumulative_prior_episodes=12` would re-rewrite it
-        // to E1 of the season and import it under the wrong episode.
-        let parsed = media::parse_episode_number(&filename_only.to_lowercase());
-        let parsed_season = parsed.and_then(|(s, _)| s);
-        let ep_num = parsed.map(|(_, ep)| ep).or_else(|| {
-            if routes_by_file.is_empty() {
+        // Batch imports consume the exact plan validated before this loop;
+        // a batch file absent from the plan was preflight-skipped
+        // (unparseable or non-positive) and re-derives the same verdict
+        // here, landing in the warn-and-continue arms below. Singles use
+        // the same resolver, retaining the legacy first-episode fallback
+        // only when exactly one video exists.
+        let resolved = if let Some(resolved) = batch_episode_plan.get(file_idx) {
+            *resolved
+        } else {
+            let parsed = media::parse_episode_number(&filename_only.to_lowercase());
+            let fallback = if video_files.len() == 1 && routes_by_file.is_empty() {
                 grab.episode_numbers.first().copied()
             } else {
                 None
-            }
-        });
-
-        let Some(raw_ep_num) = ep_num else {
-            logger::warn(
-                &state.db,
-                LogCategory::PostProcess,
-                &format!("Could not parse episode number from '{}'", filename_only),
-                &format!("series={}", ctx.series.title),
-            )
-            .await;
-            continue;
-        };
-
-        // Decide the episode-number offset to subtract:
-        //   1. If a route row covered this file (Phase 2 batch auto-
-        //      expansion), use the offset the auto-expand path stored
-        //      at grab time — e.g. smol Monogatari S07E14 → Owari S2 E01
-        //      with offset 13, NoobSubs JoJo E25 → Egypt-hen E01 with
-        //      offset 24.
-        //   2. Otherwise, if the filename used explicit `SxxEyy`, skip
-        //      the absolute-numbering compensation entirely. A
-        //      seasonal marker pins the episode number to its season,
-        //      so a file like `Mob.Psycho.100.S02E13` is genuinely E13
-        //      of S02 — applying `cumulative_prior_episodes=12` would
-        //      mis-rewrite it to E1 and the original E13 row in
-        //      `episode_quality_tags` would stay in `grabbed` forever.
-        //   3. Otherwise (bare-number absolute-numbering fallback) use
-        //      the series's cumulative prior-cour episode count (#30)
-        //      when the parsed number is clearly in the absolute-
-        //      numbering range (greater than the prior-cour total).
-        //      Example: `[SubsPlease] Jujutsu Kaisen - 56` →
-        //      raw_ep_num=56, cumulative=47, 56 > 47 → offset=47, 56 -
-        //      47 = E9 of S3. A relative-numbered release from the
-        //      same series ("Jujutsu Kaisen - 09", raw=9) correctly
-        //      falls through to offset=0 because 9 is not greater than
-        //      47.
-        //
-        // A non-positive result after subtraction means the file
-        // landed on a sibling whose offset is larger than the file's
-        // own episode number — log and skip rather than write a bogus
-        // E0 file.
-        let ep_offset = routes_by_file
-            .get(file_idx)
-            .map(|(_, off)| *off)
-            .unwrap_or_else(|| {
-                if parsed_season.is_some() {
-                    0
-                } else {
-                    fallback_ep_offset(raw_ep_num, ctx.series.cumulative_prior_episodes)
+            };
+            let Some((parsed_season, raw_episode)) =
+                parsed.or_else(|| fallback.map(|episode| (None, episode)))
+            else {
+                logger::warn(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Could not parse episode number from '{}'", filename_only),
+                    &format!("series={}", ctx.series.title),
+                )
+                .await;
+                continue;
+            };
+            match resolve_episode(
+                parsed_season,
+                raw_episode,
+                routes_by_file.get(file_idx).map(|(_, offset)| *offset),
+                ctx.series.cumulative_prior_episodes,
+            ) {
+                Ok(resolved) => resolved,
+                Err(reason) => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!("Skipping '{}' — {}", filename_only, reason),
+                        &format!("series={}", ctx.series.title),
+                    )
+                    .await;
+                    continue;
                 }
-            });
-        let ep_num = raw_ep_num - ep_offset;
-        if ep_num <= 0 {
-            logger::warn(
-                &state.db,
-                LogCategory::PostProcess,
-                &format!(
-                    "Skipping '{}' — effective ep {} after offset {} is non-positive",
-                    filename_only, ep_num, ep_offset
-                ),
-                &format!(
-                    "series={}, raw_ep={}, ep_offset={}",
-                    ctx.series.title, raw_ep_num, ep_offset
-                ),
-            )
-            .await;
-            continue;
-        }
+            }
+        };
+        let raw_ep_num = resolved.raw_episode;
+        let ep_num = resolved.episode;
 
         // Skip stranger files. See `grab_claims_episode` doc for the
         // full rationale and matrix of cases.
