@@ -51,15 +51,19 @@ function recycleSetRowBusy(id, busy) {
 function recycleRemoveRow(id) {
     var row = document.getElementById('recycle-' + id);
     if (row) {
-        var section = row.closest('.recycle-group');
+        var date = row.getAttribute('data-date');
         row.remove();
-        if (section && !section.querySelector('tbody tr')) section.remove();
+        // Drop the date row once its last entry is gone.
+        if (date && !document.querySelector('#recycle-groups tr[data-date="' + date + '"]')) {
+            var dateRow = document.querySelector('#recycle-groups tr[data-date-row="' + date + '"]');
+            if (dateRow) dateRow.remove();
+        }
     }
     recycleRefreshSummary();
 }
 
 function recycleRefreshSummary() {
-    var rows = document.querySelectorAll('#recycle-groups tbody tr');
+    var rows = document.querySelectorAll('#recycle-groups tbody tr[data-bytes]');
     var count = rows.length;
     var bytes = 0;
     rows.forEach(function (r) { bytes += Number(r.getAttribute('data-bytes')) || 0; });
@@ -69,9 +73,10 @@ function recycleRefreshSummary() {
     if (sizeEl) sizeEl.textContent = recycleHumanBytes(bytes);
     var emptyBtn = document.getElementById('recycle-empty-btn');
     if (emptyBtn) emptyBtn.disabled = count === 0;
-    if (count === 0 && !document.getElementById('recycle-empty-state')) {
+    if (count === 0) {
         var groups = document.getElementById('recycle-groups');
-        if (groups) {
+        if (groups) groups.hidden = true;
+        if (!document.getElementById('recycle-empty-state') && groups) {
             var empty = document.createElement('div');
             empty.className = 'empty-state';
             empty.id = 'recycle-empty-state';
@@ -154,7 +159,7 @@ function recycleEmpty(btn) {
             .then(function (res) {
                 if (res.body && res.body.ok) {
                     recycleToast('success', 'Recycle bin emptied', res.body.message || '');
-                    document.querySelectorAll('#recycle-groups .recycle-group').forEach(function (s) { s.remove(); });
+                    document.querySelectorAll('#recycle-groups tbody tr').forEach(function (r) { r.remove(); });
                     recycleRefreshSummary();
                 } else {
                     recycleToast('error', 'Empty failed', (res.body && res.body.message) || ('HTTP ' + res.status));

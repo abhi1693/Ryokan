@@ -65,29 +65,33 @@
     max-width: 340px;
 }
 
-.recycle-group h3 {
-    margin: 18px 0 8px;
-    font-size: 15px;
-}
-
-/* Fixed layout + colgroup widths keep the columns identical across
-   date groups; the min-width makes narrow viewports scroll the wrap
-   horizontally instead of crushing the Series column. */
+/* One table for every date bucket, normal auto layout: columns size to
+   their content, so the actions column is exactly as wide as its two
+   buttons plus padding and the header sits over them. The min-width
+   makes narrow viewports scroll the wrap instead of crushing columns. */
 .recycle-table {
-    table-layout: fixed;
     width: 100%;
-    min-width: 900px;
+    min-width: 860px;
 }
 
-/* Numeric and action columns get fixed pixel widths so their content
-   never crowds the neighbor at narrow viewports; the path column has no
-   width and absorbs whatever is left. */
-.recycle-col-series { width: 22%; }
-.recycle-col-item { width: 11%; }
-.recycle-col-when { width: 90px; }
-.recycle-col-purge { width: 104px; }
-.recycle-col-size { width: 104px; }
-.recycle-col-actions { width: 212px; }
+/* The path column is the flexible one: `max-width: 0` plus `width: 100%`
+   makes auto layout hand it whatever the other columns leave, and the
+   inner span ellipsizes inside that, so the table never grows past its
+   container to fit a long path. */
+.recycle-table td:nth-child(3),
+.recycle-table th:nth-child(3) {
+    max-width: 0;
+    width: 100%;
+}
+
+.recycle-date-row td {
+    padding: 16px 12px 6px;
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--text-bright);
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+}
 
 .recycle-path {
     display: block;
@@ -100,6 +104,7 @@
 }
 
 .recycle-series {
+    max-width: 260px;
     font-weight: 600;
     color: var(--text-bright);
     overflow-wrap: anywhere;
@@ -109,16 +114,25 @@
     white-space: nowrap;
 }
 
-.recycle-actions {
+/* Auto layout sizes this column to the buttons; the cell's own 12px
+   padding is the gap to the table edge, the same inset the text on the
+   left gets. */
+.recycle-table td.recycle-actions,
+.recycle-table th:last-child {
     white-space: nowrap;
 }
 
-/* The buttons hug the table's right edge with the same 12px inset the
-   cell padding gives the text on the left, regardless of column width;
-   any slack from the fixed column lands between Size and Restore. */
-.recycle-table td.recycle-actions,
-.recycle-table th:last-child {
-    text-align: right;
+/* Auto layout would otherwise squeeze the wrappable columns to their
+   narrowest and hand the space to the path; these floors keep titles on
+   one or two lines. */
+.recycle-table td.recycle-series,
+.recycle-table th:first-child {
+    min-width: 180px;
+}
+
+.recycle-table td:nth-child(2),
+.recycle-table th:nth-child(2) {
+    white-space: nowrap;
 }
 
 /* Filters apply on change; the submit button is a no-JS / keyboard

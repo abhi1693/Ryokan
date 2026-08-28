@@ -74,52 +74,39 @@
 </div>
 {% endif %}
 
-<div id="recycle-groups">
-{% for g in groups %}
-<section class="recycle-group" data-date="{{ g.date }}">
-    <h3>{{ g.date }}</h3>
-    <div class="rss-table-wrap">
-        <table class="rss-table recycle-table">
-            <colgroup>
-                <col class="recycle-col-series">
-                <col class="recycle-col-item">
-                <col class="recycle-col-path">
-                <col class="recycle-col-when">
-                <col class="recycle-col-purge">
-                <col class="recycle-col-size">
-                <col class="recycle-col-actions">
-            </colgroup>
-            <thead>
-                <tr>
-                    <th>Series</th>
-                    <th>Item</th>
-                    <th>Original location</th>
-                    <th>Deleted</th>
-                    <th>Purges</th>
-                    <th>Size</th>
-                    <th>Actions</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for e in g.entries %}
-                <tr id="recycle-{{ e.entry_id }}" data-bytes="{{ e.size_bytes }}" data-bytes-label="{{ e.size }}">
-                    <td class="recycle-series">{{ e.series_title }}</td>
-                    <td>{% if e.kind_is_folder %}<span class="badge">{{ e.label }}</span>{% else %}{{ e.label }}{% endif %}</td>
-                    <td><span class="recycle-path" title="{{ e.original_path }}">{{ e.original_path }}</span></td>
-                    <td class="recycle-nowrap"><span data-ts="{{ e.recycled_at }}"></span></td>
-                    <td class="recycle-nowrap">{{ e.purge_in }}</td>
-                    <td class="recycle-nowrap">{{ e.size }}</td>
-                    <td class="recycle-actions">
-                        <button type="button" class="btn btn-secondary btn-sm" onclick="recycleRestore('{{ e.entry_id }}', this)">Restore</button>
-                        <button type="button" class="btn btn-danger btn-sm" onclick="recycleDeleteNow('{{ e.entry_id }}', this)">Delete now</button>
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</section>
-{% endfor %}
+<div class="rss-table-wrap" id="recycle-groups"{% if groups.is_empty() %} hidden{% endif %}>
+    <table class="rss-table recycle-table">
+        <thead>
+            <tr>
+                <th>Series</th>
+                <th>Item</th>
+                <th>Original location</th>
+                <th>Deleted</th>
+                <th>Purges</th>
+                <th>Size</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for g in groups %}
+            <tr class="recycle-date-row" data-date-row="{{ g.date }}"><td colspan="7">{{ g.date }}</td></tr>
+            {% for e in g.entries %}
+            <tr id="recycle-{{ e.entry_id }}" data-date="{{ g.date }}" data-bytes="{{ e.size_bytes }}" data-bytes-label="{{ e.size }}">
+                <td class="recycle-series">{{ e.series_title }}</td>
+                <td>{% if e.kind_is_folder %}<span class="badge">{{ e.label }}</span>{% else %}{{ e.label }}{% endif %}</td>
+                <td><span class="recycle-path" title="{{ e.original_path }}">{{ e.original_path }}</span></td>
+                <td class="recycle-nowrap"><span data-ts="{{ e.recycled_at }}"></span></td>
+                <td class="recycle-nowrap">{{ e.purge_in }}</td>
+                <td class="recycle-nowrap">{{ e.size }}</td>
+                <td class="recycle-actions">
+                    <button type="button" class="btn btn-secondary btn-sm" onclick="recycleRestore('{{ e.entry_id }}', this)">Restore</button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="recycleDeleteNow('{{ e.entry_id }}', this)">Delete now</button>
+                </td>
+            </tr>
+            {% endfor %}
+            {% endfor %}
+        </tbody>
+    </table>
 </div>
 {% endif %}
 {% endblock %}
