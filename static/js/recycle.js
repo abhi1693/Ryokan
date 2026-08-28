@@ -11,7 +11,7 @@
 var recycleInFlight = false;
 
 function recycleHumanBytes(n) {
-    var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
     var v = Number(n) || 0;
     var i = 0;
     while (v >= 1024 && i < units.length - 1) {

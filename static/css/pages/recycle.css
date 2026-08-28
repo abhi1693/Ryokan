@@ -111,6 +111,23 @@
     white-space: nowrap;
 }
 
+/* Breathing room between the last button and the table edge. */
+.recycle-table th:last-child,
+.recycle-table td:last-child {
+    padding-right: 18px;
+}
+
+/* Filters apply on change; the submit button is a no-JS / keyboard
+   fallback, hidden when scripting is available. */
+.recycle-filter-apply {
+    display: none;
+}
+@media (scripting: none) {
+    .recycle-filter-apply {
+        display: inline-flex;
+    }
+}
+
 .recycle-actions .btn + .btn {
     margin-left: 6px;
 }

@@ -41,7 +41,7 @@
 <form method="get" action="/library/recycle" class="recycle-filters">
     <div class="form-group">
         <label for="recycle-filter-series">Series</label>
-        <select name="series" id="recycle-filter-series">
+        <select name="series" id="recycle-filter-series" onchange="this.form.requestSubmit()">
             <option value="">All series</option>
             {% for opt in series_options %}
             <option value="{{ opt.0 }}" {% if filter_series == opt.0.to_string() %}selected{% endif %}>{{ opt.1 }}</option>
@@ -50,13 +50,15 @@
     </div>
     <div class="form-group">
         <label for="recycle-filter-from">Deleted from</label>
-        <input type="date" name="from" id="recycle-filter-from" value="{{ filter_from }}">
+        <input type="date" name="from" id="recycle-filter-from" value="{{ filter_from }}" onchange="this.form.requestSubmit()">
     </div>
     <div class="form-group">
         <label for="recycle-filter-to">to</label>
-        <input type="date" name="to" id="recycle-filter-to" value="{{ filter_to }}">
+        <input type="date" name="to" id="recycle-filter-to" value="{{ filter_to }}" onchange="this.form.requestSubmit()">
     </div>
-    <button type="submit" class="btn btn-secondary">Apply</button>
+    {# Filters submit themselves on change; the button only exists for
+       keyboard users and no-JS. #}
+    <button type="submit" class="btn btn-secondary recycle-filter-apply">Apply</button>
     {% if !filter_series.is_empty() || !filter_from.is_empty() || !filter_to.is_empty() %}
     <a href="/library/recycle" class="btn btn-secondary">Clear</a>
     {% endif %}

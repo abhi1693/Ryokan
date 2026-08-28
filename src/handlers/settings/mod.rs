@@ -1615,6 +1615,7 @@ pub async fn settings_general_submit(
 
     // Build the merged config: General-tab fields from form, every
     // other field copied from existing.
+    let form_recycle_bin_path_raw = form.recycle_bin_path.clone();
     let cfg = config::Config {
         media_root: form.media_root.trim().trim_end_matches('/').to_string(),
         title_language: match form.title_language.as_str() {
@@ -1678,7 +1679,15 @@ pub async fn settings_general_submit(
             cfg.media_root
         ));
     }
+    let raw_recycle_path = form_recycle_bin_path_raw.trim();
+    if !raw_recycle_path.is_empty() && cfg.recycle_bin_path.is_empty() {
+        notices.push(format!(
+            "Warning: recycle bin path '{}' is not allowed. Recycle bin left off.",
+            raw_recycle_path
+        ));
+    }
     if !cfg.recycle_bin_path.is_empty() {
+        crate::services::recycle::invalidate_probe_cache();
         match crate::services::recycle::probe_writable(&cfg.recycle_bin_path).await {
             Ok(()) => {
                 let bin = std::path::Path::new(&cfg.recycle_bin_path);
@@ -1700,6 +1709,8 @@ pub async fn settings_general_submit(
                 cfg.recycle_bin_path, e
             )),
         }
+        // Keep the banner flag in step with the fresh probe.
+        crate::services::recycle::check_unwritable(&cfg.recycle_bin_path).await;
     }
 
     general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await

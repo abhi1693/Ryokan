@@ -27,8 +27,8 @@ struct RecycleTemplate {
     title_language: String,
     /// `recycle_bin_path` is non-empty.
     enabled: bool,
-    /// Last recycle attempt found the bin unwritable and deleted
-    /// permanently instead (see `services::recycle::RECYCLE_UNWRITABLE`).
+    /// The bin is configured but not writable right now, so deletes are
+    /// being refused (live probe, see `services::recycle::check_unwritable`).
     unwritable: bool,
     bin_path: String,
     age_days: i64,
@@ -101,7 +101,7 @@ fn purge_in(date: &str, age_days: i64, today: NaiveDate) -> String {
     let purge_day = bucket + Duration::days(age_days + 1);
     let left = (purge_day - today).num_days();
     if left <= 0 {
-        "at next cleanup".to_string()
+        "next cleanup".to_string()
     } else if left == 1 {
         "in 1 day".to_string()
     } else {
@@ -228,12 +228,14 @@ fn status_for(err: &str) -> axum::http::StatusCode {
     }
 }
 
-async fn bin_path(state: &AppState) -> Result<String, Box<Response>> {
-    let bin = config::get_config(&state.db)
+/// `(recycle_bin_path, media_root)` or the 400 to return when no bin is
+/// configured.
+async fn bin_path(state: &AppState) -> Result<(String, String), Box<Response>> {
+    let (bin, media_root) = config::get_config(&state.db)
         .await
         .ok()
         .flatten()
-        .map(|c| c.recycle_bin_path)
+        .map(|c| (c.recycle_bin_path, c.media_root))
         .unwrap_or_default();
     if bin.trim().is_empty() {
         return Err(Box::new(json_err(
@@ -241,7 +243,56 @@ async fn bin_path(state: &AppState) -> Result<String, Box<Response>> {
             "Recycle bin is not configured",
         )));
     }
-    Ok(bin)
+    Ok((bin, media_root))
+}
+
+/// After an episode file is back on disk, undo the delete's DB side:
+/// the quality tag was cleared and the grab history flipped to
+/// `removed`, so the row would keep reading "removed" with the file
+/// sitting right there. Re-running the reclassify core re-tags the file
+/// and records a fresh `completed` history row; a pinned (manual
+/// override) row just gets its state back. Best-effort: the restore
+/// itself already succeeded, so failures here only log.
+async fn retag_restored_episode(state: &AppState, series_id: i64, final_path: &std::path::Path) {
+    let name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let Some((_, episode_number)) = media::parse_episode_number(&name.to_lowercase()) else {
+        return;
+    };
+    match crate::handlers::library::crud::reclassify_on_disk_episode(
+        state,
+        series_id,
+        episode_number,
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err((axum::http::StatusCode::CONFLICT, _)) => {
+            // Pinned via manual override: the tag row survived the delete
+            // with a blank state. Restore the state without touching the
+            // pin.
+            let _ = crate::models::episode_tags::mark_completed(
+                &state.db,
+                series_id,
+                &[episode_number],
+            )
+            .await;
+        }
+        Err((_, e)) => {
+            logger::warn(
+                &state.db,
+                LogCategory::Library,
+                &format!(
+                    "Restored episode {} but could not re-tag it; run Reclassify on the episode",
+                    episode_number
+                ),
+                &e,
+            )
+            .await;
+        }
+    }
 }
 
 /// Best-effort Jellyfin rescan so a restored folder or file shows up
@@ -255,12 +306,22 @@ async fn nudge_jellyfin(state: &AppState) {
 
 /// `POST /api/library/recycle/{entry_id}/restore`
 pub async fn restore(State(state): State<AppState>, Path(entry_id): Path<String>) -> Response {
-    let bin = match bin_path(&state).await {
+    let (bin, media_root) = match bin_path(&state).await {
         Ok(b) => b,
         Err(r) => return *r,
     };
-    match recycle::restore(&bin, &entry_id).await {
+    // Read the manifest before the move so the re-tag step knows which
+    // series the file belongs to once it's back.
+    let series_id = match recycle::find_entry(&bin, &entry_id).await {
+        Ok(Some(entry)) if entry.manifest.kind == RecycleKind::Episode => entry.manifest.series_id,
+        Ok(_) => None,
+        Err(e) => return json_err(status_for(&e), &e),
+    };
+    match recycle::restore(&bin, &entry_id, &media_root).await {
         Ok(RestoreOutcome::Restored { final_path }) => {
+            if let Some(series_id) = series_id {
+                retag_restored_episode(&state, series_id, &final_path).await;
+            }
             logger::info(
                 &state.db,
                 LogCategory::Library,
@@ -287,6 +348,10 @@ pub async fn restore(State(state): State<AppState>, Path(entry_id): Path<String>
             axum::http::StatusCode::CONFLICT,
             "The original folder no longer exists. Re-add the series first, then restore.",
         ),
+        Ok(RestoreOutcome::OutsideMediaRoot) => json_err(
+            axum::http::StatusCode::CONFLICT,
+            "The original location is outside the current media root. Move it back by hand.",
+        ),
         Err(e) => json_err(status_for(&e), &e),
     }
 }
@@ -294,7 +359,7 @@ pub async fn restore(State(state): State<AppState>, Path(entry_id): Path<String>
 /// `POST /api/library/recycle/{entry_id}/purge`: permanently delete one
 /// entry ("Delete now").
 pub async fn purge_entry(State(state): State<AppState>, Path(entry_id): Path<String>) -> Response {
-    let bin = match bin_path(&state).await {
+    let (bin, _) = match bin_path(&state).await {
         Ok(b) => b,
         Err(r) => return *r,
     };
@@ -320,7 +385,7 @@ pub async fn purge_entry(State(state): State<AppState>, Path(entry_id): Path<Str
 
 /// `POST /api/library/recycle/empty`: permanently delete every entry.
 pub async fn empty(State(state): State<AppState>) -> Response {
-    let bin = match bin_path(&state).await {
+    let (bin, _) = match bin_path(&state).await {
         Ok(b) => b,
         Err(r) => return *r,
     };
@@ -381,6 +446,7 @@ mod tests {
         config::save_config(
             &db,
             &config::Config {
+                media_root: tmp.path().join("media").display().to_string(),
                 recycle_bin_path: bin.display().to_string(),
                 recycle_bin_age_days: 30,
                 ..config::Config::default()
@@ -460,8 +526,8 @@ mod tests {
         assert_eq!(purge_in("2026-08-28", 30, today), "in 31 days");
         assert_eq!(purge_in("2026-07-29", 30, today), "in 1 day");
         // 31 days old: the next hourly sweep drops it.
-        assert_eq!(purge_in("2026-07-28", 30, today), "at next cleanup");
-        assert_eq!(purge_in("2026-01-01", 30, today), "at next cleanup");
+        assert_eq!(purge_in("2026-07-28", 30, today), "next cleanup");
+        assert_eq!(purge_in("2026-01-01", 30, today), "next cleanup");
         assert_eq!(purge_in("2026-08-28", 0, today), "never (manual only)");
         assert_eq!(purge_in("garbage", 30, today), "");
     }

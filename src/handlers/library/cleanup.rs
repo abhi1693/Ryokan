@@ -115,8 +115,9 @@ impl SeriesCleanupReport {
 /// 3. Canonicalize `media_root`, canonicalize `media_root/<folder_name>`,
 ///    assert the resolved series dir starts with the resolved media
 ///    root, and only then hand it to `services::recycle::recycle`
-///    (move into the recycle bin, or `remove_dir_all` when the bin is
-///    disabled / unwritable). The `starts_with` guard is
+///    (move into the recycle bin; `remove_dir_all` only when no bin is
+///    configured, since an unwritable bin refuses the delete). The
+///    `starts_with` guard is
 ///    the security-critical step — without it a corrupted `folder_name`
 ///    (`"../escape"`) lets the user wipe arbitrary directories.
 ///    Pinned by the `refuses_traversal_when_resolved_path_escapes_media_root`
@@ -215,9 +216,9 @@ pub async fn cleanup_series_files(
             Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
                 Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
                     // Recycle bin (#123): the folder moves into the bin
-                    // when one is configured and writable; otherwise
-                    // `recycle` falls through to the permanent
-                    // `remove_dir_all` this branch used to call directly.
+                    // when one is configured; with no bin `recycle` does
+                    // the permanent `remove_dir_all` this branch used to
+                    // call directly, and an unwritable bin refuses (Err).
                     match recycle::recycle(
                         &state.db,
                         recycle_bin_path,

@@ -201,6 +201,10 @@ fn size_verification_catches_short_copies() {
     assert!(verify_tree_size(&s, &d).is_err());
 }
 
+/// Note: `RECYCLE_UNWRITABLE` is process-global, so the flag assertions
+/// here rely on nextest's process-per-test isolation (`cargo t`). Under
+/// plain `cargo test` another recycle test can race them; see
+/// tests/AGENTS.md on the runner difference.
 #[tokio::test]
 async fn unwritable_bin_refuses_delete_sets_flag_and_next_success_clears_it() {
     let db = test_support::in_memory_pool().await;
@@ -352,6 +356,7 @@ async fn refuses_to_recycle_a_folder_that_contains_the_bin() {
 async fn restore_episode_puts_files_back_and_drops_entry() {
     let db = test_support::in_memory_pool().await;
     let tmp = tempfile::tempdir().unwrap();
+    let media_root = tmp.path().join("media");
     let (season, video) = seed_series(tmp.path());
     let bin = tmp.path().join("recycle");
     let bin_s = bin.to_str().unwrap();
@@ -366,7 +371,9 @@ async fn restore_episode_puts_files_back_and_drops_entry() {
     fs::remove_dir_all(&season).unwrap();
     assert!(!season.exists());
 
-    let out = restore(bin_s, &entry_id).await.unwrap();
+    let out = restore(bin_s, &entry_id, media_root.to_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         out,
         RestoreOutcome::Restored {
@@ -386,6 +393,7 @@ async fn restore_episode_puts_files_back_and_drops_entry() {
 async fn restore_conflict_and_missing_location_outcomes() {
     let db = test_support::in_memory_pool().await;
     let tmp = tempfile::tempdir().unwrap();
+    let media_root = tmp.path().join("media");
     let (_season, video) = seed_series(tmp.path());
     let bin = tmp.path().join("recycle");
     let bin_s = bin.to_str().unwrap();
@@ -400,7 +408,9 @@ async fn restore_conflict_and_missing_location_outcomes() {
     // User re-grabbed: something is back at the original path.
     write(&video, b"new grab");
     assert_eq!(
-        restore(bin_s, &entry_id).await.unwrap(),
+        restore(bin_s, &entry_id, media_root.to_str().unwrap())
+            .await
+            .unwrap(),
         RestoreOutcome::ConflictAtTarget
     );
     assert_eq!(fs::read(&video).unwrap(), b"new grab");
@@ -413,19 +423,30 @@ async fn restore_conflict_and_missing_location_outcomes() {
     // Series root gone entirely.
     fs::remove_dir_all(tmp.path().join("media").join("Show (2020)")).unwrap();
     assert_eq!(
-        restore(bin_s, &entry_id).await.unwrap(),
+        restore(bin_s, &entry_id, media_root.to_str().unwrap())
+            .await
+            .unwrap(),
         RestoreOutcome::OriginalLocationMissing
     );
     assert_eq!(list_entries(bin_s).await.unwrap().len(), 1);
 
-    assert!(restore(bin_s, "deadbeef").await.is_err());
-    assert!(restore(bin_s, "../x").await.is_err());
+    assert!(
+        restore(bin_s, "deadbeef", media_root.to_str().unwrap())
+            .await
+            .is_err()
+    );
+    assert!(
+        restore(bin_s, "../x", media_root.to_str().unwrap())
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
 async fn restore_series_folder_round_trips() {
     let db = test_support::in_memory_pool().await;
     let tmp = tempfile::tempdir().unwrap();
+    let media_root = tmp.path().join("media");
     let (_season, video) = seed_series(tmp.path());
     let series_root = tmp.path().join("media").join("Show (2020)");
     let bin = tmp.path().join("recycle");
@@ -444,7 +465,9 @@ async fn restore_series_folder_round_trips() {
     };
     assert!(!series_root.exists());
 
-    let out = restore(bin_s, &entry_id).await.unwrap();
+    let out = restore(bin_s, &entry_id, media_root.to_str().unwrap())
+        .await
+        .unwrap();
     assert_eq!(
         out,
         RestoreOutcome::Restored {
@@ -468,7 +491,9 @@ async fn restore_series_folder_round_trips() {
     };
     fs::create_dir_all(&series_root).unwrap();
     assert_eq!(
-        restore(bin_s, &entry_id).await.unwrap(),
+        restore(bin_s, &entry_id, media_root.to_str().unwrap())
+            .await
+            .unwrap(),
         RestoreOutcome::ConflictAtTarget
     );
 }
@@ -596,4 +621,43 @@ async fn probe_writable_reports_both_ways() {
             .is_err()
     );
     assert!(probe_writable("").await.is_err());
+}
+
+#[tokio::test]
+async fn restore_refuses_paths_outside_the_media_root() {
+    let db = test_support::in_memory_pool().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let (_season, video) = seed_series(tmp.path());
+    let bin = tmp.path().join("recycle");
+    let bin_s = bin.to_str().unwrap();
+    let RecycleOutcome::Recycled { entry_id } =
+        recycle(&db, bin_s, RecycleKind::Episode, Some(1), "Show", &video)
+            .await
+            .unwrap()
+    else {
+        panic!("expected Recycled");
+    };
+    // A different media root: the manifest path is not under it.
+    let other_root = tmp.path().join("elsewhere");
+    assert_eq!(
+        restore(bin_s, &entry_id, other_root.to_str().unwrap())
+            .await
+            .unwrap(),
+        RestoreOutcome::OutsideMediaRoot
+    );
+    // An empty media root can't vouch for anything.
+    assert_eq!(
+        restore(bin_s, &entry_id, "").await.unwrap(),
+        RestoreOutcome::OutsideMediaRoot
+    );
+    assert_eq!(list_entries(bin_s).await.unwrap().len(), 1);
+    // The real root restores.
+    let media_root = tmp.path().join("media");
+    assert!(matches!(
+        restore(bin_s, &entry_id, media_root.to_str().unwrap())
+            .await
+            .unwrap(),
+        RestoreOutcome::Restored { .. }
+    ));
+    assert!(video.is_file());
 }

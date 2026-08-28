@@ -128,8 +128,9 @@ struct SystemTemplate {
     /// for a fresh create form. With `?edit_id=N`, this is the loaded
     /// matrix for that provider.
     notification_event_toggles: Vec<notifications::EventToggleView>,
-    /// Recycle bin (#123) configured but not writable right now; renders
-    /// the top-of-page banner. Live probe, see `recycle::check_unwritable`.
+    /// Recycle bin (#123) refused a delete because the bin isn't writable
+    /// (`recycle::RECYCLE_UNWRITABLE`); renders the top-of-page banner.
+    /// Flag only, no probe: this page shouldn't wake a spun-down disk.
     recycle_unwritable: bool,
 }
 
@@ -374,12 +375,7 @@ pub async fn system_page(
     // got fewer than the limit, this is the last page.
     let (logs, log_older_id) = truncate_to_page(logs, 200, |e| e.id);
     let (rss_recent, rss_older_id) = truncate_to_page(rss_recent, 200, |e| e.id);
-    let recycle_unwritable = crate::services::recycle::check_unwritable(
-        cfg.as_ref()
-            .map(|c| c.recycle_bin_path.as_str())
-            .unwrap_or(""),
-    )
-    .await;
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -479,8 +475,7 @@ pub async fn debug_settings_submit(
         }
     };
 
-    let recycle_unwritable =
-        crate::services::recycle::check_unwritable(&cfg.recycle_bin_path).await;
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
     let template = SystemTemplate {
         page: "system".to_string(),
         tab: "debug".to_string(),

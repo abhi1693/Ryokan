@@ -45,9 +45,9 @@ pub use helpers::is_valid_entry_id;
 pub use manifest::{MANIFEST_FILE, RecycleKind, RecycleManifest};
 
 /// Set when a recycle attempt found `recycle_bin_path` configured but
-/// unwritable and fell through to a permanent delete; cleared by the next
-/// successful recycle. Polled by page renders for the "deletes are
-/// permanent until fixed" banner.
+/// unwritable and refused the delete; cleared by the next successful
+/// recycle or a passing [`check_unwritable`] probe. Read by the recycle
+/// and System page banners ("deletes are refused until this is fixed").
 pub static RECYCLE_UNWRITABLE: AtomicBool = AtomicBool::new(false);
 
 pub fn is_unwritable() -> bool {
@@ -85,19 +85,42 @@ fn invalidate_entry_count() {
     *ENTRY_COUNT_CACHE.lock().unwrap() = None;
 }
 
-/// Live health probe for the banners (recycle page, System page). Returns
-/// `true` when a bin is configured and cannot be written right now, and
-/// keeps [`RECYCLE_UNWRITABLE`] in step with what it finds so a fixed
-/// mount clears the warning on the next page load instead of waiting for
-/// the next successful recycle. An empty path is "not configured," never
-/// "unwritable."
+/// `(when, bin path, unwritable)` behind [`check_unwritable`].
+static PROBE_CACHE: Mutex<Option<(Instant, String, bool)>> = Mutex::new(None);
+const PROBE_TTL: Duration = Duration::from_secs(30);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Live health probe for the recycle page banner and the settings save
+/// notice. Returns `true` when a bin is configured and cannot be written
+/// right now, and keeps [`RECYCLE_UNWRITABLE`] in step with what it finds
+/// so a fixed mount clears the warning without waiting for the next
+/// successful recycle. Cached for 30s so page loads don't keep waking a
+/// spun-down disk, and bounded by a 3s timeout so a hung network mount
+/// reads as "unwritable" instead of hanging the page. An empty path is
+/// "not configured," never "unwritable."
 pub async fn check_unwritable(bin_path: &str) -> bool {
-    if bin_path.trim().is_empty() {
+    let bin = bin_path.trim().to_string();
+    if bin.is_empty() {
         return false;
     }
-    let unwritable = probe_writable(bin_path).await.is_err();
+    if let Some((at, cached_bin, v)) = PROBE_CACHE.lock().unwrap().as_ref()
+        && cached_bin == &bin
+        && at.elapsed() < PROBE_TTL
+    {
+        return *v;
+    }
+    let unwritable = !matches!(
+        tokio::time::timeout(PROBE_TIMEOUT, probe_writable(&bin)).await,
+        Ok(Ok(()))
+    );
+    *PROBE_CACHE.lock().unwrap() = Some((Instant::now(), bin, unwritable));
     RECYCLE_UNWRITABLE.store(unwritable, Ordering::Relaxed);
     unwritable
+}
+
+/// Drop the probe cache (settings save changed the path).
+pub fn invalidate_probe_cache() {
+    *PROBE_CACHE.lock().unwrap() = None;
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -120,6 +143,10 @@ pub enum RestoreOutcome {
     /// The original location's parent (series folder for an episode,
     /// media root for a series folder) no longer exists; nothing moved.
     OriginalLocationMissing,
+    /// The manifest's `original_path` doesn't sit under the current
+    /// media root (bin moved between installs, or a tampered manifest);
+    /// nothing moved. Restore never places files outside the library.
+    OutsideMediaRoot,
 }
 
 /// One entry as listed from disk.
@@ -289,11 +316,23 @@ fn recycle_blocking(
     }
     let bin = Path::new(bin);
 
+    // Create the bin root first so the containment check below can
+    // canonicalize it on the very first recycle; before this, a fresh
+    // bin skipped the check and the rename failed with a bare EINVAL
+    // after a `<bin>/<date>` skeleton had already been created inside
+    // the series folder.
+    let bin_preexisted = bin.is_dir();
+    fs::create_dir_all(bin)
+        .map_err(|e| InnerErr::Unwritable(format!("create {}: {e}", bin.display())))?;
+
     // A bin nested inside the folder being recycled would be moved into
     // itself; a path already inside the bin is a UI bug. Refuse both
     // rather than guess.
     if let (Ok(bin_canon), Ok(path_canon)) = (fs::canonicalize(bin), fs::canonicalize(path)) {
         if bin_canon.starts_with(&path_canon) {
+            if !bin_preexisted {
+                let _ = fs::remove_dir(bin);
+            }
             return Err(InnerErr::Io(format!(
                 "recycle bin {} lives inside {}. Refusing to recycle a folder into itself",
                 bin_canon.display(),
@@ -496,18 +535,47 @@ pub async fn find_entry(bin_path: &str, entry_id: &str) -> Result<Option<Recycle
 }
 
 /// Put an entry back exactly where it came from and drop the entry.
-pub async fn restore(bin_path: &str, entry_id: &str) -> Result<RestoreOutcome, String> {
+/// `media_root` is the library root the manifest path must sit under;
+/// delete guards its paths with a canonicalize + `starts_with` check and
+/// restore holds the same line, so a stray or hand-edited manifest can't
+/// turn restore into arbitrary file placement.
+pub async fn restore(
+    bin_path: &str,
+    entry_id: &str,
+    media_root: &str,
+) -> Result<RestoreOutcome, String> {
     let Some(entry) = find_entry(bin_path, entry_id).await? else {
         return Err("recycle entry not found".to_string());
     };
+    let media_root = media_root.trim().trim_end_matches('/').to_string();
     invalidate_entry_count();
-    tokio::task::spawn_blocking(move || restore_blocking(&entry))
+    tokio::task::spawn_blocking(move || restore_blocking(&entry, &media_root))
         .await
         .map_err(|e| format!("restore task panicked: {e}"))?
 }
 
-fn restore_blocking(entry: &RecycleEntry) -> Result<RestoreOutcome, String> {
+/// Lexical containment: absolute, no `.`/`..` components, under `root`.
+/// Canonicalizing isn't an option because the original path usually no
+/// longer exists (that's why we're restoring it).
+fn path_under_root(path: &Path, root: &str) -> bool {
+    use std::path::Component;
+    if root.is_empty() || !path.is_absolute() {
+        return false;
+    }
+    if path
+        .components()
+        .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return false;
+    }
+    path.starts_with(Path::new(root))
+}
+
+fn restore_blocking(entry: &RecycleEntry, media_root: &str) -> Result<RestoreOutcome, String> {
     let original = PathBuf::from(&entry.manifest.original_path);
+    if !path_under_root(&original, media_root) {
+        return Ok(RestoreOutcome::OutsideMediaRoot);
+    }
     let targets: Vec<(PathBuf, PathBuf)> = match entry.manifest.kind {
         RecycleKind::Episode => {
             let Some(parent) = original.parent() else {
@@ -708,9 +776,10 @@ pub fn same_filesystem(_bin: &Path, _media_root: &Path) -> Option<bool> {
     None
 }
 
-/// `1.2 GB` / `340 MB` style rendering for log lines and the list page.
+/// `1.2 GiB` / `340.0 MiB` style rendering for log lines and the list
+/// page; binary units to match the series page's size display.
 pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut v = bytes as f64;
     let mut i = 0;
     while v >= 1024.0 && i < UNITS.len() - 1 {
