@@ -601,25 +601,24 @@ async fn main() {
         // #122 manual import wizard. Form-POST + server render; the
         // per-group override controls swap a single card via HTMX.
         .route(
-            "/library/import",
-            get(handlers::library::manual_import::page)
-                .post(handlers::library::manual_import::start),
+            "/system/import",
+            get(handlers::system::manual_import::page).post(handlers::system::manual_import::start),
         )
         .route(
-            "/library/import/{session_id}/group/{idx}",
-            post(handlers::library::manual_import::group_action),
+            "/system/import/{session_id}/group/{idx}",
+            post(handlers::system::manual_import::group_action),
         )
         .route(
-            "/library/import/{session_id}/discard",
-            post(handlers::library::manual_import::discard),
+            "/system/import/{session_id}/discard",
+            post(handlers::system::manual_import::discard),
         )
         .route(
-            "/library/import/{session_id}/confirm",
-            post(handlers::library::manual_import::confirm),
+            "/system/import/{session_id}/confirm",
+            post(handlers::system::manual_import::confirm),
         )
         .route(
-            "/library/import/{session_id}/cancel",
-            post(handlers::library::manual_import::cancel),
+            "/system/import/{session_id}/cancel",
+            post(handlers::system::manual_import::cancel),
         )
         .route(
             "/api/library/recycle/empty",

@@ -8,7 +8,6 @@ pub mod bulk;
 pub mod cleanup;
 pub mod crud;
 pub mod episodes;
-pub mod manual_import;
 pub mod pages;
 pub mod reconcile;
 pub mod recycle;

@@ -1,6 +1,6 @@
 //! Manual import for existing libraries (#122).
 //!
-//! The wizard at `/library/import` points Ryokan at a folder the user
+//! The wizard at `/system/import` points Ryokan at a folder the user
 //! already has, walks it ([`walk`]), works out which series and
 //! episode each file is ([`parse`]), matches every series to AniList
 //! ([`matching`]), and renders a per-series preview ([`preview`]) the

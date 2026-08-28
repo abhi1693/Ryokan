@@ -3,13 +3,24 @@
 {% block title %} - Import Library{% endblock %}
 
 {% block content %}
-<div class="page-header import-header">
-    <h2>Import Existing Library</h2>
-    <a href="/system" class="btn btn-secondary">Back to System</a>
+{# Same shell as templates/system.html so the wizard reads as the
+   System sidebar's "Import Library" tab: the sidebar stays put and
+   the entry renders active. The wizard keeps its own route because
+   it has states (scanning / preview / importing / report) and HTMX
+   card swaps that the ?tab= page doesn't. #}
+<div class="tabbed-page">
+<div class="tabbed-page-header">
+    <h2>System</h2>
 </div>
+<div class="tabbed-layout">
+{% include "partials/system/sidebar.html" %}
+<div class="tabbed-content">
 
 {% if step == "start" %}
-<p class="page-desc">Point Ryokan at a folder of anime you already have. It reads the filenames, matches each series on AniList, and shows what it would import before anything changes on disk.</p>
+<div class="rss-panel">
+<div class="cf-section">
+<h3 class="import-title">Import an existing library</h3>
+<p class="form-hint import-intro">Point Ryokan at a folder of anime you already have. It reads the filenames, matches each series on AniList, and shows what it would import before anything changes on disk.</p>
 
 {% if media_root.is_empty() %}
 <div class="alert alert-warn" role="status">
@@ -21,7 +32,7 @@
 <div class="alert alert-error" role="alert">{{ error }}</div>
 {% endif %}
 
-<form method="post" action="/library/import" class="import-start-form settings-form">
+<form method="post" action="/system/import" class="import-start-form settings-form">
     <div class="form-group">
         <label for="import-path">Folder to scan</label>
         <input type="text" id="import-path" name="path" value="{{ form.path }}" placeholder="/mnt/anime" autocomplete="off" spellcheck="false" required>
@@ -62,7 +73,7 @@
     <ul class="import-recent-list">
         {% for r in recent %}
         <li>
-            <a href="/library/import?session={{ r.id }}" class="import-recent-link">
+            <a href="/system/import?session={{ r.id }}" class="import-recent-link">
                 <code class="import-recent-root" title="{{ r.root }}">{{ r.root }}</code>
                 <span class="import-recent-meta">{{ r.status }} &middot; {{ r.mode_label }}</span>
             </a>
@@ -71,8 +82,11 @@
     </ul>
 </section>
 {% endif %}
+</div>{# /.cf-section #}
+</div>{# /.rss-panel #}
 
 {% else if step == "scanning" %}
+<h3 class="import-title">Import an existing library</h3>
 <div class="import-scanning" id="import-scanning" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
     <div class="import-spinner" aria-hidden="true"></div>
     <div class="import-scanning-text">
@@ -80,14 +94,15 @@
         <p class="form-hint">Reading filenames and matching each series on AniList. Large libraries take a few minutes because AniList allows about thirty lookups a minute. This page updates itself when the preview is ready.</p>
     </div>
     <div class="import-scanning-actions">
-        <a href="/library/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
-        <form method="post" action="/library/import/{{ session_id }}/discard">
+        <a href="/system/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/system/import/{{ session_id }}/discard">
             <button type="submit" class="btn btn-secondary btn-sm">Cancel</button>
         </form>
     </div>
 </div>
 
 {% else if step == "importing" %}
+<h3 class="import-title">Import an existing library</h3>
 <div class="import-scanning" id="import-importing" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
     <div class="import-spinner" aria-hidden="true"></div>
     <div class="import-scanning-text">
@@ -95,14 +110,15 @@
         <p class="form-hint">Files are being {{ mode_label|lower }}ed into the media root, then each series is classified and given its artwork and NFO files. Cancel stops after the file in progress; everything already imported stays. This page updates itself when the import is done.</p>
     </div>
     <div class="import-scanning-actions">
-        <a href="/library/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
-        <form method="post" action="/library/import/{{ session_id }}/cancel">
+        <a href="/system/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/system/import/{{ session_id }}/cancel">
             <button type="submit" class="btn btn-danger btn-sm">Cancel import</button>
         </form>
     </div>
 </div>
 
 {% else if step == "done" %}
+<h3 class="import-title">Import an existing library</h3>
 <div class="import-summary import-report">
     <div class="import-summary-main">
         <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
@@ -122,7 +138,7 @@
     </div>
     <div class="import-summary-actions import-report-actions">
         <a href="/" class="btn btn-primary">Back to Library</a>
-        <form method="post" action="/library/import/{{ session_id }}/discard">
+        <form method="post" action="/system/import/{{ session_id }}/discard">
             <button type="submit" class="btn btn-secondary">Import another folder</button>
         </form>
     </div>
@@ -164,12 +180,14 @@
 {% endif %}
 
 {% else if step == "failed" %}
+<h3 class="import-title">Import an existing library</h3>
 <div class="alert alert-error" role="alert">
     <strong>The scan of <code>{{ root }}</code> failed.</strong> {{ failed_message }}
 </div>
-<a href="/library/import" class="btn btn-primary">Start over</a>
+<a href="/system/import" class="btn btn-primary">Start over</a>
 
 {% else %}
+<h3 class="import-title">Import an existing library</h3>
 <div class="import-summary">
     <div class="import-summary-main">
         <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
@@ -200,7 +218,7 @@
         </span>
         {% endif %}
     </div>
-    <form method="post" action="/library/import/{{ session_id }}/discard" class="import-summary-actions">
+    <form method="post" action="/system/import/{{ session_id }}/discard" class="import-summary-actions">
         <button type="submit" class="btn btn-secondary">Discard preview</button>
     </form>
 </div>
@@ -222,7 +240,7 @@
 
 <div id="import-groups">
 {% for g in groups %}
-{% include "partials/library/import_group.html" %}
+{% include "partials/system/import_group.html" %}
 {% endfor %}
 </div>
 
@@ -265,13 +283,13 @@
         {% endif %}
     </div>
     <div class="import-confirm-actions">
-        <form method="post" action="/library/import/{{ session_id }}/discard" class="import-inline-form">
+        <form method="post" action="/system/import/{{ session_id }}/discard" class="import-inline-form">
             <button type="submit" class="btn btn-secondary">Discard</button>
         </form>
         {# hx-post so the confirm bridge gates it via htmx:confirm; the
            HX-Redirect reply navigates to the importing state. #}
-        <form method="post" action="/library/import/{{ session_id }}/confirm" class="import-inline-form"
-              hx-post="/library/import/{{ session_id }}/confirm" hx-swap="none"
+        <form method="post" action="/system/import/{{ session_id }}/confirm" class="import-inline-form"
+              hx-post="/system/import/{{ session_id }}/confirm" hx-swap="none"
               data-ryokan-confirm-title="Start the import?"
               data-ryokan-confirm-body="{{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} will be {{ mode_label|lower }}ed into the media root{% if summary.replace > 0 %}, and {{ summary.replace }} existing episode{% if summary.replace != 1 %}s{% endif %} will be replaced (the old files go to the recycle bin when one is configured){% endif %}. You can cancel while it runs; files already imported stay."
               data-ryokan-confirm-yes="Import"
@@ -281,6 +299,10 @@
     </div>
 </div>
 {% endif %}
+
+</div>{# /.tabbed-content #}
+</div>{# /.tabbed-layout #}
+</div>{# /.tabbed-page #}
 {% endblock %}
 
 {% block page_js %}<script src="/static/js/import.js" defer></script>{% endblock %}

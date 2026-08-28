@@ -200,7 +200,7 @@ pub struct AppState {
     /// per-provider issues (#119 webhook, #120 Discord) land.
     pub notification_providers: NotificationProviders,
     /// #122 — in-memory manual-import preview sessions, keyed by the
-    /// opaque id in `/library/import?session=<id>`. Same
+    /// opaque id in `/system/import?session=<id>`. Same
     /// `Arc<Mutex<HashMap>>` shape as `interactive_search_cache`:
     /// idle sessions evict on the next access (2h TTL, 8-session cap).
     /// Holds walk results plus the user's match / file decisions

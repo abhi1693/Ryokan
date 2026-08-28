@@ -1,19 +1,20 @@
-/* Manual import wizard (/library/import, issue #122). Tables reuse the
+/* Manual import wizard (/system/import, issue #122). Tables reuse the
    shared .rss-table styling; this file covers the start form, the
    scanning state, the summary strip, and the per-series cards. */
 
-.import-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+.import-title {
+    margin: 0 0 6px;
+    font-size: 17px;
+}
+
+.import-intro {
+    margin: 0 0 18px;
 }
 
 /* ── Start form ─────────────────────────────────────────────────── */
 
 .import-start-form {
     max-width: 640px;
-    margin-top: 18px;
 }
 
 .import-start-form input[type="text"] {

@@ -1,12 +1,12 @@
 //! Manual import wizard (#122).
 //!
-//! `GET /library/import` renders the wizard: the start form when no
+//! `GET /system/import` renders the wizard: the start form when no
 //! session is in the URL, the scanning / failed states while the
 //! preview job runs, and the per-series preview once it is ready.
-//! `POST /library/import` validates the start form and kicks off
+//! `POST /system/import` validates the start form and kicks off
 //! `services::manual_import::start_preview`, then redirects to the
 //! session URL. The override controls on each preview card post to
-//! `/library/import/{session}/group/{idx}` and get the re-rendered
+//! `/system/import/{session}/group/{idx}` and get the re-rendered
 //! card back (HTMX) or a redirect to the page (plain form POST).
 //!
 //! All filesystem and AniList work lives in `services::manual_import`;
@@ -148,7 +148,7 @@ struct UnmatchedView {
 }
 
 #[derive(Template)]
-#[template(path = "partials/library/import_group.html")]
+#[template(path = "partials/system/import_group.html")]
 struct GroupPartial {
     session_id: String,
     g: GroupCard,
@@ -158,6 +158,8 @@ struct GroupPartial {
 #[template(path = "import.html")]
 struct ImportTemplate {
     page: String,
+    /// Active sidebar entry for the shared System sidebar partial.
+    tab: &'static str,
     title_language: String,
     media_root: String,
     /// `start` / `scanning` / `ready` / `importing` / `done` / `failed`.
@@ -393,6 +395,7 @@ fn base_template(ctx: &RenderContext) -> ImportTemplate {
     ImportTemplate {
         // Reached from System → Import Library; highlight that nav entry.
         page: "system".to_string(),
+        tab: "import",
         title_language: ctx.title_pref.clone(),
         media_root: ctx.media_root.clone(),
         step: "start",
@@ -436,7 +439,7 @@ fn render(t: ImportTemplate) -> Html<String> {
 }
 
 fn session_url(id: &str) -> String {
-    format!("/library/import?session={id}")
+    format!("/system/import?session={id}")
 }
 
 pub async fn page(State(state): State<AppState>, Query(q): Query<PageQuery>) -> Html<String> {
@@ -765,7 +768,7 @@ pub async fn discard(
     if session::is_valid_id(&session_id) {
         session::remove(&state.import_sessions, &session_id);
     }
-    htmx_aware_redirect(is_htmx, "/library/import")
+    htmx_aware_redirect(is_htmx, "/system/import")
 }
 
 #[cfg(test)]
@@ -873,12 +876,12 @@ mod router_tests {
 
     fn router(state: AppState) -> Router {
         Router::new()
-            .route("/library/import", get(page).post(start))
+            .route("/system/import", get(page).post(start))
             .route(
-                "/library/import/{session_id}/group/{idx}",
+                "/system/import/{session_id}/group/{idx}",
                 post(group_action),
             )
-            .route("/library/import/{session_id}/discard", post(discard))
+            .route("/system/import/{session_id}/discard", post(discard))
             .with_state(state)
     }
 
@@ -1004,10 +1007,16 @@ mod router_tests {
     async fn start_form_renders_and_warns_without_media_root() {
         let db = in_memory_pool().await;
         let app = router(build_test_app_state(db, None));
-        let (status, body) = get_page(&app, "/library/import").await;
+        let (status, body) = get_page(&app, "/system/import").await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Import Existing Library"));
+        assert!(body.contains("Import an existing library"));
         assert!(body.contains("Scan folder"));
+        // Rendered inside the System shell with the sidebar entry active.
+        assert!(body.contains("tabbed-sidebar"), "{body}");
+        assert!(
+            body.contains("href=\"/system/import\" class=\"tabbed-side-tab active\""),
+            "{body}"
+        );
         assert!(
             body.contains("No media root set"),
             "warns when media root is unset"
@@ -1024,10 +1033,10 @@ mod router_tests {
         let state = build_test_app_state(db, None);
         let id = ready_session(&state);
         let app = router(state);
-        let (_, body) = get_page(&app, "/library/import").await;
+        let (_, body) = get_page(&app, "/system/import").await;
         assert!(body.contains("Recent scans"), "{body}");
         assert!(
-            body.contains(&format!("/library/import?session={id}")),
+            body.contains(&format!("/system/import?session={id}")),
             "{body}"
         );
         assert!(body.contains("Ready to review"), "{body}");
@@ -1037,11 +1046,11 @@ mod router_tests {
     async fn unknown_or_malformed_session_shows_expired() {
         let db = in_memory_pool().await;
         let app = router(build_test_app_state(db, None));
-        let (status, body) = get_page(&app, "/library/import?session=nope").await;
+        let (status, body) = get_page(&app, "/system/import?session=nope").await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("That preview has expired"));
         let fresh = session::mint_id();
-        let (_, body) = get_page(&app, &format!("/library/import?session={fresh}")).await;
+        let (_, body) = get_page(&app, &format!("/system/import?session={fresh}")).await;
         assert!(body.contains("That preview has expired"));
     }
 
@@ -1056,7 +1065,7 @@ mod router_tests {
 
         let resp = post_form(
             &app,
-            "/library/import",
+            "/system/import",
             "path=%2Fdefinitely%2Fmissing%2Fdir&mode=copy&include_hidden=1",
             false,
         )
@@ -1099,7 +1108,7 @@ mod router_tests {
             "path={}&mode=hardlink",
             urlencoding::encode(src.to_str().unwrap())
         );
-        let resp = post_form(&app, "/library/import", &form, true).await;
+        let resp = post_form(&app, "/system/import", &form, true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let location = resp
             .headers()
@@ -1108,15 +1117,15 @@ mod router_tests {
             .unwrap_or("")
             .to_string();
         assert!(
-            location.starts_with("/library/import?session="),
+            location.starts_with("/system/import?session="),
             "{location}"
         );
         let session_id = location
-            .trim_start_matches("/library/import?session=")
+            .trim_start_matches("/system/import?session=")
             .to_string();
         assert!(session::is_valid_id(&session_id));
 
-        let resp = post_form(&app, "/library/import", &form, false).await;
+        let resp = post_form(&app, "/system/import", &form, false).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
         // The job runs in the background; poll the page until Ready.
@@ -1153,7 +1162,7 @@ mod router_tests {
         let state = build_test_app_state(db, None);
         let id = ready_session(&state);
         let app = router(state);
-        let (status, body) = get_page(&app, &format!("/library/import?session={id}")).await;
+        let (status, body) = get_page(&app, &format!("/system/import?session={id}")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("import-group-new"), "new-series card");
         assert!(body.contains("Show Alternative"), "alternative offered");
@@ -1178,7 +1187,7 @@ mod router_tests {
         let state = build_test_app_state(db, None);
         let id = ready_session(&state);
         let app = router(state.clone());
-        let uri = format!("/library/import/{id}/group/0");
+        let uri = format!("/system/import/{id}/group/0");
 
         // Skip: card re-renders as skipped, files gone from the table.
         let resp = post_form(&app, &uri, "action=skip", true).await;
@@ -1200,7 +1209,7 @@ mod router_tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(loc, format!("/library/import?session={id}#import-group-0"));
+        assert_eq!(loc, format!("/system/import?session={id}#import-group-0"));
         assert!(!session::get(&state.import_sessions, &id).unwrap().groups[0].skipped);
 
         // Toggle a file off: row shows Excluded and counts drop.
@@ -1271,7 +1280,7 @@ mod router_tests {
             });
         });
         let app = router(state);
-        let (_, body) = get_page(&app, &format!("/library/import?session={id}")).await;
+        let (_, body) = get_page(&app, &format!("/system/import?session={id}")).await;
         assert!(body.contains("import-group-merge"), "{body}");
         assert!(body.contains("In your library as"));
         assert!(body.contains("/series/100"));
@@ -1294,7 +1303,7 @@ mod router_tests {
         let ghost = session::mint_id();
         let resp = post_form(
             &app,
-            &format!("/library/import/{ghost}/group/0"),
+            &format!("/system/import/{ghost}/group/0"),
             "action=skip",
             true,
         )
@@ -1302,7 +1311,7 @@ mod router_tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().contains_key("HX-Redirect"));
 
-        let resp = post_form(&app, &format!("/library/import/{id}/discard"), "", false).await;
+        let resp = post_form(&app, &format!("/system/import/{id}/discard"), "", false).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert_eq!(
             resp.headers()
@@ -1310,7 +1319,7 @@ mod router_tests {
                 .unwrap()
                 .to_str()
                 .unwrap(),
-            "/library/import"
+            "/system/import"
         );
         assert!(session::get(&state.import_sessions, &id).is_none());
     }
@@ -1342,10 +1351,10 @@ mod import_router_tests {
 
     fn router(state: AppState) -> Router {
         Router::new()
-            .route("/library/import", get(page).post(start))
-            .route("/library/import/{session_id}/confirm", post(confirm))
-            .route("/library/import/{session_id}/cancel", post(cancel))
-            .route("/library/import/{session_id}/discard", post(discard))
+            .route("/system/import", get(page).post(start))
+            .route("/system/import/{session_id}/confirm", post(confirm))
+            .route("/system/import/{session_id}/cancel", post(cancel))
+            .route("/system/import/{session_id}/discard", post(discard))
             .with_state(state)
     }
 
@@ -1485,20 +1494,20 @@ mod import_router_tests {
         let app = router(state.clone());
 
         // Ready page carries the confirm bar.
-        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        let body = get_page(&app, &format!("/system/import?session={id}")).await;
         assert!(body.contains("Import 2 files"), "{body}");
         assert!(body.contains("data-ryokan-confirm-title"));
 
-        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/confirm"), true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             resp.headers().get("HX-Redirect").unwrap().to_str().unwrap(),
-            format!("/library/import?session={id}")
+            format!("/system/import?session={id}")
         );
 
         let mut body = String::new();
         for _ in 0..1500 {
-            body = get_page(&app, &format!("/library/import?session={id}")).await;
+            body = get_page(&app, &format!("/system/import?session={id}")).await;
             if !body.contains("import-importing") {
                 break;
             }
@@ -1516,7 +1525,7 @@ mod import_router_tests {
 
         // A second confirm on the finished session is refused (not
         // Ready) and just routes back to the page.
-        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), false).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/confirm"), false).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         unsafe {
             std::env::remove_var("RYOKAN_ANILIST_API_BASE");
@@ -1537,9 +1546,9 @@ mod import_router_tests {
         let id = session_with_files(&state, &tmp.path().join("src"), false);
         let app = router(state.clone());
 
-        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        let body = get_page(&app, &format!("/system/import?session={id}")).await;
         assert!(body.contains("Nothing to import"), "{body}");
-        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/confirm"), true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(resp.headers().get("HX-Redirect").is_none());
         let body = body_text(resp).await;
@@ -1560,7 +1569,7 @@ mod import_router_tests {
         let state = build_test_app_state(db, None);
         let id = session_with_files(&state, &tmp.path().join("src"), true);
         let app = router(state.clone());
-        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/confirm"), true).await;
         let body = body_text(resp).await;
         assert!(
             body.contains("Set a media root under Settings before importing"),
@@ -1576,7 +1585,7 @@ mod import_router_tests {
         let id = session_with_files(&state, &tmp.path().join("src"), true);
         let app = router(state.clone());
 
-        let resp = post_empty(&app, &format!("/library/import/{id}/cancel"), false).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/cancel"), false).await;
         assert_eq!(resp.status(), StatusCode::SEE_OTHER);
         assert!(
             !session::get(&state.import_sessions, &id)
@@ -1589,13 +1598,13 @@ mod import_router_tests {
         session::update(&state.import_sessions, &id, |s| {
             s.status = SessionStatus::Importing
         });
-        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        let body = get_page(&app, &format!("/system/import?session={id}")).await;
         assert!(body.contains("import-importing"), "{body}");
         assert!(
             body.contains(&format!("data-import-progress=\"{id}-import\"")),
             "{body}"
         );
-        let resp = post_empty(&app, &format!("/library/import/{id}/cancel"), true).await;
+        let resp = post_empty(&app, &format!("/system/import/{id}/cancel"), true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(
             session::get(&state.import_sessions, &id)
@@ -1633,7 +1642,7 @@ mod import_router_tests {
             s.status = SessionStatus::Done(Box::new(report));
         });
         let app = router(state);
-        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        let body = get_page(&app, &format!("/system/import?session={id}")).await;
         assert!(body.contains("Import finished with errors"), "{body}");
         assert!(body.contains("2.0 KiB"), "{body}");
         assert!(body.contains("/series/100"));

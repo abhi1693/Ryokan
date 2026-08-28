@@ -11,12 +11,12 @@
         </div>
         <div class="import-group-actions">
             {% if g.skipped %}
-            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
+            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
                 <input type="hidden" name="action" value="unskip">
                 <button type="submit" class="btn btn-secondary btn-sm">Include</button>
             </form>
             {% else %}
-            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
+            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML">
                 <input type="hidden" name="action" value="skip">
                 <button type="submit" class="btn btn-secondary btn-sm">Skip</button>
             </form>
@@ -64,21 +64,21 @@
         <div class="import-alternatives">
             <span class="import-pickers-label">{% if g.pick.is_some() %}Not right? Pick another:{% else %}Other results:{% endif %}</span>
             {% for a in g.alternatives %}
-            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
                 <input type="hidden" name="action" value="pick">
                 <input type="hidden" name="candidate" value="{{ a.index }}">
                 <button type="submit" class="btn btn-secondary btn-sm" title="{{ a.subtitle }}">{{ a.title }}{% if !a.year.is_empty() %} ({{ a.year }}){% endif %} &middot; {{ a.format }}</button>
             </form>
             {% endfor %}
             {% if g.pick.is_some() %}
-            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
                 <input type="hidden" name="action" value="unpick">
                 <button type="submit" class="btn btn-ghost btn-sm">None of these</button>
             </form>
             {% endif %}
         </div>
         {% endif %}
-        <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-research-form">
+        <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-research-form">
             <input type="hidden" name="action" value="research">
             <label for="import-query-{{ g.idx }}" class="visually-hidden">Search AniList for a different title</label>
             <input type="text" id="import-query-{{ g.idx }}" name="query" value="{{ g.query }}" autocomplete="off" spellcheck="false">
@@ -98,11 +98,11 @@
                 <tr>
                     <th class="import-col-check">
                         <span class="import-select-all">
-                            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
                                 <input type="hidden" name="action" value="select_all">
                                 <button type="submit" class="btn btn-ghost btn-sm" title="Include every file">All</button>
                             </form>
-                            <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                            <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
                                 <input type="hidden" name="action" value="select_none">
                                 <button type="submit" class="btn btn-ghost btn-sm" title="Exclude every file">None</button>
                             </form>
@@ -120,7 +120,7 @@
                 {% for f in g.files %}
                 <tr class="import-file import-file-{{ f.status_class }}">
                     <td class="import-col-check">
-                        <form method="post" action="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/library/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+                        <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
                             <input type="hidden" name="action" value="toggle_file">
                             <input type="hidden" name="file" value="{{ f.idx }}">
                             <input type="checkbox" name="on" value="1"{% if f.selected %} checked{% endif %} onchange="this.form.requestSubmit()" aria-label="Include {{ f.file_name }}">

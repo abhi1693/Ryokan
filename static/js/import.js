@@ -1,4 +1,4 @@
-// Manual import wizard (/library/import, issue #122).
+// Manual import wizard (/system/import, issue #122).
 //
 // The only client-side behavior: while a preview is scanning or an
 // import is running, watch its progress job through the shared sticky
@@ -40,7 +40,7 @@ ryokanRegisterPageInit('import-progress', {
                 try { already = sessionStorage.getItem(key) === '1'; } catch (_) {}
                 if (!stage && already) return;
                 try { sessionStorage.setItem(key, '1'); } catch (_) {}
-                window.location.href = '/library/import?session=' + encodeURIComponent(id);
+                window.location.href = '/system/import?session=' + encodeURIComponent(id);
             }
         });
     },
