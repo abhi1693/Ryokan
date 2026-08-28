@@ -65,7 +65,7 @@
         <li>
             <a href="/system/import?session={{ r.id }}" class="import-recent-link">
                 <code class="import-recent-root" title="{{ r.root }}">{{ r.root }}</code>
-                <span class="import-recent-meta">{{ r.status }} &middot; {{ r.mode_label }}</span>
+                {% if r.status != "Ready to review" %}<span class="import-recent-meta">{{ r.status }}</span>{% endif %}
             </a>
         </li>
         {% endfor %}
@@ -190,10 +190,6 @@
 {% if !notice.is_empty() %}
 <div class="alert alert-error" role="alert">{{ notice }}</div>
 {% endif %}
-
-<div class="alert alert-warn import-readonly-note" role="status">
-    <strong>Nothing has been written yet.</strong> Check the matches below, untick files to leave out, skip whole series, then import from the bar at the bottom.
-</div>
 
 <div id="import-groups">
 {% for g in groups %}

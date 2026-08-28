@@ -7,7 +7,7 @@
         <div class="import-group-title">
             <span class="import-kind-badge import-kind-{{ g.kind }}">{{ g.kind_label }}</span>
             <h3>{{ g.parsed_title }}{% if !g.season_label.is_empty() %} <span class="import-season">{{ g.season_label }}</span>{% endif %}</h3>
-            <span class="import-group-meta">{{ g.file_count }} file{% if g.file_count != 1 %}s{% endif %} &middot; {{ g.size }}{% if !g.year_label.is_empty() %} &middot; {{ g.year_label }}{% endif %}</span>
+            <span class="import-group-meta">{{ g.file_count }} file{% if g.file_count != 1 %}s{% endif %} &middot; {{ g.size }}{% if !g.year_label.is_empty() %} &middot; {{ g.year_label }}{% endif %}{% if g.title_from_folder %} &middot; <span title="The series name was read from the folder, not the filenames">name from folder</span>{% endif %}</span>
         </div>
         <div class="import-group-actions">
             {% if g.skipped %}
@@ -49,11 +49,7 @@
         {% else %}
         <div class="import-match-info">
             <p class="import-match-title">{% if !g.search_error.is_empty() %}Search failed{% else %}No match found{% endif %}</p>
-            {% if !g.search_error.is_empty() %}
-            <p class="form-hint">{{ g.search_error }}</p>
-            {% else %}
-            <p class="form-hint">Nothing came back for &ldquo;{{ g.query }}&rdquo;. Search for a different title, or skip this series.</p>
-            {% endif %}
+            {% if !g.search_error.is_empty() %}<p class="form-hint">{{ g.search_error }}</p>{% endif %}
         </div>
         {% endif %}
     </div>
@@ -137,7 +133,7 @@
                             <button type="submit" class="btn btn-ghost btn-sm import-nojs-apply">Apply</button>
                         </form>
                     </td>
-                    <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span>{% if f.title_from_folder %} <span class="tag import-tag-dim" title="Series name read from the folder, not the filename">folder</span>{% endif %}</td>
+                    <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span></td>
                     <td class="import-nowrap">{{ f.episode_label }}{% if !f.episode_note.is_empty() %} <span class="import-have" title="Renumbered into the AniList entry's own numbering">{{ f.episode_note }}</span>{% endif %}</td>
                     <td class="import-nowrap">{{ f.quality_label }}</td>
                     <td class="import-nowrap">

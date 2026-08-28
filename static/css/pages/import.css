@@ -526,6 +526,10 @@
     white-space: nowrap;
 }
 
+/* The file-table checkboxes join the shared custom checkbox rules in
+   forms.css (.checkbox-row and friends) so they paint the accent box
+   instead of the browser's native control. */
+
 .import-select-all {
     display: inline-flex;
     gap: 2px;

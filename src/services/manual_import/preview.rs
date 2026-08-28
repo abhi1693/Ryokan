@@ -213,16 +213,14 @@ pub fn episode_label(episode: Option<i32>) -> String {
     }
 }
 
+/// Destination for the preview, relative to the media root: every
+/// file lands under it, so repeating the root on every row is noise.
+/// The import job builds the absolute path itself.
 fn dest_for(media_root: &str, folder: &str, file_name: &str) -> String {
-    if media_root.is_empty() {
+    if media_root.is_empty() || folder.is_empty() {
         return String::new();
     }
-    std::path::Path::new(media_root)
-        .join(folder)
-        .join("Season 01")
-        .join(file_name)
-        .to_string_lossy()
-        .into_owned()
+    format!("{folder}/Season 01/{file_name}")
 }
 
 pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupView {
@@ -509,7 +507,7 @@ mod tests {
         assert_eq!(v.files[0].episode_label, "E01");
         assert_eq!(
             v.files[0].dest,
-            "/media/Show_ The Series/Season 01/[G] Show - 01 [1080p].mkv"
+            "Show_ The Series/Season 01/[G] Show - 01 [1080p].mkv"
         );
         assert_eq!(v.files[1].status, FileStatus::NoEpisodeNumber);
         assert!(v.files[1].dest.is_empty());
@@ -587,7 +585,7 @@ mod tests {
         assert_eq!(v.files[0].existing_quality, "BD-1080p");
         assert_eq!(
             v.files[1].dest,
-            "/media/Show Folder/Season 01/[G] Show - 02 [BD 1080p].mkv"
+            "Show Folder/Season 01/[G] Show - 02 [BD 1080p].mkv"
         );
         assert_eq!(v.counts.present, 1);
         assert_eq!(v.counts.replace, 1);

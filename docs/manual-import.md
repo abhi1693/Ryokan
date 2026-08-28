@@ -23,7 +23,7 @@ Matching each series is one AniList lookup, and AniList allows about thirty a mi
 
 ## Reading the preview
 
-The strip at the top counts series and files, how many are new, how many are already in your library, how many Ryokan could not match, and how many files it would write. Below it, one card per series, colored by outcome:
+The strip at the top counts series and files and how many are new, already in your library, unmatched, or skipped; the bar at the bottom says how many files the import would write. Between them, one card per series, colored by outcome:
 
 - **New series** (green): matched on AniList and not in your library. Importing would create it.
 - **Already in library** (blue): matched to a series you already track, by AniList id (or MAL id for series added through the MAL fallback), never by comparing titles. The card links to the existing series page.
@@ -32,7 +32,7 @@ The strip at the top counts series and files, how many are new, how many are alr
 
 ### How Ryokan reads names
 
-The series name comes from the filename first (`[SubsPlease] Sousou no Frieren - 05 (1080p).mkv` reads as *Sousou no Frieren*). When a filename carries no name at all (`01.mkv`, `S01E05.mkv`, `Episode 07.mkv`), Ryokan uses the folder above it, skipping folders like `Season 01`, `Specials`, or `Extras` on the way up, so `Anime/Naruto/Season 01/01.mkv` reads as *Naruto*. Rows that took their name from the folder carry a small **folder** tag.
+The series name comes from the filename first (`[SubsPlease] Sousou no Frieren - 05 (1080p).mkv` reads as *Sousou no Frieren*). When a filename carries no name at all (`01.mkv`, `S01E05.mkv`, `Episode 07.mkv`), Ryokan uses the folder above it, skipping folders like `Season 01`, `Specials`, or `Extras` on the way up, so `Anime/Naruto/Season 01/01.mkv` reads as *Naruto*. A card whose series name was read from a folder says **name from folder** in its header.
 
 Episode numbers use the same parser as the rest of Ryokan, so the `E07` in the preview is the number the import would record. Files that Ryokan cannot number (creditless openings and endings, bare specials, files with no digits) are listed but marked **No episode number** and would not be imported.
 
@@ -53,7 +53,7 @@ The episode column never shows a season: each AniList season is its own series i
 
 ### The file table
 
-Each row shows the file, its episode, the quality Ryokan reads from the filename, what the import would do with it, and where it would land. The action column is one of:
+Each row shows the file, its episode, the quality Ryokan reads from the filename, what the import would do with it, and where it would land (relative to the media root). The action column is one of:
 
 - **Import**: the episode is not in your library yet.
 - **Replace**: you have the episode at a lower quality and the import would upgrade it.

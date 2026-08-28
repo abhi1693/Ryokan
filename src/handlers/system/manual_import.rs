@@ -130,6 +130,8 @@ struct GroupCard {
     /// `Season 2` when the files carry a season past the first.
     season_label: String,
     year_label: String,
+    /// The series name was read from a folder rather than filenames.
+    title_from_folder: bool,
     query: String,
     file_count: usize,
     size: String,
@@ -159,7 +161,6 @@ struct RecentView {
     root: String,
     /// `Scanning` / `Ready to review` / `Importing` / `Imported` / `Failed`.
     status: &'static str,
-    mode_label: &'static str,
 }
 
 fn recent_status(status: &SessionStatus) -> &'static str {
@@ -237,7 +238,6 @@ struct SummaryStripPartial {
     stats: WalkStats,
     total_size: String,
     summary: SessionSummary,
-    write_size: String,
     oob: bool,
 }
 
@@ -266,7 +266,6 @@ fn oob_totals(session: &ImportSession, ctx: &RenderContext) -> String {
         stats: session.stats.clone(),
         total_size: human_bytes(session.stats.total_bytes),
         summary: summary.clone(),
-        write_size: write_size.clone(),
         oob: true,
     };
     let bar = ConfirmBarPartial {
@@ -409,6 +408,10 @@ fn build_card(
             .map(|s| format!("Season {s}"))
             .unwrap_or_default(),
         year_label: group.year.map(|y| y.to_string()).unwrap_or_default(),
+        title_from_folder: group
+            .files
+            .iter()
+            .any(|f| f.title_source == manual_import::parse::TitleSource::ParentFolder),
         query: group.query.clone(),
         file_count: group.files.len(),
         size: human_bytes(group.total_bytes()),
@@ -537,7 +540,6 @@ fn recent_sessions(state: &AppState) -> Vec<RecentView> {
             id: s.id.clone(),
             root: s.root.display().to_string(),
             status: recent_status(&s.status),
-            mode_label: s.mode.label(),
         })
         .collect()
 }
@@ -1218,6 +1220,7 @@ mod router_tests {
         let db = in_memory_pool().await;
         let state = build_test_app_state(db, None);
         let id = ready_session(&state);
+        let state_ref = state.clone();
         let app = router(state);
         let (_, body) = get_page(&app, "/system/import").await;
         assert!(body.contains("Recent scans"), "{body}");
@@ -1225,7 +1228,14 @@ mod router_tests {
             body.contains(&format!("/system/import?session={id}")),
             "{body}"
         );
-        assert!(body.contains("Ready to review"), "{body}");
+        // A ready scan is listed without a status label; only a
+        // running / failed one says so.
+        assert!(!body.contains("Ready to review"), "{body}");
+        session::update(&state_ref.import_sessions, &id, |s| {
+            s.status = SessionStatus::Importing
+        });
+        let (_, body) = get_page(&app, "/system/import").await;
+        assert!(body.contains("import-recent-meta\">Importing"), "{body}");
     }
 
     #[tokio::test]
@@ -1332,7 +1342,7 @@ mod router_tests {
         assert!(body.contains("Files with no series hint"), "{body}");
         assert!(body.contains("Season 01/01.mkv"));
         assert!(body.contains(">E01<"));
-        assert!(body.contains("Nothing has been written yet"));
+        assert!(body.contains("Discard preview"));
         let s = session::get(&state.import_sessions, &session_id).unwrap();
         assert_eq!(s.status, SessionStatus::Ready);
         assert_eq!(s.stats.files, 1);
@@ -1353,17 +1363,14 @@ mod router_tests {
         assert!(body.contains("import-group-new"), "new-series card");
         assert!(body.contains("Show Alternative"), "alternative offered");
         assert!(
-            body.contains("/media/Show/Season 01/Show - 01.mkv"),
+            body.contains("Show/Season 01/Show - 01.mkv"),
             "projected destination"
         );
         assert!(
             body.contains("<strong>1</strong> new"),
             "summary counts one new series"
         );
-        assert!(
-            body.contains("Would write <strong>2</strong> files"),
-            "{body}"
-        );
+        assert!(body.contains("Import 2 files"), "{body}");
     }
 
     #[tokio::test]
@@ -1532,7 +1539,7 @@ mod router_tests {
             "episode 1 already have"
         );
         assert!(body.contains("have BD-1080p"));
-        assert!(body.contains("/media/Show On Disk/Season 01/Show - 02.mkv"));
+        assert!(body.contains("Show On Disk/Season 01/Show - 02.mkv"));
         assert!(body.contains("<strong>1</strong> already in library"));
     }
 
