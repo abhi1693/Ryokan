@@ -3,12 +3,8 @@
    scanning state, the summary strip, and the per-series cards. */
 
 .import-title {
-    margin: 0 0 6px;
+    margin: 0 0 16px;
     font-size: 17px;
-}
-
-.import-intro {
-    margin: 0 0 18px;
 }
 
 /* ── Start form ─────────────────────────────────────────────────── */
@@ -23,17 +19,13 @@
 
 .import-checkbox {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 10px;
     padding: 10px 12px;
     margin: 0 0 10px;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     background: var(--bg-elevated);
-}
-
-.import-checkbox input {
-    margin-top: 3px;
 }
 
 .import-checkbox strong {

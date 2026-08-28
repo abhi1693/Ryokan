@@ -20,7 +20,6 @@
 <div class="rss-panel">
 <div class="cf-section">
 <h3 class="import-title">Import an existing library</h3>
-<p class="form-hint import-intro">Point Ryokan at a folder of anime you already have. It reads the filenames, matches each series on AniList, and shows what it would import before anything changes on disk.</p>
 
 {% if media_root.is_empty() %}
 <div class="alert alert-warn" role="status">
@@ -36,7 +35,6 @@
     <div class="form-group">
         <label for="import-path">Folder to scan</label>
         <input type="text" id="import-path" name="path" value="{{ form.path }}" placeholder="/mnt/anime" autocomplete="off" spellcheck="false" required>
-        <p class="form-hint">Scanned recursively, up to eight levels deep. {% if !media_root.is_empty() %}Your media root (<code>{{ media_root }}</code>) and recycle bin are skipped automatically.{% endif %}</p>
     </div>
     <div class="form-group">
         <label for="import-mode">How files reach the media root</label>
@@ -45,21 +43,14 @@
             <option value="copy"{% if form.mode == "copy" %} selected{% endif %}>Copy</option>
             <option value="move"{% if form.mode == "move" %} selected{% endif %}>Move</option>
         </select>
-        <p class="form-hint">Hardlink keeps the original in place and uses no extra space when both folders are on the same filesystem. Copy doubles the disk use. Move frees the source folder.</p>
     </div>
     <label class="checkbox-row import-checkbox">
         <input type="checkbox" name="follow_symlinks" value="1"{% if form.follow_symlinks %} checked{% endif %}>
-        <span>
-            <strong>Follow symlinks</strong>
-            <span class="form-hint">Off by default. Libraries that symlink into a downloads folder would otherwise import the same file twice.</span>
-        </span>
+        <span><strong>Follow symlinks</strong></span>
     </label>
     <label class="checkbox-row import-checkbox">
         <input type="checkbox" name="include_hidden" value="1"{% if form.include_hidden %} checked{% endif %}>
-        <span>
-            <strong>Include hidden files and folders</strong>
-            <span class="form-hint">Dot-prefixed entries. NAS sidecar folders such as <code>@eaDir</code> are always skipped.</span>
-        </span>
+        <span><strong>Include hidden files and folders</strong></span>
     </label>
     <div class="import-start-actions">
         <button type="submit" class="btn btn-primary"{% if media_root.is_empty() %} disabled{% endif %}>Scan folder</button>
@@ -69,7 +60,6 @@
 {% if !recent.is_empty() %}
 <section class="import-recent">
     <h3>Recent scans</h3>
-    <p class="form-hint">Scans and imports from the last two hours, including any still running.</p>
     <ul class="import-recent-list">
         {% for r in recent %}
         <li>
