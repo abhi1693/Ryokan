@@ -19,6 +19,7 @@
 //! covered by integration observation when the release binary runs
 //! against a real download directory.
 
+mod batch_preflight;
 mod file_ops;
 mod filenames;
 mod grab_claims_episode;

@@ -89,6 +89,29 @@ fn starts_with_non_episode_marker(rest: &str) -> bool {
     false
 }
 
+/// Parse the rightmost bare two- or three-digit dot-delimited token.
+///
+/// Rightmost is deliberate: numeric title tokens such as `86.Eighty.Six`
+/// precede the episode token (`86.Eighty.Six.023...`). Four-digit years and
+/// resolutions, one-digit audio channel tokens, and alphanumeric codec tokens
+/// remain ineligible. A glued revision suffix (`023v2`) is accepted.
+fn parse_dot_delimited_episode(lower: &str) -> Option<i32> {
+    lower.split('.').rev().find_map(|token| {
+        let digits = token
+            .split_once('v')
+            .filter(|(_, version)| {
+                !version.is_empty() && version.chars().all(|c| c.is_ascii_digit())
+            })
+            .map(|(digits, _)| digits)
+            .unwrap_or(token);
+        if (2..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) {
+            digits.parse().ok()
+        } else {
+            None
+        }
+    })
+}
+
 /// Sanitize a string for use as a folder name on disk.
 /// Replaces filesystem-unsafe characters and trims leading/trailing dots and whitespace.
 pub fn sanitize_folder_name(s: &str) -> String {
@@ -333,6 +356,12 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // a captured 1-3 digit group.
     if let Some(caps) = RE_OVA_EP.captures(lower) {
         let e: i32 = caps.get(1)?.as_str().parse().ok()?;
+        return Some((None, e));
+    }
+
+    // Dot-tokenized bare episode number. This covers older complete-series
+    // packs whose files are shaped `Title.001...` rather than `Title - 001`.
+    if let Some(e) = parse_dot_delimited_episode(lower) {
         return Some((None, e));
     }
 
@@ -812,6 +841,47 @@ mod tests {
         assert_eq!(
             parse("[HGS-Renc]_Crusher_Joe_-_02_-_The_Ice_Prison_[BD1080][HEVC].mkv"),
             Some((None, 2))
+        );
+    }
+
+    #[test]
+    fn dot_delimited_bare_episode_number_from_complete_series_pack() {
+        // Regression: the 153-file [SoM] Dragon Ball pack uses a bare
+        // dot-delimited episode token. Returning None made post-processing
+        // fall back to the grab's first episode for every file, repeatedly
+        // replacing S01E01 and destroying the batch during move mode.
+        assert_eq!(
+            parse("[SoM] Dragon.Ball.001.V2.DVD.480p.AC3.x264.mkv"),
+            Some((None, 1))
+        );
+        assert_eq!(
+            parse("[SoM] Dragon.Ball.023.V2.DVD.480p.AC3.x264.mkv"),
+            Some((None, 23))
+        );
+        assert_eq!(
+            parse("[SoM] Dragon.Ball.153.DVD.480p.AC3.x264.mkv"),
+            Some((None, 153))
+        );
+    }
+
+    #[test]
+    fn dot_delimited_parser_ignores_audio_year_and_resolution_tokens() {
+        assert_eq!(parse("Show.1996.1080p.DDP5.1.x265.mkv"), None);
+        assert_eq!(
+            parse("Show.S01E07.1080p.DDP5.1.x265.mkv"),
+            Some((Some(1), 7))
+        );
+    }
+
+    #[test]
+    fn dot_delimited_parser_uses_episode_after_numeric_title_token() {
+        assert_eq!(
+            parse("86.Eighty.Six.023.1080p.WEB-DL.DDP2.0.x264.mkv"),
+            Some((None, 23))
+        );
+        assert_eq!(
+            parse("86.Eighty.Six.023v2.1080p.WEB-DL.mkv"),
+            Some((None, 23))
         );
     }
 

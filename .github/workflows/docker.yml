@@ -11,7 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   # Lowercased because GHCR requires lowercase image names and the repo is "Ryokan".
-  IMAGE_NAME: johnthreekay/ryokan
+  IMAGE_NAME: abhi1693/ryokan
 
 jobs:
   # Per-platform job: builds the image on a native runner for its target
