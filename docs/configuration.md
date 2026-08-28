@@ -70,6 +70,8 @@ Day-to-day knobs.
 - **RSS Sync Interval (minutes)**: how often the background RSS poller runs. Default 15 minutes; minimum 1, maximum 60.
 - **File operation mode**: `hardlink` (default; keeps the torrent seeding by sharing the same inode between the download folder and the library), `copy`, or `move`. Hardlink automatically falls back to copy when the source and destination are on different filesystems (where hardlinks aren't possible).
 - **Preferred Title Language**: `romaji` / `english` / `native`. This is display-only. Scoring and search match across all three regardless of which one's preferred.
+- **Recycle bin path**: empty by default, which means deletes are permanent. Set it to a directory (inside the container, like the media root) and deleting an episode, removing a series with its files, or replacing a file during an upgrade moves the files there instead. Each entry keeps the video plus its `.nfo`, subtitles, and thumbnail, and the Library page's Recycle Bin view can restore or permanently delete it. Keep it on the same filesystem as the media root so the move is an instant rename that preserves seeding hardlinks. On a different filesystem Ryokan copies, verifies the size, then deletes. If the path is set but Ryokan cannot write to it, deletes are refused until you fix it or clear the path.
+- **Purge after (days)**: how long recycled items survive before the hourly cleanup task deletes them for good. Default 14. `0` keeps everything until you empty the bin manually.
 
 ## On the System page (not Settings)
 
