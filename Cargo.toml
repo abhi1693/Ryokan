@@ -86,6 +86,11 @@ path = "tests/rss_user_feed_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "nyaa_filename_corpus"
+path = "tests/nyaa_filename_corpus.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "proptest_invariants"
 path = "tests/proptest_invariants.rs"
 required-features = ["test-support"]
