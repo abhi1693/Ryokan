@@ -85,7 +85,7 @@
 .recycle-col-when { width: 8%; }
 .recycle-col-purge { width: 10%; }
 .recycle-col-size { width: 7%; }
-.recycle-col-actions { width: 190px; }
+.recycle-col-actions { width: 232px; }
 
 .recycle-path {
     display: block;
@@ -111,10 +111,13 @@
     white-space: nowrap;
 }
 
-/* Breathing room between the last button and the table edge. */
+/* Breathing room between the last button and the table edge. The
+   column is sized for both buttons plus this padding; with
+   table-layout: fixed a narrower column would just let the buttons
+   overflow the cell and swallow the padding. */
 .recycle-table th:last-child,
 .recycle-table td:last-child {
-    padding-right: 18px;
+    padding-right: 20px;
 }
 
 /* Filters apply on change; the submit button is a no-JS / keyboard
