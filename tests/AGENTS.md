@@ -18,6 +18,7 @@ Helpers exposed: `in_memory_pool`, `build_test_app_state`, `logged_in_session`, 
 - Unit tests see it via `cfg(test)`.
 - Integration tests opt in via `cargo test --features test-support` or `cargo nextest run --features test-support`.
 - Each `[[test]]` target in `Cargo.toml` declares `required-features = ["test-support"]` so plain `cargo test` silently skips integration targets rather than failing the build.
+- **Use `cargo t` (nextest), not bare `cargo test`, when judging a red run.** nextest runs one process per test; `cargo test` shares one process per target, so process-wide `LazyLock` state leaks between tests. Known instance: the torznab 429 test populates the per-indexer cooldown table, and ~9 later torznab tests then fail under `cargo test` while passing under `cargo t`. Those are runner artifacts, not regressions (this misled a contributor in #198).
 - Release binaries / Docker images compile without the feature so test helpers don't ship to production.
 - CI flips the flag on by default.
 
