@@ -108,7 +108,7 @@ pub struct FileView {
     pub idx: usize,
     pub rel_path: String,
     pub file_name: String,
-    /// `S01E07`, or `-` when no episode number parsed.
+    /// `E07`, or `-` when no episode number parsed.
     pub episode_label: String,
     pub quality_label: String,
     /// What Ryokan holds for this episode already, for the Replace /
@@ -200,9 +200,12 @@ pub fn unique_folder_name(base: &str, ctx: &ProjectionContext<'_>) -> (String, b
     (format!("{base} ({})", ctx.disk_folders.len() + 2), true)
 }
 
-fn episode_label(season: Option<i32>, episode: Option<i32>) -> String {
+/// `E18`, or `-` with no episode number. No season in the label: each
+/// AniList season is its own series in Ryokan with its own E1..En,
+/// and the card's season chip says which one this group is.
+pub fn episode_label(episode: Option<i32>) -> String {
     match episode {
-        Some(e) => format!("S{:02}E{:02}", season.unwrap_or(1), e),
+        Some(e) => format!("E{:02}", e),
         None => "-".to_string(),
     }
 }
@@ -305,7 +308,7 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
                 idx,
                 rel_path: f.rel_path.clone(),
                 file_name: f.file_name.clone(),
-                episode_label: episode_label(f.season, f.episode),
+                episode_label: episode_label(f.episode),
                 quality_label: f.quality_label.clone(),
                 existing_quality,
                 status,
@@ -492,7 +495,7 @@ mod tests {
         assert_eq!(v.folder_name, "Show_ The Series");
         assert!(!v.folder_collision);
         assert_eq!(v.files[0].status, FileStatus::Import);
-        assert_eq!(v.files[0].episode_label, "S01E01");
+        assert_eq!(v.files[0].episode_label, "E01");
         assert_eq!(
             v.files[0].dest,
             "/media/Show_ The Series/Season 01/[G] Show - 01 [1080p].mkv"

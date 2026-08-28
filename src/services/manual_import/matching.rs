@@ -58,6 +58,52 @@ pub fn build_query(title: &str, season: Option<i32>) -> String {
     }
 }
 
+/// Queries to try, in order, when `query` came back empty: the bare
+/// title (drops the `season N` suffix), then the title cut at its
+/// first ` - ` / `: ` subtitle separator or parenthetical. Each entry
+/// is distinct from `query` and from the ones before it.
+pub fn fallback_queries(title: &str, query: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |q: String| {
+        let q = q.trim().to_string();
+        if q.len() >= 2
+            && normalize_title(&q) != normalize_title(query)
+            && !out
+                .iter()
+                .any(|o| normalize_title(o) == normalize_title(&q))
+        {
+            out.push(q);
+        }
+    };
+    push(title.to_string());
+    let head = title
+        .split_once(" - ")
+        .or_else(|| title.split_once(": "))
+        .map(|(h, _)| h)
+        .unwrap_or(title);
+    let no_parens: String = {
+        let mut depth = 0i32;
+        head.chars()
+            .filter(|c| {
+                match c {
+                    '(' | '[' => depth += 1,
+                    ')' | ']' => depth = (depth - 1).max(0),
+                    _ if depth == 0 => return true,
+                    _ => {}
+                }
+                false
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if normalize_title(&no_parens).chars().count() >= 3 {
+        push(no_parens);
+    }
+    out
+}
+
 fn levenshtein(a: &[char], b: &[char]) -> usize {
     if a.is_empty() {
         return b.len();
@@ -251,6 +297,24 @@ mod tests {
             "Mob Psycho 100 season 2"
         );
         assert_eq!(build_query(" Naruto ", None), "Naruto");
+    }
+
+    #[test]
+    fn fallback_queries_drop_the_season_suffix_then_the_subtitle() {
+        assert_eq!(
+            fallback_queries("Enen no Shouboutai", "Enen no Shouboutai season 3"),
+            vec!["Enen no Shouboutai"]
+        );
+        assert_eq!(
+            fallback_queries("Frieren - Sousou no Frieren", "Frieren - Sousou no Frieren"),
+            vec!["Frieren"]
+        );
+        assert_eq!(
+            fallback_queries("Show (2019)", "Show (2019) season 2"),
+            vec!["Show (2019)", "Show"]
+        );
+        // Nothing left to try when the bare title IS the query.
+        assert!(fallback_queries("Naruto", "Naruto").is_empty());
     }
 
     #[test]

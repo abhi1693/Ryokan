@@ -34,9 +34,11 @@ The strip at the top counts series and files, how many are new, how many are alr
 
 The series name comes from the filename first (`[SubsPlease] Sousou no Frieren - 05 (1080p).mkv` reads as *Sousou no Frieren*). When a filename carries no name at all (`01.mkv`, `S01E05.mkv`, `Episode 07.mkv`), Ryokan uses the folder above it, skipping folders like `Season 01`, `Specials`, or `Extras` on the way up, so `Anime/Naruto/Season 01/01.mkv` reads as *Naruto*. Rows that took their name from the folder carry a small **folder** tag.
 
-Episode numbers use the same parser as the rest of Ryokan, so the `S01E07` in the preview is the number the import would record. Files that Ryokan cannot number (creditless openings and endings, bare specials, files with no digits) are listed but marked **No episode number** and would not be imported.
+Episode numbers use the same parser as the rest of Ryokan, so the `E07` in the preview is the number the import would record. Files that Ryokan cannot number (creditless openings and endings, bare specials, files with no digits) are listed but marked **No episode number** and would not be imported.
 
-Files with a season number past the first (`S02E01`) form their own series and are searched as "title season 2", because AniList lists each season separately. A year in a filename or folder name (`Hunter x Hunter (2011)`) is used to prefer the right remake.
+Seasons are read from wherever the name carries them: `S02E01`, a `S2` / `Season 2` / `2nd Season` / `II` marker at the end of the title (`[SubsPlease] Sousou no Frieren S2 - 05` reads as *Sousou no Frieren*, season 2), a marker on the show's folder (`Overlord IV/Overlord - 03.mkv`), or a `Season 3` folder above the file. Files from a season past the first form their own series, because AniList lists each season as its own entry. Ryokan searches "title season 2" first and, if AniList returns nothing, falls back to the bare title and then to the title without its subtitle; the card shows whichever query matched. A year in a filename or folder name (`Hunter x Hunter (2011)`) is used to prefer the right remake.
+
+The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' `Season 01` folder. The card's season chip says which season the group is.
 
 ### The file table
 

@@ -49,6 +49,29 @@ static RE_SEASON_FOLDER: LazyLock<Regex> = LazyLock::new(|| {
     .expect("RE_SEASON_FOLDER compiles")
 });
 
+/// Trailing season marker on a title: `Title S3`, `Title S03`,
+/// `Title Season 3`, `Title 3rd Season`, `Title II`. SubsPlease names
+/// sequels `Title S3 - 18`, and anitomy leaves the `S3` inside the
+/// title, which AniList's search then refuses to match at all.
+static RE_TITLE_SEASON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)[\s._-]+(?:s(\d{1,2})|season\s*(\d{1,2})|(\d{1,2})(?:st|nd|rd|th)\s+season)\s*$",
+    )
+    .expect("RE_TITLE_SEASON compiles")
+});
+
+/// Roman-numeral sequels (`Overlord IV`, `Mob Psycho 100 II`), II to IV
+/// only and uppercase only: `x` in `Hunter x Hunter` and the odd title
+/// ending in a lone `V` or `X` must stay put.
+static RE_TITLE_ROMAN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+(II|III|IV)$").expect("RE_TITLE_ROMAN compiles"));
+
+/// Number carried by a season-style folder (`Season 3`, `S03`,
+/// `Series 2`). `Specials` and friends carry none.
+static RE_FOLDER_SEASON: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(?:season|series|s)\s*(\d{1,3})$").expect("RE_FOLDER_SEASON compiles")
+});
+
 /// A four-digit year in the 1900s/2000s with a non-digit on both sides
 /// (so `1080p` and `S2024E01`-style runs don't match).
 static RE_YEAR: LazyLock<Regex> = LazyLock::new(|| {
@@ -74,6 +97,80 @@ fn looks_like_title(s: &str) -> bool {
 
 pub fn is_season_folder(name: &str) -> bool {
     RE_SEASON_FOLDER.is_match(name.trim().to_lowercase().as_str())
+}
+
+/// Season number a `Season N` / `SN` folder names, if it names one.
+pub fn folder_season(name: &str) -> Option<i32> {
+    RE_FOLDER_SEASON
+        .captures(name.trim().to_lowercase().as_str())
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
+}
+
+/// Split a trailing season marker off a title: `("Enen no Shouboutai S3")`
+/// becomes `("Enen no Shouboutai", Some(3))`. Titles without a marker
+/// come back unchanged with `None`.
+pub fn split_season_marker(title: &str) -> (String, Option<i32>) {
+    let t = title.trim();
+    if let Some(caps) = RE_TITLE_SEASON.captures(t) {
+        let season = (1..=3)
+            .filter_map(|i| caps.get(i))
+            .find_map(|m| m.as_str().parse::<i32>().ok());
+        let head = t[..caps.get(0).unwrap().start()].trim_end_matches([' ', '.', '_', '-']);
+        if season.is_some() && looks_like_title(head) {
+            return (head.to_string(), season);
+        }
+    }
+    if let Some(caps) = RE_TITLE_ROMAN.captures(t) {
+        let season = match caps.get(1).map(|m| m.as_str()) {
+            Some("II") => 2,
+            Some("III") => 3,
+            Some("IV") => 4,
+            _ => 0,
+        };
+        let head = t[..caps.get(0).unwrap().start()].trim_end();
+        if season > 0 && looks_like_title(head) {
+            return (head.to_string(), Some(season));
+        }
+    }
+    (t.to_string(), None)
+}
+
+/// Season marker on the series folder, when the folder names the same
+/// show as the file: `Overlord IV/Overlord - 03.mkv` gives 4. Season-
+/// style folders (`Season 3`, `Specials`) are climbed past first. A
+/// folder naming a different show is ignored so a mixed folder can't
+/// stamp its season onto a stranger's files.
+fn season_from_series_folder(rel_path: &Path, file_title: &str) -> Option<i32> {
+    let mut cur = rel_path.parent();
+    while let Some(dir) = cur {
+        let name = dir.file_name().and_then(|n| n.to_str())?;
+        if !is_season_folder(name) {
+            let folder_title = title_from_folder(name)?;
+            let (clean, marker) = split_season_marker(&folder_title);
+            let a = crate::services::manual_import::matching::normalize_title(&clean);
+            let b = crate::services::manual_import::matching::normalize_title(file_title);
+            let related =
+                !a.is_empty() && !b.is_empty() && (a == b || a.contains(&b) || b.contains(&a));
+            return if related { marker } else { None };
+        }
+        cur = dir.parent();
+    }
+    None
+}
+
+/// Nearest season-style ancestor folder that names a number
+/// (`Show/Season 3/01.mkv` gives 3). `None` when no ancestor does.
+fn season_from_folders(rel_path: &Path) -> Option<i32> {
+    let mut cur = rel_path.parent();
+    while let Some(dir) = cur {
+        let name = dir.file_name().and_then(|n| n.to_str())?;
+        if let Some(n) = folder_season(name) {
+            return Some(n);
+        }
+        cur = dir.parent();
+    }
+    None
 }
 
 /// First plausible year in `s`.
@@ -213,6 +310,29 @@ pub fn parse_file(rel_path: &Path) -> ParsedFile {
         }
     }
 
+    // A season marker inside the title (`Title S3`, `Title II`) names
+    // the season and must leave the title, or the AniList search
+    // gets a string it can't match. An explicit `S03E18` in the
+    // filename wins when both are present; a `Season N` folder is the
+    // last resort.
+    let mut season = season;
+    if let Some(t) = title.take() {
+        let (clean, marker) = split_season_marker(&t);
+        title = Some(clean);
+        if season.is_none() {
+            season = marker;
+        }
+    }
+    if season.is_none()
+        && title_source == TitleSource::Filename
+        && let Some(t) = title.as_deref()
+    {
+        season = season_from_series_folder(rel_path, t);
+    }
+    if season.is_none() {
+        season = season_from_folders(rel_path);
+    }
+
     ParsedFile {
         title,
         title_source,
@@ -332,6 +452,106 @@ mod tests {
         assert_eq!(f.title.as_deref(), Some("86 Eighty Six"));
         let f = p("Steins;Gate 0/S01E01.mkv");
         assert_eq!(f.title.as_deref(), Some("Steins;Gate 0"));
+    }
+
+    #[test]
+    fn subsplease_sequel_naming_reads_the_season_out_of_the_title() {
+        // The four shapes from a real library scan that AniList
+        // returned nothing for while `S3` sat inside the query.
+        let cases = [
+            (
+                "Fire Force/Season 3/[SubsPlease] Enen no Shouboutai S3 - 18 (1080p) [1E9E354E].mkv",
+                "Enen no Shouboutai",
+                3,
+                18,
+            ),
+            (
+                "Oshi no Ko/Season 3/[SubsPlease] Oshi no Ko S3 - 05 (1080p) [5D301BC1].mkv",
+                "Oshi no Ko",
+                3,
+                5,
+            ),
+            (
+                "Frieren/[SubsPlease] Sousou no Frieren S2 - 05 (1080p) [6AAEC79A].mkv",
+                "Sousou no Frieren",
+                2,
+                5,
+            ),
+            (
+                "Tanya/[SubsPlease] Youjo Senki S2 - 02 (1080p) [9A361F78].mkv",
+                "Youjo Senki",
+                2,
+                2,
+            ),
+        ];
+        for (path, title, season, ep) in cases {
+            let f = p(path);
+            assert_eq!(f.title.as_deref(), Some(title), "{path}");
+            assert_eq!(f.season, Some(season), "{path}");
+            assert_eq!(f.episode, Some(ep), "{path}");
+        }
+    }
+
+    #[test]
+    fn season_markers_in_folder_titles_and_roman_numerals() {
+        let f = p("Mob Psycho 100 II/01.mkv");
+        assert_eq!(f.title.as_deref(), Some("Mob Psycho 100"));
+        assert_eq!(f.season, Some(2));
+        let f = p("Overlord IV/Overlord - 03.mkv");
+        assert_eq!(f.title.as_deref(), Some("Overlord"));
+        assert_eq!(
+            f.season,
+            Some(4),
+            "series-folder marker applies to a matching file title"
+        );
+        let f = p("Overlord IV/Bleach - 03.mkv");
+        assert_eq!(
+            f.season, None,
+            "a different show's folder does not stamp its season"
+        );
+        let f = p("Yuru Camp 2nd Season/01.mkv");
+        assert_eq!(f.title.as_deref(), Some("Yuru Camp"));
+        assert_eq!(f.season, Some(2));
+        let f = p("Mob Psycho 100 Season 3/01.mkv");
+        assert_eq!(f.title.as_deref(), Some("Mob Psycho 100"));
+        assert_eq!(f.season, Some(3));
+    }
+
+    #[test]
+    fn season_comes_from_a_season_folder_when_the_name_has_none() {
+        let f = p("Show/Season 3/Show - 18.mkv");
+        assert_eq!(f.title.as_deref(), Some("Show"));
+        assert_eq!(f.season, Some(3));
+        // Ryokan's own layout is always Season 01: reads as season 1.
+        let f = p("Show/Season 01/Show - 01.mkv");
+        assert_eq!(f.season, Some(1));
+        // An explicit SxxExx beats a disagreeing folder.
+        let f = p("Show/Season 3/Show - S02E04.mkv");
+        assert_eq!(f.season, Some(2));
+    }
+
+    #[test]
+    fn non_markers_stay_in_the_title() {
+        for (path, title) in [
+            ("Hunter x Hunter/01.mkv", "Hunter x Hunter"),
+            ("Steins;Gate 0/01.mkv", "Steins;Gate 0"),
+            ("Gundam X/01.mkv", "Gundam X"),
+            (
+                "Girls und Panzer das Finale/01.mkv",
+                "Girls und Panzer das Finale",
+            ),
+        ] {
+            let f = p(path);
+            assert_eq!(f.title.as_deref(), Some(title), "{path}");
+            assert_eq!(f.season, None, "{path}");
+        }
+        assert_eq!(
+            split_season_marker("S2"),
+            ("S2".to_string(), None),
+            "no title left"
+        );
+        assert_eq!(folder_season("Specials"), None);
+        assert_eq!(folder_season("S02"), Some(2));
     }
 
     #[test]

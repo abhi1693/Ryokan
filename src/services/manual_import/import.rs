@@ -418,7 +418,7 @@ pub async fn run_import(
             progress::emit(
                 "import",
                 "info",
-                format!("Importing {} S01E{:02}", series_title, ep),
+                format!("Importing {} E{:02}", series_title, ep),
                 Some(format!("{} of {total_writes} files", done_files + 1)),
                 false,
             )

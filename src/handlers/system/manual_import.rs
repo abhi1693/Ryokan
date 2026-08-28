@@ -506,10 +506,7 @@ async fn render_session_page(state: &AppState, id: &str, notice: String) -> Html
                 .iter()
                 .map(|f| UnmatchedView {
                     rel_path: f.rel_path.clone(),
-                    episode_label: match f.episode {
-                        Some(e) => format!("S{:02}E{:02}", f.season.unwrap_or(1), e),
-                        None => "-".to_string(),
-                    },
+                    episode_label: preview::episode_label(f.episode),
                     quality_label: f.quality_label.clone(),
                     size: human_bytes(f.size_bytes),
                 })
@@ -1145,7 +1142,7 @@ mod router_tests {
         );
         assert!(body.contains("Files with no series hint"), "{body}");
         assert!(body.contains("Season 01/01.mkv"));
-        assert!(body.contains("S01E01"));
+        assert!(body.contains(">E01<"));
         assert!(body.contains("Nothing has been written yet"));
         let s = session::get(&state.import_sessions, &session_id).unwrap();
         assert_eq!(s.status, SessionStatus::Ready);

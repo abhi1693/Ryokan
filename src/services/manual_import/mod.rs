@@ -500,7 +500,13 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
 /// Search + rank one group. Leaves `candidates` empty and sets
 /// `search_error` when AL (and the Jikan fallback) failed, so the
 /// preview can say why rather than showing "no match".
-pub async fn search_and_rank(group: &mut SeriesGroup) {
+///
+/// `with_fallbacks` (the automatic pass) retries an empty result with
+/// [`matching::fallback_queries`]: the bare title, then the title cut
+/// at its subtitle. A query the user typed is searched as typed.
+/// Whichever query produced the hits becomes `group.query`, so the
+/// card shows what actually matched.
+pub async fn search_and_rank(group: &mut SeriesGroup, with_fallbacks: bool) {
     group.search_error = None;
     let input = matching::RankInput {
         title: &group.parsed_title,
@@ -508,7 +514,28 @@ pub async fn search_and_rank(group: &mut SeriesGroup) {
         year: group.year,
         file_count: group.files.len(),
     };
-    match anilist::search_anime(&group.query).await {
+    let mut queries = vec![group.query.clone()];
+    if with_fallbacks {
+        queries.extend(matching::fallback_queries(
+            &group.parsed_title,
+            &group.query,
+        ));
+    }
+    let mut result: Result<Vec<AnimeEntry>, String> = Ok(Vec::new());
+    for q in &queries {
+        result = anilist::search_anime(q).await;
+        match &result {
+            Ok(hits) if !hits.is_empty() => {
+                group.query = q.clone();
+                break;
+            }
+            // Empty: try the next shape. Error (throttle, outage):
+            // stop here rather than burn more of the budget.
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    match result {
         Ok(hits) => {
             group.candidates = matching::rank_entries(&input, hits);
             group.pick = if group.candidates.is_empty() {
@@ -542,7 +569,7 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
     let owned = std::mem::take(groups);
     let mut results = stream::iter(owned.into_iter().enumerate())
         .map(|(i, mut g)| async move {
-            search_and_rank(&mut g).await;
+            search_and_rank(&mut g, true).await;
             (i, g)
         })
         .buffer_unordered(MATCH_CONCURRENCY);
@@ -669,7 +696,7 @@ pub async fn research_group(
     };
     group.query = query.to_string();
     group.skipped = false;
-    search_and_rank(&mut group).await;
+    search_and_rank(&mut group, false).await;
     resolve_existing(&state.db, &mut group).await;
     session::update(&state.import_sessions, session_id, |s| {
         if let Some(slot) = s.groups.get_mut(idx) {

@@ -66,6 +66,11 @@ path = "tests/library_link_e2e.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "manual_import_e2e"
+path = "tests/manual_import_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "metadata_sync_e2e"
 path = "tests/metadata_sync_e2e.rs"
 required-features = ["test-support"]
