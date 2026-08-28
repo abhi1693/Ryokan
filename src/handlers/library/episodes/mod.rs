@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents};
+use crate::services::recycle::{self, RecycleKind, RecycleOutcome};
 use crate::services::{auto_search, logger, media};
 
 use super::pages::build_episodes;
@@ -301,18 +302,34 @@ pub async fn delete_episode_file(
             #[cfg(not(unix))]
             let media_inode: Option<u64> = None;
 
-            if let Err(e) = tokio::fs::remove_file(&full_path_canon).await {
-                return json_err(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to delete file: {}", e),
-                );
-            }
-
-            let nfo_path = full_path_canon.with_extension("nfo");
-            if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await
-                && nfo_canon.starts_with(&media_root_canon)
+            // Recycle bin (#123): the video plus its companions (`.nfo`,
+            // subtitles, thumbnail) move into the bin together; with no
+            // bin configured `recycle` unlinks them permanently, which is
+            // what this handler did before (minus the companion sweep,
+            // which used to leak subtitles).
+            match recycle::recycle(
+                &state.db,
+                &cfg.recycle_bin_path,
+                RecycleKind::Episode,
+                Some(tracked.id),
+                &tracked.title,
+                &full_path_canon,
+            )
+            .await
             {
-                let _ = tokio::fs::remove_file(&nfo_canon).await;
+                Ok(RecycleOutcome::Recycled { .. } | RecycleOutcome::DirectDeleted) => {}
+                Ok(RecycleOutcome::Missing) => {
+                    return json_err(
+                        axum::http::StatusCode::NOT_FOUND,
+                        "Episode file not found on disk",
+                    );
+                }
+                Err(e) => {
+                    return json_err(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to delete file: {}", e),
+                    );
+                }
             }
 
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;

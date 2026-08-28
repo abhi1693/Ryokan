@@ -51,6 +51,20 @@
         </fieldset>
 
         <fieldset>
+            <legend>Recycle Bin</legend>
+            <div class="form-group">
+                <label for="recycle_bin_path">Recycle bin path</label>
+                <input type="text" name="recycle_bin_path" id="recycle_bin_path" value="{{ config.recycle_bin_path }}" placeholder="/media/anime/.recycle">
+                <span class="form-hint">Leave empty to disable. When set, deleting an episode or a series folder (and replacing a file during an upgrade) moves it here instead of deleting it permanently, and you can restore it from the <a href="/library/recycle">Recycle Bin</a> page. Put it on the same filesystem as the media root so moves are instant and keep seeding hardlinks intact. The value is the path inside Ryokan's container.</span>
+            </div>
+            <div class="form-group">
+                <label for="recycle_bin_age_days">Purge after (days)</label>
+                <input type="number" min="0" max="3650" name="recycle_bin_age_days" id="recycle_bin_age_days" value="{{ config.recycle_bin_age_days }}">
+                <span class="form-hint">Recycled items older than this are deleted permanently by the hourly cleanup task. 0 keeps everything until you empty the bin yourself.</span>
+            </div>
+        </fieldset>
+
+        <fieldset>
             <legend>Monitoring</legend>
             <div class="form-group">
                 <label class="checkbox-row">

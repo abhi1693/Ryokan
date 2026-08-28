@@ -159,6 +159,12 @@
     transition: transform 0.15s;
 }
 
+/* Recycle Bin link shares the icon-button footprint; as an <a> it needs
+   the anchor defaults cleared. */
+.library-recycle-link {
+    text-decoration: none;
+}
+
 .library-sort-dir[data-desc="false"] .library-sort-dir-icon {
     transform: rotate(180deg);
 }

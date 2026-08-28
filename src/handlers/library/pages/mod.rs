@@ -337,12 +337,17 @@ pub async fn index(
         })
         .collect();
 
+    let recycle_enabled = cfg
+        .as_ref()
+        .map(|c| !c.recycle_bin_path.trim().is_empty())
+        .unwrap_or(false);
     let template = IndexTemplate {
         page: "library".to_string(),
         cards,
         title_language: cfg
             .map(|c| c.title_language)
             .unwrap_or_else(|| "english".to_string()),
+        recycle_enabled,
         score_format,
         list_counts,
         custom_list_filter,
@@ -408,6 +413,10 @@ pub async fn series_detail(
         config::get_config(&state.db),
     );
     let cfg = cfg_res.ok().flatten();
+    let recycle_enabled = cfg
+        .as_ref()
+        .map(|c| !c.recycle_bin_path.trim().is_empty())
+        .unwrap_or(false);
     let title_language_fallback = || {
         cfg.as_ref()
             .map(|c| c.title_language.clone())
@@ -734,6 +743,7 @@ pub async fn series_detail(
         mal_url,
         metadata_refreshed_at,
         metadata_is_stale,
+        recycle_enabled,
         monitor_mode,
         monitor_mode_label,
         monitor_mode_manual_override,

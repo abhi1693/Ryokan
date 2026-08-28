@@ -349,16 +349,18 @@ pub async fn remove_series(
     let cleanup_report: Option<super::cleanup::SeriesCleanupReport> = if delete_files
         && let Some(ref tracked) = tracked
     {
-        let media_root: Option<String> = config::get_config(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.media_root);
+        let (media_root, recycle_bin_path): (Option<String>, String) =
+            match config::get_config(&state.db).await.ok().flatten() {
+                Some(c) => (Some(c.media_root), c.recycle_bin_path),
+                None => (None, String::new()),
+            };
         match super::cleanup::cleanup_series_files(
             &state,
             series_id,
             &tracked.folder_name,
+            &tracked.title,
             media_root.as_deref(),
+            &recycle_bin_path,
         )
         .await
         {

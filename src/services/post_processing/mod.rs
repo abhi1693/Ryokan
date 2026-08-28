@@ -8,6 +8,7 @@ use crate::models::{
     config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
 };
 use crate::services::download_client::DownloadClient;
+use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
 use crate::services::{logger, media, nfo};
 
@@ -1252,11 +1253,26 @@ async fn import_torrent(
                 .await;
             }
 
-            // Remove old file(s) and their NFOs to make way for the upgrade.
-            // unlinks are wrapped in tokio::fs so a slow filesystem doesn't
-            // stall the runtime during the upgrade path.
+            // Retire the old file(s) to make way for the upgrade. Recycle
+            // bin (#123): each old video moves into the bin with its
+            // companions (the old NFO's stem may differ from the new
+            // dest_stem when the episode title changed between grabs, so
+            // the companion sweep keyed on the old stem is what catches
+            // it); with no bin configured this is the permanent unlink
+            // the upgrade path always did.
+            let mut retire_failed = false;
             for old_file in &existing_for_ep {
-                if let Err(e) = tokio::fs::remove_file(old_file).await {
+                if let Err(e) = recycle::recycle(
+                    &state.db,
+                    &cfg.recycle_bin_path,
+                    RecycleKind::Episode,
+                    Some(target_series_id),
+                    &ctx.series.title,
+                    old_file,
+                )
+                .await
+                {
+                    retire_failed = true;
                     logger::error(
                         &state.db,
                         LogCategory::PostProcess,
@@ -1264,16 +1280,29 @@ async fn import_torrent(
                             "Failed to remove old file for upgrade: {}",
                             old_file.display()
                         ),
-                        &e.to_string(),
+                        &e,
                     )
                     .await;
                 }
-                // Remove corresponding NFO (old stem may differ from new dest_stem
-                // if the episode title changed between grabs).
-                if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
-                    let _ =
-                        tokio::fs::remove_file(ctx.season_dir.join(format!("{}.nfo", stem))).await;
-                }
+            }
+            // A refused recycle (bin configured but not writable) must not
+            // turn into an overwrite: `do_file_op` clears an existing
+            // destination, so continuing here would destroy the file the
+            // bin was supposed to keep. Skip this episode; the grab stays
+            // partially imported and the log names the reason.
+            if retire_failed {
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Upgrade for S{:02}E{:02} of '{}' skipped: the old file could not be recycled",
+                        season, ep_num, ctx.series.title
+                    ),
+                    &grab.torrent_name,
+                )
+                .await;
+                failed_episodes.push(ep_num);
+                continue;
             }
 
             logger::info(

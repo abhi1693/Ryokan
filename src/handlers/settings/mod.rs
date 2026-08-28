@@ -397,6 +397,11 @@ pub struct SettingsForm {
     /// Settings → General.
     #[serde(default)]
     manual_search_auto_add: Option<String>,
+    /// Recycle bin (#123). Settings → General.
+    #[serde(default)]
+    recycle_bin_path: String,
+    #[serde(default = "default_recycle_bin_age_days")]
+    recycle_bin_age_days: i64,
     prefer_subs: String,
     sonarr_enabled: Option<String>,
     sonarr_api_key: Option<String>,
@@ -593,6 +598,16 @@ pub struct GeneralForm {
     /// no-op when a grabbed release isn't in the library yet.
     #[serde(default)]
     manual_search_auto_add: Option<String>,
+    /// Recycle bin (#123). Empty disables recycle.
+    #[serde(default)]
+    recycle_bin_path: String,
+    /// Purge horizon in days; 0 = never auto-purge.
+    #[serde(default = "default_recycle_bin_age_days")]
+    recycle_bin_age_days: i64,
+}
+
+fn default_recycle_bin_age_days() -> i64 {
+    14
 }
 
 #[derive(Template)]
@@ -1351,6 +1366,25 @@ pub async fn settings_submit(
                 .map(|c| c.manual_search_auto_add)
                 .unwrap_or(true)
         },
+        recycle_bin_path: if form.tab.as_deref() == Some("general") {
+            form.recycle_bin_path
+                .trim()
+                .trim_end_matches('/')
+                .to_string()
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.recycle_bin_path.clone())
+                .unwrap_or_default()
+        },
+        recycle_bin_age_days: if form.tab.as_deref() == Some("general") {
+            form.recycle_bin_age_days.clamp(0, 3650)
+        } else {
+            existing_cfg
+                .as_ref()
+                .map(|c| c.recycle_bin_age_days)
+                .unwrap_or(14)
+        },
     };
 
     let active_tab = normalize_settings_tab(form.tab.clone());
@@ -1597,6 +1631,12 @@ pub async fn settings_general_submit(
         },
         search_on_monitoring_change: form.search_on_monitoring_change.is_some(),
         manual_search_auto_add: form.manual_search_auto_add.is_some(),
+        recycle_bin_path: form
+            .recycle_bin_path
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        recycle_bin_age_days: form.recycle_bin_age_days.clamp(0, 3650),
         // Everything else: preserved verbatim.
         ..existing_cfg
     };
@@ -1637,6 +1677,29 @@ pub async fn settings_general_submit(
             "Warning: media root '{}' is not accessible.",
             cfg.media_root
         ));
+    }
+    if !cfg.recycle_bin_path.is_empty() {
+        match crate::services::recycle::probe_writable(&cfg.recycle_bin_path).await {
+            Ok(()) => {
+                let bin = std::path::Path::new(&cfg.recycle_bin_path);
+                let root = std::path::Path::new(&cfg.media_root);
+                match crate::services::recycle::same_filesystem(bin, root) {
+                    Some(true) => notices.push(
+                        "Recycle bin is on the same filesystem as the media root (instant move)."
+                            .to_string(),
+                    ),
+                    Some(false) => notices.push(
+                        "Recycle bin is on a different filesystem than the media root. Moves copy then delete, and use extra disk space while in progress."
+                            .to_string(),
+                    ),
+                    None => {}
+                }
+            }
+            Err(e) => notices.push(format!(
+                "Warning: recycle bin '{}' is not writable. Deletes will be refused until this is fixed ({}).",
+                cfg.recycle_bin_path, e
+            )),
+        }
     }
 
     general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await

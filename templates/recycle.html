@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+
+{% block title %} - Recycle Bin{% endblock %}
+
+{% block content %}
+<div class="page-header recycle-header">
+    <h2>Recycle Bin</h2>
+    <a href="/" class="btn btn-secondary">Back to Library</a>
+</div>
+
+{% if !enabled %}
+<div class="alert alert-warn" role="status">
+    <strong>Recycle bin is off.</strong>
+    Deletes are permanent right now. Set a recycle bin path under <a href="/settings">Settings &rarr; General</a> to make episode and series deletes restorable.
+</div>
+{% else %}
+{% if unwritable %}
+<div class="alert alert-warn" role="status">
+    <strong>Recycle bin is not writable. Deletes are refused until this is fixed.</strong>
+    The last delete could not write to <code>{{ bin_path }}</code> and was refused, so nothing was removed. Check the path and permissions under <a href="/settings">Settings &rarr; General</a>. Details are in <a href="/system?tab=logs">System &rarr; Logs</a>.
+</div>
+{% endif %}
+{% if !load_error.is_empty() %}
+<div class="alert alert-error" role="status">
+    <strong>Could not read the recycle bin.</strong> {{ load_error }}
+</div>
+{% endif %}
+
+<div class="recycle-summary">
+    <div class="recycle-summary-main">
+        <span class="recycle-summary-text">
+            <strong id="recycle-total-entries">{{ total_entries }}</strong> item{% if total_entries != 1 %}s{% endif %},
+            <strong id="recycle-total-size">{{ total_size }}</strong>
+            {% if age_days > 0 %}&middot; items purge automatically {{ age_days }} day{% if age_days != 1 %}s{% endif %} after deletion{% else %}&middot; automatic purge is off{% endif %}
+        </span>
+        <span class="recycle-summary-path" title="{{ bin_path }}"><code>{{ bin_path }}</code></span>
+    </div>
+    <button type="button" id="recycle-empty-btn" class="btn btn-danger" onclick="recycleEmpty(this)" {% if total_entries == 0 %}disabled{% endif %}>Empty recycle bin</button>
+</div>
+
+<form method="get" action="/library/recycle" class="recycle-filters">
+    <div class="form-group">
+        <label for="recycle-filter-series">Series</label>
+        <select name="series" id="recycle-filter-series">
+            <option value="">All series</option>
+            {% for opt in series_options %}
+            <option value="{{ opt.0 }}" {% if filter_series == opt.0.to_string() %}selected{% endif %}>{{ opt.1 }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="form-group">
+        <label for="recycle-filter-from">Deleted from</label>
+        <input type="date" name="from" id="recycle-filter-from" value="{{ filter_from }}">
+    </div>
+    <div class="form-group">
+        <label for="recycle-filter-to">to</label>
+        <input type="date" name="to" id="recycle-filter-to" value="{{ filter_to }}">
+    </div>
+    <button type="submit" class="btn btn-secondary">Apply</button>
+    {% if !filter_series.is_empty() || !filter_from.is_empty() || !filter_to.is_empty() %}
+    <a href="/library/recycle" class="btn btn-secondary">Clear</a>
+    {% endif %}
+</form>
+
+{% if groups.is_empty() %}
+<div class="empty-state" id="recycle-empty-state">
+    {% if !filter_series.is_empty() || !filter_from.is_empty() || !filter_to.is_empty() %}
+    <p>Nothing matches these filters.</p>
+    {% else %}
+    <p>The recycle bin is empty.</p>
+    {% endif %}
+</div>
+{% endif %}
+
+<div id="recycle-groups">
+{% for g in groups %}
+<section class="recycle-group" data-date="{{ g.date }}">
+    <h3>{{ g.date }}</h3>
+    <div class="rss-table-wrap">
+        <table class="rss-table recycle-table">
+            <colgroup>
+                <col class="recycle-col-series">
+                <col class="recycle-col-item">
+                <col class="recycle-col-path">
+                <col class="recycle-col-when">
+                <col class="recycle-col-purge">
+                <col class="recycle-col-size">
+                <col class="recycle-col-actions">
+            </colgroup>
+            <thead>
+                <tr>
+                    <th>Series</th>
+                    <th>Item</th>
+                    <th>Original location</th>
+                    <th>Deleted</th>
+                    <th>Purges</th>
+                    <th>Size</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for e in g.entries %}
+                <tr id="recycle-{{ e.entry_id }}" data-bytes="{{ e.size_bytes }}" data-bytes-label="{{ e.size }}">
+                    <td class="recycle-series">{{ e.series_title }}</td>
+                    <td>{% if e.kind_is_folder %}<span class="badge">{{ e.label }}</span>{% else %}{{ e.label }}{% endif %}</td>
+                    <td><span class="recycle-path" title="{{ e.original_path }}">{{ e.original_path }}</span></td>
+                    <td class="recycle-nowrap"><span data-ts="{{ e.recycled_at }}"></span></td>
+                    <td class="recycle-nowrap">{{ e.purge_in }}</td>
+                    <td class="recycle-nowrap">{{ e.size }}</td>
+                    <td class="recycle-actions">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="recycleRestore('{{ e.entry_id }}', this)">Restore</button>
+                        <button type="button" class="btn btn-danger btn-sm" onclick="recycleDeleteNow('{{ e.entry_id }}', this)">Delete now</button>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endfor %}
+</div>
+{% endif %}
+{% endblock %}
+
+{% block page_js %}<script src="/static/js/recycle.js" defer></script>{% endblock %}
