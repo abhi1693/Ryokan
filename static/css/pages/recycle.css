@@ -79,13 +79,15 @@
     min-width: 900px;
 }
 
+/* Numeric and action columns get fixed pixel widths so their content
+   never crowds the neighbor at narrow viewports; the path column has no
+   width and absorbs whatever is left. */
 .recycle-col-series { width: 22%; }
 .recycle-col-item { width: 11%; }
-.recycle-col-path { width: 30%; }
-.recycle-col-when { width: 8%; }
-.recycle-col-purge { width: 10%; }
-.recycle-col-size { width: 7%; }
-.recycle-col-actions { width: 232px; }
+.recycle-col-when { width: 90px; }
+.recycle-col-purge { width: 104px; }
+.recycle-col-size { width: 104px; }
+.recycle-col-actions { width: 212px; }
 
 .recycle-path {
     display: block;
@@ -111,13 +113,12 @@
     white-space: nowrap;
 }
 
-/* Breathing room between the last button and the table edge. The
-   column is sized for both buttons plus this padding; with
-   table-layout: fixed a narrower column would just let the buttons
-   overflow the cell and swallow the padding. */
-.recycle-table th:last-child,
-.recycle-table td:last-child {
-    padding-right: 20px;
+/* The buttons hug the table's right edge with the same 12px inset the
+   cell padding gives the text on the left, regardless of column width;
+   any slack from the fixed column lands between Size and Restore. */
+.recycle-table td.recycle-actions,
+.recycle-table th:last-child {
+    text-align: right;
 }
 
 /* Filters apply on change; the submit button is a no-JS / keyboard
