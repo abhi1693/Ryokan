@@ -222,6 +222,65 @@ struct ImportTemplate {
     unmatched: Vec<UnmatchedView>,
     /// Start page only: live sessions, newest first.
     recent: Vec<RecentView>,
+    /// Always false on the page; the summary / confirm partials set
+    /// it when rendered standalone for an out-of-band swap.
+    oob: bool,
+}
+
+/// Summary strip, re-rendered out-of-band after every card action.
+#[derive(Template)]
+#[template(path = "partials/system/import_summary.html")]
+struct SummaryStripPartial {
+    session_id: String,
+    root: String,
+    mode_label: &'static str,
+    stats: WalkStats,
+    total_size: String,
+    summary: SessionSummary,
+    write_size: String,
+    oob: bool,
+}
+
+/// Sticky confirm bar, re-rendered out-of-band after every card action.
+#[derive(Template)]
+#[template(path = "partials/system/import_confirm.html")]
+struct ConfirmBarPartial {
+    session_id: String,
+    mode_label: &'static str,
+    summary: SessionSummary,
+    write_size: String,
+    oob: bool,
+}
+
+/// The two out-of-band blocks for a Ready session, from a fresh
+/// projection of every group (cheap: pure, no I/O beyond the render
+/// context the caller already built).
+fn oob_totals(session: &ImportSession, ctx: &RenderContext) -> String {
+    let (_, views) = build_cards(session, ctx);
+    let summary = preview::summarize(session, &views);
+    let write_size = human_bytes(summary.write_bytes);
+    let strip = SummaryStripPartial {
+        session_id: session.id.clone(),
+        root: session.root.display().to_string(),
+        mode_label: session.mode.label(),
+        stats: session.stats.clone(),
+        total_size: human_bytes(session.stats.total_bytes),
+        summary: summary.clone(),
+        write_size: write_size.clone(),
+        oob: true,
+    };
+    let bar = ConfirmBarPartial {
+        session_id: session.id.clone(),
+        mode_label: session.mode.label(),
+        summary,
+        write_size,
+        oob: true,
+    };
+    format!(
+        "{}{}",
+        strip.render().unwrap_or_default(),
+        bar.render().unwrap_or_default()
+    )
 }
 
 fn format_display(format: &str) -> String {
@@ -467,6 +526,7 @@ fn base_template(ctx: &RenderContext) -> ImportTemplate {
         groups: Vec::new(),
         unmatched: Vec::new(),
         recent: Vec::new(),
+        oob: false,
     }
 }
 
@@ -746,7 +806,14 @@ pub async fn group_action(
         session_id: session_id.clone(),
         g: card,
     };
-    Html(partial.render().unwrap_or_default()).into_response()
+    // The card, then the summary strip and confirm bar out-of-band so
+    // the totals follow every skip / tick / pick.
+    let html = format!(
+        "{}{}",
+        partial.render().unwrap_or_default(),
+        oob_totals(&session, &ctx)
+    );
+    Html(html).into_response()
 }
 
 /// The picker's result list: the ranked candidates when `q` is empty,
@@ -1308,7 +1375,9 @@ mod router_tests {
         let app = router(state.clone());
         let uri = format!("/system/import/{id}/group/0");
 
-        // Skip: card re-renders as skipped, files gone from the table.
+        // Skip: card re-renders as skipped, files gone from the table,
+        // and the summary strip + confirm bar come along out-of-band
+        // with the new totals (nothing left to import).
         let resp = post_form(&app, &uri, "action=skip", true).await;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = body_text(resp).await;
@@ -1318,6 +1387,16 @@ mod router_tests {
             !body.contains("import-files"),
             "skipped card hides the file table"
         );
+        assert!(
+            body.contains("id=\"import-summary\" hx-swap-oob=\"true\""),
+            "{body}"
+        );
+        assert!(
+            body.contains("id=\"import-confirm\" hx-swap-oob=\"true\""),
+            "{body}"
+        );
+        assert!(body.contains("<strong>1</strong> skipped"), "{body}");
+        assert!(body.contains("Nothing to import"), "{body}");
 
         // Unskip via plain POST: 303 back to the card anchor.
         let resp = post_form(&app, &uri, "action=unskip", false).await;

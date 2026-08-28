@@ -1,0 +1,39 @@
+{# Summary strip of the import preview (#122). Included by
+   import.html and returned out-of-band by every card action, so
+   skipping a series or unticking files updates the totals without
+   a page reload. `oob` marks the standalone render. #}
+<div class="import-summary" id="import-summary"{% if oob %} hx-swap-oob="true"{% endif %}>
+    <div class="import-summary-main">
+        <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
+        <span class="import-summary-line">
+            <strong>{{ summary.groups }}</strong> series across <strong>{{ stats.files }}</strong> file{% if stats.files != 1 %}s{% endif %} ({{ total_size }}) in {{ stats.dirs }} folder{% if stats.dirs != 1 %}s{% endif %}.
+            Mode: <strong>{{ mode_label }}</strong>.
+        </span>
+        <span class="import-summary-counts">
+            <span class="import-count import-count-new"><strong>{{ summary.new_series }}</strong> new</span>
+            <span class="import-count import-count-merge"><strong>{{ summary.merge }}</strong> already in library</span>
+            <span class="import-count import-count-nomatch"><strong>{{ summary.no_match }}</strong> unmatched</span>
+            {% if summary.skipped > 0 %}<span class="import-count import-count-skipped"><strong>{{ summary.skipped }}</strong> skipped</span>{% endif %}
+            {% if summary.needs_attention > 0 %}<span class="import-count import-count-attention"><strong>{{ summary.needs_attention }}</strong> to check</span>{% endif %}
+        </span>
+        <span class="import-summary-line">
+            Would write <strong>{{ summary.writes }}</strong> file{% if summary.writes != 1 %}s{% endif %} ({{ write_size }}){% if summary.replace > 0 %}, including {{ summary.replace }} upgrade{% if summary.replace != 1 %}s{% endif %} of episodes you already have{% endif %}.
+            {% if summary.present > 0 %}{{ summary.present }} already present at equal or better quality.{% endif %}
+            {% if summary.no_episode > 0 %}{{ summary.no_episode }} with no episode number.{% endif %}
+        </span>
+        {% if stats.skipped_symlinks > 0 || stats.skipped_hidden > 0 || stats.skipped_excluded > 0 || stats.errors > 0 || stats.truncated %}
+        <span class="import-summary-line form-hint">
+            Skipped:
+            {% if stats.skipped_symlinks > 0 %}{{ stats.skipped_symlinks }} symlink{% if stats.skipped_symlinks != 1 %}s{% endif %} (follow symlinks is off).{% endif %}
+            {% if stats.skipped_hidden > 0 %}{{ stats.skipped_hidden }} hidden.{% endif %}
+            {% if stats.skipped_excluded > 0 %}{{ stats.skipped_excluded }} inside Ryokan's own folders.{% endif %}
+            {% if stats.errors > 0 %}{{ stats.errors }} unreadable (permissions).{% endif %}
+            {% if stats.truncated %}The scan stopped at the file limit; import in smaller batches.{% endif %}
+        </span>
+        {% endif %}
+    </div>
+    <form method="post" action="/system/import/{{ session_id }}/discard" class="import-summary-actions">
+        <button type="submit" class="btn btn-secondary">Discard preview</button>
+    </form>
+</div>
+

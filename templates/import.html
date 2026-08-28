@@ -178,40 +178,7 @@
 
 {% else %}
 <h3 class="import-title">Import an existing library</h3>
-<div class="import-summary">
-    <div class="import-summary-main">
-        <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
-        <span class="import-summary-line">
-            <strong>{{ summary.groups }}</strong> series across <strong>{{ stats.files }}</strong> file{% if stats.files != 1 %}s{% endif %} ({{ total_size }}) in {{ stats.dirs }} folder{% if stats.dirs != 1 %}s{% endif %}.
-            Mode: <strong>{{ mode_label }}</strong>.
-        </span>
-        <span class="import-summary-counts">
-            <span class="import-count import-count-new"><strong>{{ summary.new_series }}</strong> new</span>
-            <span class="import-count import-count-merge"><strong>{{ summary.merge }}</strong> already in library</span>
-            <span class="import-count import-count-nomatch"><strong>{{ summary.no_match }}</strong> unmatched</span>
-            {% if summary.skipped > 0 %}<span class="import-count import-count-skipped"><strong>{{ summary.skipped }}</strong> skipped</span>{% endif %}
-            {% if summary.needs_attention > 0 %}<span class="import-count import-count-attention"><strong>{{ summary.needs_attention }}</strong> to check</span>{% endif %}
-        </span>
-        <span class="import-summary-line">
-            Would write <strong>{{ summary.writes }}</strong> file{% if summary.writes != 1 %}s{% endif %} ({{ write_size }}){% if summary.replace > 0 %}, including {{ summary.replace }} upgrade{% if summary.replace != 1 %}s{% endif %} of episodes you already have{% endif %}.
-            {% if summary.present > 0 %}{{ summary.present }} already present at equal or better quality.{% endif %}
-            {% if summary.no_episode > 0 %}{{ summary.no_episode }} with no episode number.{% endif %}
-        </span>
-        {% if stats.skipped_symlinks > 0 || stats.skipped_hidden > 0 || stats.skipped_excluded > 0 || stats.errors > 0 || stats.truncated %}
-        <span class="import-summary-line form-hint">
-            Skipped:
-            {% if stats.skipped_symlinks > 0 %}{{ stats.skipped_symlinks }} symlink{% if stats.skipped_symlinks != 1 %}s{% endif %} (follow symlinks is off).{% endif %}
-            {% if stats.skipped_hidden > 0 %}{{ stats.skipped_hidden }} hidden.{% endif %}
-            {% if stats.skipped_excluded > 0 %}{{ stats.skipped_excluded }} inside Ryokan's own folders.{% endif %}
-            {% if stats.errors > 0 %}{{ stats.errors }} unreadable (permissions).{% endif %}
-            {% if stats.truncated %}The scan stopped at the file limit; import in smaller batches.{% endif %}
-        </span>
-        {% endif %}
-    </div>
-    <form method="post" action="/system/import/{{ session_id }}/discard" class="import-summary-actions">
-        <button type="submit" class="btn btn-secondary">Discard preview</button>
-    </form>
-</div>
+{% include "partials/system/import_summary.html" %}
 
 {% if cross_fs_warning %}
 <div class="alert alert-warn" role="status">
@@ -262,32 +229,7 @@
 </section>
 {% endif %}
 
-<div class="import-confirm" id="import-confirm">
-    <div class="import-confirm-text">
-        {% if summary.writes > 0 %}
-        <strong>Import {{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} ({{ write_size }})</strong>
-        <span class="form-hint">into {{ summary.new_series }} new series and {{ summary.merge }} already in your library, by {{ mode_label|lower }}{% if summary.replace > 0 %}, replacing {{ summary.replace }} episode{% if summary.replace != 1 %}s{% endif %} you have at lower quality{% endif %}.{% if summary.needs_attention > 0 %} {{ summary.needs_attention }} series {% if summary.needs_attention == 1 %}is{% else %}are{% endif %} flagged to check first.{% endif %} New series are monitored for future episodes only.</span>
-        {% else %}
-        <strong>Nothing to import.</strong>
-        <span class="form-hint">Every file is excluded, already present, or unmatched.</span>
-        {% endif %}
-    </div>
-    <div class="import-confirm-actions">
-        <form method="post" action="/system/import/{{ session_id }}/discard" class="import-inline-form">
-            <button type="submit" class="btn btn-secondary">Discard</button>
-        </form>
-        {# hx-post so the confirm bridge gates it via htmx:confirm; the
-           HX-Redirect reply navigates to the importing state. #}
-        <form method="post" action="/system/import/{{ session_id }}/confirm" class="import-inline-form"
-              hx-post="/system/import/{{ session_id }}/confirm" hx-swap="none"
-              data-ryokan-confirm-title="Start the import?"
-              data-ryokan-confirm-body="{{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} will be {{ mode_label|lower }}ed into the media root{% if summary.replace > 0 %}, and {{ summary.replace }} existing episode{% if summary.replace != 1 %}s{% endif %} will be replaced (the old files go to the recycle bin when one is configured){% endif %}. You can cancel while it runs; files already imported stay."
-              data-ryokan-confirm-yes="Import"
-              data-ryokan-confirm-no="Not yet">
-            <button type="submit" class="btn btn-primary"{% if summary.writes == 0 %} disabled{% endif %}>Import {{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %}</button>
-        </form>
-    </div>
-</div>
+{% include "partials/system/import_confirm.html" %}
 {% endif %}
 
 </div>{# /.tabbed-content #}
