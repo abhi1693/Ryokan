@@ -51,6 +51,7 @@ fn file(name: &str, ep: i32) -> CandidateFile {
         group: None,
         quality_label: "WEB-1080p".into(),
         selected: true,
+        source_episode: None,
     }
 }
 
@@ -59,6 +60,7 @@ fn group() -> SeriesGroup {
         key: "enen no shouboutai|s3".into(),
         parsed_title: "Enen no Shouboutai".into(),
         season: Some(3),
+        tmdb_season: Some(3),
         year: None,
         query: "Enen no Shouboutai season 3".into(),
         files: vec![file(
@@ -71,6 +73,7 @@ fn group() -> SeriesGroup {
         search_error: None,
         skipped: false,
         existing: None,
+        mapping_note: None,
     }
 }
 

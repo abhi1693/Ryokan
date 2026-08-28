@@ -709,6 +709,7 @@ mod tests {
             group: None,
             quality_label: source::classify_release_sync(&file_name, None).label(),
             selected: true,
+            source_episode: None,
         }
     }
 
@@ -717,6 +718,7 @@ mod tests {
             key: "show".into(),
             parsed_title: "Show".into(),
             season: None,
+            tmdb_season: None,
             year: None,
             query: "Show".into(),
             files,
@@ -726,6 +728,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            mapping_note: None,
         }
     }
 

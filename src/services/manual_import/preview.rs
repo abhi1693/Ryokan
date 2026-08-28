@@ -110,6 +110,9 @@ pub struct FileView {
     pub file_name: String,
     /// `E07`, or `-` when no episode number parsed.
     pub episode_label: String,
+    /// `was E18` when the TMDB mapping renumbered the file. Empty
+    /// otherwise.
+    pub episode_note: String,
     pub quality_label: String,
     /// What Ryokan holds for this episode already, for the Replace /
     /// Already-have rows. Empty otherwise.
@@ -309,6 +312,10 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
                 rel_path: f.rel_path.clone(),
                 file_name: f.file_name.clone(),
                 episode_label: episode_label(f.episode),
+                episode_note: f
+                    .source_episode
+                    .map(|e| format!("was E{e:02}"))
+                    .unwrap_or_default(),
                 quality_label: f.quality_label.clone(),
                 existing_quality,
                 status,
@@ -431,6 +438,7 @@ mod tests {
             group: None,
             quality_label: source::classify_release_sync(name, None).label(),
             selected: true,
+            source_episode: None,
         }
     }
 
@@ -443,6 +451,7 @@ mod tests {
             key: "show".into(),
             parsed_title: "Show".into(),
             season: None,
+            tmdb_season: None,
             year: None,
             query: "Show".into(),
             files,
@@ -452,6 +461,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            mapping_note: None,
         }
     }
 

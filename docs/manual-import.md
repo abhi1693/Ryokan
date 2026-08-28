@@ -38,6 +38,15 @@ Episode numbers use the same parser as the rest of Ryokan, so the `E07` in the p
 
 Seasons are read from wherever the name carries them: `S02E01`, a `S2` / `Season 2` / `2nd Season` / `II` marker at the end of the title (`[SubsPlease] Sousou no Frieren S2 - 05` reads as *Sousou no Frieren*, season 2), a marker on the show's folder (`Overlord IV/Overlord - 03.mkv`), or a `Season 3` folder above the file. Files from a season past the first form their own series, because AniList lists each season as its own entry. Ryokan searches "title season 2" first and, if AniList returns nothing, falls back to the bare title and then to the title without its subtitle; the card shows whichever query matched. A year in a filename or folder name (`Hunter x Hunter (2011)`) is used to prefer the right remake.
 
+### Seasons by id, not by name
+
+Once the search has found a show, the season itself is resolved through the same TMDB mappings the Sonarr and Radarr integrations use (the anibridge dataset Ryokan already keeps). Those map every AniList entry to a TMDB show and season with episode ranges, which is the numbering a `Season 3` folder in a Jellyfin or Plex library follows. So "season 3 of Fire Force" is looked up by id rather than guessed from how AniList names the sequel, and the card says **Season 3 through the TMDB mapping** when that happened. Two consequences worth knowing:
+
+- Where AniList lists one TMDB season as two entries (split cours), the files split into two cards, one per entry, with the episode range each covers. Where one AniList entry spans two TMDB seasons, `S02E05` becomes that entry's **E17**; the episode column shows the new number with a **was E05** note. The import records the AniList number, which is what the rest of Ryokan uses.
+- Files no mapping range covers keep their parsed numbers and stay with the search's pick, on their own card marked **Outside the TMDB mapping**. Shows the dataset hasn't caught up with yet fall back to the title matching above.
+
+The mapping only runs on the automatic pass. A candidate you pick, or a title you type into **Search again**, is taken as given.
+
 The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' `Season 01` folder. The card's season chip says which season the group is.
 
 ### The file table

@@ -116,6 +116,8 @@ struct GroupCard {
     counts: GroupCounts,
     /// Another group in this preview picked the same series.
     duplicate_of: String,
+    /// How the TMDB mapping shaped this group, if it did.
+    mapping_note: String,
     /// Inline error from the last override action on this card.
     action_error: String,
 }
@@ -324,6 +326,7 @@ fn build_card(
         files: view.files,
         counts: view.counts,
         duplicate_of,
+        mapping_note: group.mapping_note.clone().unwrap_or_default(),
         action_error,
     }
 }
@@ -964,6 +967,7 @@ mod router_tests {
             group: None,
             quality_label: "WEB-1080p".into(),
             selected: true,
+            source_episode: None,
         }
     }
 
@@ -982,6 +986,7 @@ mod router_tests {
             key: "show".into(),
             parsed_title: "Show".into(),
             season: None,
+            tmdb_season: None,
             year: None,
             query: "Show".into(),
             files: vec![
@@ -994,6 +999,7 @@ mod router_tests {
             search_error: None,
             skipped: false,
             existing: None,
+            mapping_note: None,
         });
         let id = s.id.clone();
         session::insert(&state.import_sessions, s);
@@ -1430,6 +1436,7 @@ mod import_router_tests {
                 group: None,
                 quality_label: "Unknown".into(),
                 selected,
+                source_episode: None,
             });
         }
         let mut s = ImportSession::new(
@@ -1445,6 +1452,7 @@ mod import_router_tests {
             key: "show".into(),
             parsed_title: "Show".into(),
             season: None,
+            tmdb_season: None,
             year: None,
             query: "Show".into(),
             files,
@@ -1454,6 +1462,7 @@ mod import_router_tests {
             search_error: None,
             skipped: false,
             existing: None,
+            mapping_note: None,
         });
         let id = s.id.clone();
         session::insert(&state.import_sessions, s);

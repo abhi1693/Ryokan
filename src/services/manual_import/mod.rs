@@ -22,6 +22,7 @@
 //! place that does, and only from a `Ready` session the user confirmed.
 
 pub mod import;
+pub mod mapping;
 pub mod matching;
 pub mod parse;
 pub mod preview;
@@ -123,6 +124,9 @@ pub struct CandidateFile {
     pub quality_label: String,
     /// Unticked in the preview means "leave this file alone".
     pub selected: bool,
+    /// The episode number as parsed, when `episode` was renumbered
+    /// into the AniList entry's numbering by the TMDB mapping.
+    pub source_episode: Option<i32>,
 }
 
 /// What Ryokan already holds for one episode of a matched series.
@@ -152,8 +156,12 @@ pub struct SeriesGroup {
     pub key: String,
     pub parsed_title: String,
     /// Season the files carry, when it is 2+ (season 1 and "no
-    /// season" are the same thing to AniList).
+    /// season" are the same thing to AniList's naming).
     pub season: Option<i32>,
+    /// Season the files carry in TMDB / TVDB numbering, season 1
+    /// included; what the mapping resolver keys on. `None` when the
+    /// files carry no season at all.
+    pub tmdb_season: Option<i32>,
     pub year: Option<i32>,
     /// Current AL search string. Starts as `build_query(...)`; the
     /// re-search box replaces it.
@@ -168,6 +176,8 @@ pub struct SeriesGroup {
     pub search_error: Option<String>,
     pub skipped: bool,
     pub existing: Option<ExistingSeries>,
+    /// How the TMDB mapping shaped this group, for the card.
+    pub mapping_note: Option<String>,
 }
 
 impl SeriesGroup {
@@ -430,6 +440,7 @@ fn candidate_from_raw(f: walk::RawFile) -> CandidateFile {
         group: parsed.group,
         quality_label,
         selected: true,
+        source_episode: None,
     }
 }
 
@@ -453,6 +464,7 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
                 key,
                 parsed_title: title.clone(),
                 season,
+                tmdb_season: None,
                 year: None,
                 query: matching::build_query(&title, season),
                 files: Vec::new(),
@@ -462,6 +474,7 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
                 search_error: None,
                 skipped: false,
                 existing: None,
+                mapping_note: None,
             }
         });
         g.files.push(f);
@@ -479,6 +492,17 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
                 .into_iter()
                 .max_by_key(|(y, c)| (*c, -*y))
                 .map(|(y, _)| y);
+            // Majority parsed season, season 1 included, for the TMDB
+            // mapping; `season` above is the AniList-facing one that
+            // folds season 1 into "none".
+            let mut seasons: HashMap<i32, usize> = HashMap::new();
+            for sn in g.files.iter().filter_map(|f| f.season) {
+                *seasons.entry(sn).or_default() += 1;
+            }
+            g.tmdb_season = seasons
+                .into_iter()
+                .max_by_key(|(sn, c)| (*c, -*sn))
+                .map(|(sn, _)| sn);
             g.files.sort_by(|a, b| {
                 a.season
                     .unwrap_or(1)
@@ -570,10 +594,12 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
     let mut results = stream::iter(owned.into_iter().enumerate())
         .map(|(i, mut g)| async move {
             search_and_rank(&mut g, true).await;
-            (i, g)
+            // The TMDB mapping may split a season across AniList
+            // entries; each group comes back as one or more.
+            (i, mapping::apply_season_mapping(g).await)
         })
         .buffer_unordered(MATCH_CONCURRENCY);
-    let mut finished: Vec<(usize, SeriesGroup)> = Vec::with_capacity(total);
+    let mut finished: Vec<(usize, Vec<SeriesGroup>)> = Vec::with_capacity(total);
     while let Some(item) = results.next().await {
         finished.push(item);
         progress::emit(
@@ -586,7 +612,7 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
         .await;
     }
     finished.sort_by_key(|(i, _)| *i);
-    *groups = finished.into_iter().map(|(_, g)| g).collect();
+    *groups = finished.into_iter().flat_map(|(_, gs)| gs).collect();
 }
 
 /// Snapshot of a tracked series's episode tags, for the merge preview.
@@ -770,6 +796,7 @@ mod tests {
             group: None,
             quality_label: "Unknown".into(),
             selected: true,
+            source_episode: None,
         }
     }
 
@@ -844,6 +871,7 @@ mod tests {
             key: "x".into(),
             parsed_title: "x".into(),
             season: None,
+            tmdb_season: None,
             year: None,
             query: "x".into(),
             files: Vec::new(),
@@ -853,6 +881,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            mapping_note: None,
         };
         let alts: Vec<usize> = g.alternatives().into_iter().map(|(i, _)| i).collect();
         assert_eq!(alts, vec![0, 1, 3, 4]);

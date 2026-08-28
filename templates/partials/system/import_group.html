@@ -44,6 +44,7 @@
                 {% if g.kind == "merge" %}<span class="tag import-tag-merge">In your library as <a href="/series/{{ g.existing_anilist_id }}">{{ g.existing_title }}</a></span>{% endif %}
                 {% if g.low_confidence %}<span class="tag import-tag-warn" title="The matched title shares little with the parsed one">Check this match</span>{% endif %}
                 {% if !g.duplicate_of.is_empty() %}<span class="tag import-tag-warn" title="Two folders resolved to the same series; both would import into it">Also matched by &ldquo;{{ g.duplicate_of }}&rdquo;</span>{% endif %}
+                {% if !g.mapping_note.is_empty() %}<span class="tag import-tag-dim" title="Resolved by id through the anibridge TMDB mapping, not by title">{{ g.mapping_note }}</span>{% endif %}
             </div>
             <p class="form-hint">Files go to <code>{{ g.folder_name }}</code> under the media root{% if g.folder_collision %}. A folder with the plain name already exists and no series owns it, so the import uses this name{% endif %}.{% if !g.season_label.is_empty() %} Each AniList season is its own series in Ryokan, so these land in that series' <code>Season 01</code> folder with their own episode numbers.{% endif %}</p>
         </div>
@@ -129,7 +130,7 @@
                         </form>
                     </td>
                     <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span>{% if f.title_from_folder %} <span class="tag import-tag-dim" title="Series name read from the folder, not the filename">folder</span>{% endif %}</td>
-                    <td class="import-nowrap">{{ f.episode_label }}</td>
+                    <td class="import-nowrap">{{ f.episode_label }}{% if !f.episode_note.is_empty() %} <span class="import-have" title="Renumbered into the AniList entry's own numbering">{{ f.episode_note }}</span>{% endif %}</td>
                     <td class="import-nowrap">{{ f.quality_label }}</td>
                     <td class="import-nowrap">
                         <span class="import-status import-status-{{ f.status_class }}">{{ f.status_label }}</span>
