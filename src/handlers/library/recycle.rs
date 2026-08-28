@@ -31,7 +31,6 @@ struct RecycleTemplate {
     /// being refused (live probe, see `services::recycle::check_unwritable`).
     unwritable: bool,
     bin_path: String,
-    age_days: i64,
     groups: Vec<DateGroup>,
     total_entries: usize,
     total_size: String,
@@ -197,7 +196,6 @@ pub async fn page(State(state): State<AppState>, Query(q): Query<RecycleQuery>) 
         enabled,
         unwritable: recycle::check_unwritable(&bin_path).await,
         bin_path,
-        age_days,
         groups,
         total_entries,
         total_size: recycle::human_bytes(total_bytes),
