@@ -45,7 +45,9 @@ Once the search has found a show, the season itself is resolved through the same
 - Where AniList lists one TMDB season as two entries (split cours), the files split into two cards, one per entry, with the episode range each covers. Where one AniList entry spans two TMDB seasons, `S02E05` becomes that entry's **E17**; the episode column shows the new number with a **was E05** note. The import records the AniList number, which is what the rest of Ryokan uses.
 - Files no mapping range covers keep their parsed numbers and stay with the search's pick, on their own card marked **Outside the TMDB mapping**. Shows the dataset hasn't caught up with yet fall back to the title matching above.
 
-The mapping only runs on the automatic pass. A candidate you pick, or a title you type into **Search again**, is taken as given.
+A folder with **no season and absolute numbering** (`Jujutsu Kaisen - 55.mkv`) gets the same treatment through AniList's own sequel chain: the search lands on the first entry, and when file numbers run past its episode count Ryokan follows the TV sequels from it and routes each file to the entry whose cumulative range holds it, renumbered relative to that entry (`55` becomes *JUJUTSU KAISEN Season 3* **E08**, with a **was E55** note). Files past the end of the chain keep their numbers on their own card. This is the same relation chain the grab path uses for absolute-numbered releases.
+
+Both resolvers only run on the automatic pass. A candidate you pick, or a title you type into **Search again**, is taken as given.
 
 The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' `Season 01` folder. The card's season chip says which season the group is.
 

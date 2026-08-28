@@ -132,3 +132,117 @@ async fn empty_season_query_falls_back_to_the_bare_title_and_ranks_the_sequel() 
     }
     anilist::reset_state_for_tests();
 }
+
+/// Detail response with an optional TV SEQUEL edge, in the shape
+/// `services::anilist::get_anime_detail` parses.
+fn detail_response(id: i64, title: &str, episodes: i32, sequel: Option<i64>) -> serde_json::Value {
+    let edges: Vec<serde_json::Value> = sequel
+        .map(|sid| {
+            vec![json!({
+                "relationType": "SEQUEL",
+                "node": {
+                    "id": sid, "idMal": null,
+                    "title": { "romaji": format!("{title} Sequel"), "english": "", "native": "" },
+                    "format": "TV", "status": "FINISHED", "episodes": 23,
+                    "coverImage": { "large": "" }, "type": "ANIME", "seasonYear": 2023
+                }
+            })]
+        })
+        .unwrap_or_default();
+    json!({ "data": { "Media": {
+        "id": id, "idMal": null,
+        "title": { "romaji": title, "english": title, "native": "" },
+        "synonyms": [],
+        "coverImage": { "large": "", "extraLarge": "" },
+        "bannerImage": "",
+        "format": "TV", "status": "FINISHED", "episodes": episodes, "duration": 24,
+        "season": "FALL", "seasonYear": 2020, "endDate": { "year": 2021 },
+        "description": "", "genres": [], "averageScore": 80,
+        "nextAiringEpisode": null, "streamingEpisodes": [],
+        "relations": { "edges": edges }
+    }}})
+}
+
+#[tokio::test]
+async fn absolute_numbering_walks_the_sequel_chain() {
+    let _gate = ENV_LOCK.lock().await;
+    anilist::reset_state_for_tests();
+    let mock = MockServer::start().await;
+    unsafe {
+        std::env::set_var("RYOKAN_ANILIST_API_BASE", mock.uri());
+    }
+    // Search finds only the first entry; the chain is 101 → 102 → 103.
+    Mock::given(method("POST"))
+        .and(path("/"))
+        .and(body_string_contains("SEARCH_MATCH"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(search_response(&[(
+            101,
+            "Jujutsu Kaisen",
+            "JUJUTSU KAISEN",
+        )])))
+        .mount(&mock)
+        .await;
+    for (id, eps, seq) in [(101, 24, Some(102)), (102, 23, Some(103)), (103, 24, None)] {
+        Mock::given(method("POST"))
+            .and(path("/"))
+            .and(body_string_contains(format!("\"id\":{id}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(detail_response(
+                id,
+                "Jujutsu Kaisen",
+                eps,
+                seq,
+            )))
+            .mount(&mock)
+            .await;
+    }
+
+    let mut files = vec![
+        file("Jujutsu Kaisen - 10.mkv", 10),
+        file("Jujutsu Kaisen - 55.mkv", 55),
+        file("Jujutsu Kaisen - 30.mkv", 30),
+    ];
+    for f in &mut files {
+        f.parsed_title = Some("Jujutsu Kaisen".into());
+        f.season = None;
+    }
+    let mut g = group();
+    g.parsed_title = "Jujutsu Kaisen".into();
+    g.season = None;
+    g.tmdb_season = None;
+    g.query = "Jujutsu Kaisen".into();
+    g.files = files;
+    // The search entry advertises 24 episodes, so 55 and 30 overflow.
+    manual_import::search_and_rank(&mut g, true).await;
+    assert_eq!(g.picked().map(|e| e.id), Some(101));
+    let mut out = Vec::new();
+    for g in manual_import::mapping::apply_season_mapping(g).await {
+        out.extend(manual_import::mapping::apply_absolute_numbering(g).await);
+    }
+    assert_eq!(
+        out.len(),
+        3,
+        "{:?}",
+        out.iter().map(|g| &g.mapping_note).collect::<Vec<_>>()
+    );
+    assert_eq!(out[0].picked().map(|e| e.id), Some(101));
+    assert_eq!(out[0].files[0].episode, Some(10));
+    assert_eq!(out[1].picked().map(|e| e.id), Some(102));
+    assert_eq!(
+        (out[1].files[0].episode, out[1].files[0].source_episode),
+        (Some(6), Some(30))
+    );
+    assert_eq!(out[2].picked().map(|e| e.id), Some(103));
+    assert_eq!(
+        (out[2].files[0].episode, out[2].files[0].source_episode),
+        (Some(8), Some(55))
+    );
+    assert_eq!(
+        out[2].mapping_note.as_deref(),
+        Some("Absolute numbering; episodes 55 to 55 through the sequel chain")
+    );
+
+    unsafe {
+        std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+    }
+    anilist::reset_state_for_tests();
+}

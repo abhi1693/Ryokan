@@ -595,8 +595,14 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
         .map(|(i, mut g)| async move {
             search_and_rank(&mut g, true).await;
             // The TMDB mapping may split a season across AniList
-            // entries; each group comes back as one or more.
-            (i, mapping::apply_season_mapping(g).await)
+            // entries, and absolute numbering may spread a folder
+            // along the sequel chain; each group comes back as one
+            // or more.
+            let mut resolved = Vec::new();
+            for g in mapping::apply_season_mapping(g).await {
+                resolved.extend(mapping::apply_absolute_numbering(g).await);
+            }
+            (i, resolved)
         })
         .buffer_unordered(MATCH_CONCURRENCY);
     let mut finished: Vec<(usize, Vec<SeriesGroup>)> = Vec::with_capacity(total);
