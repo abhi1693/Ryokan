@@ -56,7 +56,7 @@
 </form>
 
 {% else if step == "scanning" %}
-<div class="import-scanning" id="import-scanning" data-session="{{ session_id }}">
+<div class="import-scanning" id="import-scanning" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
     <div class="import-spinner" aria-hidden="true"></div>
     <div class="import-scanning-text">
         <strong>Scanning <code>{{ root }}</code></strong>
@@ -69,6 +69,82 @@
         </form>
     </div>
 </div>
+
+{% else if step == "importing" %}
+<div class="import-scanning" id="import-importing" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
+    <div class="import-spinner" aria-hidden="true"></div>
+    <div class="import-scanning-text">
+        <strong>Importing from <code>{{ root }}</code></strong>
+        <p class="form-hint">Files are being {{ mode_label|lower }}ed into the media root, then each series is classified and given its artwork and NFO files. Cancel stops after the file in progress; everything already imported stays. This page updates itself when the import is done.</p>
+    </div>
+    <div class="import-scanning-actions">
+        <a href="/library/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/library/import/{{ session_id }}/cancel">
+            <button type="submit" class="btn btn-danger btn-sm">Cancel import</button>
+        </form>
+    </div>
+</div>
+
+{% else if step == "done" %}
+<div class="import-summary import-report">
+    <div class="import-summary-main">
+        <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
+        <span class="import-summary-line">
+            {% if report.cancelled %}<strong>Import cancelled.</strong> Everything below had already landed.{% else if report.files_failed > 0 %}<strong>Import finished with errors.</strong>{% else %}<strong>Import complete.</strong>{% endif %}
+        </span>
+        <span class="import-summary-counts">
+            <span class="import-count import-count-new"><strong>{{ report.files_written }}</strong> imported</span>
+            <span class="import-count import-count-merge"><strong>{{ report.files_replaced }}</strong> replaced</span>
+            <span class="import-count import-count-nomatch"><strong>{{ report.files_skipped }}</strong> skipped</span>
+            {% if report.files_failed > 0 %}<span class="import-count import-count-error"><strong>{{ report.files_failed }}</strong> failed</span>{% endif %}
+        </span>
+        <span class="import-summary-line">
+            {{ report_size }} across <strong>{{ report.series_created }}</strong> new series and <strong>{{ report.series_merged }}</strong> existing{% if report.series_skipped > 0 %}; {{ report.series_skipped }} series left untouched{% endif %}.
+            New series are monitored for future episodes only, so nothing is grabbed until you say so.
+        </span>
+    </div>
+    <div class="import-summary-actions import-report-actions">
+        <a href="/" class="btn btn-primary">Back to Library</a>
+        <form method="post" action="/library/import/{{ session_id }}/discard">
+            <button type="submit" class="btn btn-secondary">Import another folder</button>
+        </form>
+    </div>
+</div>
+
+{% if !report.groups.is_empty() %}
+<div class="rss-table-wrap">
+    <table class="rss-table import-report-table">
+        <thead>
+            <tr>
+                <th>Folder</th>
+                <th>Series</th>
+                <th>Result</th>
+                <th>Imported</th>
+                <th>Replaced</th>
+                <th>Skipped</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for g in report.groups %}
+            <tr class="{% if !g.errors.is_empty() %}import-report-row-error{% endif %}">
+                <td><span class="import-path" title="{{ g.parsed_title }}">{{ g.parsed_title }}</span></td>
+                <td>{% if g.series_id.is_some() && g.anilist_id != 0 %}<a href="/series/{{ g.anilist_id }}">{{ g.series_title }}</a>{% else %}{{ g.series_title }}{% endif %}{% if !g.folder_name.is_empty() %} <span class="form-hint"><code>{{ g.folder_name }}</code></span>{% endif %}</td>
+                <td class="import-nowrap">{% if g.series_id.is_none() %}<span class="import-status">Untouched</span>{% else if g.created %}<span class="import-status import-status-import">Created</span>{% else %}<span class="import-status import-status-present">Merged</span>{% endif %}</td>
+                <td class="import-nowrap">{{ g.written }}</td>
+                <td class="import-nowrap">{{ g.replaced }}</td>
+                <td class="import-nowrap">{{ g.skipped }}</td>
+            </tr>
+            {% for e in g.errors %}
+            <tr class="import-report-error">
+                <td></td>
+                <td colspan="5"><span class="text-error">{{ e }}</span></td>
+            </tr>
+            {% endfor %}
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
 
 {% else if step == "failed" %}
 <div class="alert alert-error" role="alert">
@@ -119,8 +195,12 @@
 </div>
 {% endif %}
 
+{% if !notice.is_empty() %}
+<div class="alert alert-error" role="alert">{{ notice }}</div>
+{% endif %}
+
 <div class="alert alert-warn import-readonly-note" role="status">
-    <strong>Preview only for now.</strong> Nothing has been written. Correct any wrong matches below, untick files to leave out, and skip whole series. The import step lands in the next part of this feature.
+    <strong>Nothing has been written yet.</strong> Check the matches below, untick files to leave out, skip whole series, then import from the bar at the bottom.
 </div>
 
 <div id="import-groups">
@@ -156,6 +236,33 @@
     </div>
 </section>
 {% endif %}
+
+<div class="import-confirm" id="import-confirm">
+    <div class="import-confirm-text">
+        {% if summary.writes > 0 %}
+        <strong>Import {{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} ({{ write_size }})</strong>
+        <span class="form-hint">into {{ summary.new_series }} new series and {{ summary.merge }} already in your library, by {{ mode_label|lower }}{% if summary.replace > 0 %}, replacing {{ summary.replace }} episode{% if summary.replace != 1 %}s{% endif %} you have at lower quality{% endif %}.{% if summary.needs_attention > 0 %} {{ summary.needs_attention }} series {% if summary.needs_attention == 1 %}is{% else %}are{% endif %} flagged to check first.{% endif %} New series are monitored for future episodes only.</span>
+        {% else %}
+        <strong>Nothing to import.</strong>
+        <span class="form-hint">Every file is excluded, already present, or unmatched.</span>
+        {% endif %}
+    </div>
+    <div class="import-confirm-actions">
+        <form method="post" action="/library/import/{{ session_id }}/discard" class="import-inline-form">
+            <button type="submit" class="btn btn-secondary">Discard</button>
+        </form>
+        {# hx-post so the confirm bridge gates it via htmx:confirm; the
+           HX-Redirect reply navigates to the importing state. #}
+        <form method="post" action="/library/import/{{ session_id }}/confirm" class="import-inline-form"
+              hx-post="/library/import/{{ session_id }}/confirm" hx-swap="none"
+              data-ryokan-confirm-title="Start the import?"
+              data-ryokan-confirm-body="{{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} will be {{ mode_label|lower }}ed into the media root{% if summary.replace > 0 %}, and {{ summary.replace }} existing episode{% if summary.replace != 1 %}s{% endif %} will be replaced (the old files go to the recycle bin when one is configured){% endif %}. You can cancel while it runs; files already imported stay."
+              data-ryokan-confirm-yes="Import"
+              data-ryokan-confirm-no="Not yet">
+            <button type="submit" class="btn btn-primary"{% if summary.writes == 0 %} disabled{% endif %}>Import {{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %}</button>
+        </form>
+    </div>
+</div>
 {% endif %}
 {% endblock %}
 

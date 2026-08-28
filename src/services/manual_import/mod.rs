@@ -18,15 +18,17 @@
 //! the library" is answered by `series.anilist_id` / `series.mal_id`,
 //! never by comparing titles.
 //!
-//! Nothing here mutates the library. The import step (the mutation
-//! side of #122) builds on the session this module produces.
+//! The preview side never mutates the library; [`import`] is the one
+//! place that does, and only from a `Ready` session the user confirmed.
 
+pub mod import;
 pub mod matching;
 pub mod parse;
 pub mod preview;
 pub mod session;
 pub mod walk;
 
+pub use import::{GroupReport, ImportOptions, ImportReport};
 pub use session::ImportSessionStore;
 
 use std::collections::HashMap;
@@ -93,6 +95,10 @@ impl ImportMode {
 pub enum SessionStatus {
     Scanning,
     Ready,
+    Importing,
+    /// The import job finished (or was cancelled part-way); the
+    /// report is what the page shows.
+    Done(Box<ImportReport>),
     Failed(String),
 }
 
@@ -207,6 +213,10 @@ pub struct ImportSession {
     /// Files with no title hint from the filename or any folder.
     pub unmatched_files: Vec<CandidateFile>,
     pub groups: Vec<SeriesGroup>,
+    /// Set by the Cancel button while an import runs; the job checks
+    /// it between files. Shared with the running job through the Arc
+    /// so a session clone sees the same flag.
+    pub cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ImportSession {
@@ -232,6 +242,7 @@ impl ImportSession {
             cross_fs: None,
             unmatched_files: Vec::new(),
             groups: Vec::new(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }

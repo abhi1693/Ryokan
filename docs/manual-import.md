@@ -1,9 +1,6 @@
 # Importing an existing library
 
-If you already have anime on disk, you do not have to download it again. **Library → Import** points Ryokan at a folder you already have, reads the filenames, matches each series on AniList, and shows you exactly what it would bring in before anything changes on disk.
-
-!!! note "Preview only in this release"
-    The import step itself (creating the series, hardlinking or copying the files under the media root, tagging each episode) is the second half of this feature and is not in this release yet. The preview stands on its own as a check of what Ryokan makes of your library: which folders it recognizes, which AniList entry each one maps to, and which files it cannot place.
+If you already have anime on disk, you do not have to download it again. **Library → Import** points Ryokan at a folder you already have, reads the filenames, matches each series on AniList, shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.
 
 ## Before you start
 
@@ -74,8 +71,31 @@ Every card has the same controls, and each one updates just that card:
 
 Files where neither the filename nor any folder above them names a series are listed at the bottom under **Files with no series hint**. Rename the file, or move it into a folder named after the show, and scan again.
 
-## What the preview does not do
+## Importing
 
-- Nothing is written, moved, or tagged. The **Discard preview** button forgets the scan; so does leaving it untouched for two hours.
-- The quality shown per file is read from the filename only. The import step runs the full classifier (ffprobe and all) the way post-processing does.
+The bar at the bottom of the preview says how many files would be written and into how many series. **Import** asks you to confirm, then runs in the background; the page shows live progress ("Importing Frieren S01E05, 12 of 40 files") and updates itself when the run is done. You can leave the page and come back through the Library page.
+
+For each series with something to write, in order:
+
+1. A **new series** is created from the AniList match, exactly as **Add series** would create it, and its metadata (description, episode titles, artwork) is fetched. New series are monitored for **future episodes only**, so an import never kicks off a wave of downloads for the episodes you do not have. Change the monitoring mode on the series page whenever you like. A series that is **already in your library** keeps its monitoring and folder as they are.
+2. Each file lands at `<media root>/<series folder>/Season 01/<original filename>` by hardlink, copy, or move, whichever you picked. Hardlinks that cannot cross a filesystem fall back to a copy. Where the preview said **Replace**, the old file (with its NFO, subtitles, and thumbnail) goes to the recycle bin first when one is configured, otherwise it is deleted; if the bin is configured but not writable, that file is skipped rather than overwritten.
+3. The series folder is classified the same way the library scan classifies files that appear on disk, so each episode gets its quality tag and grab history; then `tvshow.nfo`, `season.nfo`, per-episode NFOs, and the poster / banner / backdrop copies are written.
+
+**Cancel import** stops after the file in progress. Everything already imported stays imported; the report tells you how far it got.
+
+### The report
+
+When the run finishes you get a per-series table: created or merged, how many files were imported, replaced, or skipped, and any errors (a permission problem, a refused recycle) inline under the row. **Back to Library** takes you to the new series; **Import another folder** starts a fresh scan.
+
+### Running it again
+
+Importing is safe to repeat. Scan the same folder again and every episode that landed shows as **Already have**; files that are still linked at the destination are skipped without copying. Only files you excluded the first time, or that were added since, count as new.
+
+## Limits and notes
+
+- Only one import runs at a time. Confirming while another is running is refused with "already running".
+- The quality shown in the preview is read from the filename only. The import runs the full classifier (ffprobe and all) the way post-processing does, so the tag on the series page can be more specific than the preview's label.
+- Files without an episode number are never imported; rename them so the parser can see the number.
+- Filenames are kept as they are. Renaming into Ryokan's own naming scheme is a separate feature.
 - Folders named after something AniList does not know (`misc`, `To sort`) become no-match cards rather than being hidden. Skip them or search for the right title.
+- The **Discard preview** button forgets a scan; so does leaving it untouched for two hours.

@@ -29,7 +29,8 @@ use crate::handlers::responses::htmx_aware_redirect;
 use crate::models::{config, series};
 use crate::services::anilist::AnimeEntry;
 use crate::services::manual_import::{
-    self, ImportMode, ImportSession, SessionStatus,
+    self, ImportMode, ImportOptions, ImportReport, ImportSession, SessionStatus,
+    import::{import_progress_id, start_import},
     preview::{self, FileView, GroupCounts, GroupView, ProjectionContext, SessionSummary},
     session,
     walk::WalkStats,
@@ -140,10 +141,16 @@ struct ImportTemplate {
     page: String,
     title_language: String,
     media_root: String,
-    /// `start` / `scanning` / `ready` / `failed`.
+    /// `start` / `scanning` / `ready` / `importing` / `done` / `failed`.
     step: &'static str,
     /// Start-form validation error.
     error: String,
+    /// Inline notice on the preview (e.g. a refused confirm).
+    notice: String,
+    /// Progress id the page watches while scanning or importing.
+    progress_id: String,
+    report: ImportReport,
+    report_size: String,
     form: StartFormView,
     session_id: String,
     root: String,
@@ -368,6 +375,10 @@ fn base_template(ctx: &RenderContext) -> ImportTemplate {
         media_root: ctx.media_root.clone(),
         step: "start",
         error: String::new(),
+        notice: String::new(),
+        progress_id: String::new(),
+        report: ImportReport::default(),
+        report_size: String::new(),
         form: empty_form(),
         session_id: String::new(),
         root: String::new(),
@@ -394,9 +405,14 @@ fn session_url(id: &str) -> String {
 }
 
 pub async fn page(State(state): State<AppState>, Query(q): Query<PageQuery>) -> Html<String> {
-    let ctx = render_context(&state).await;
+    render_session_page(&state, q.session.trim(), String::new()).await
+}
+
+/// The wizard page for `session_id` in whatever state it is in.
+/// `notice` renders above the preview (confirm refusals).
+async fn render_session_page(state: &AppState, id: &str, notice: String) -> Html<String> {
+    let ctx = render_context(state).await;
     let mut t = base_template(&ctx);
-    let id = q.session.trim();
     if id.is_empty() {
         return render(t);
     }
@@ -415,9 +431,20 @@ pub async fn page(State(state): State<AppState>, Query(q): Query<PageQuery>) -> 
     t.mode_label = session.mode.label();
     t.follow_symlinks = session.follow_symlinks;
     t.include_hidden = session.include_hidden;
+    t.notice = notice;
     match &session.status {
         SessionStatus::Scanning => {
             t.step = "scanning";
+            t.progress_id = session.id.clone();
+        }
+        SessionStatus::Importing => {
+            t.step = "importing";
+            t.progress_id = import_progress_id(&session.id);
+        }
+        SessionStatus::Done(report) => {
+            t.step = "done";
+            t.report_size = human_bytes(report.bytes_written);
+            t.report = (**report).clone();
         }
         SessionStatus::Failed(msg) => {
             t.step = "failed";
@@ -628,6 +655,68 @@ pub async fn group_action(
         g: card,
     };
     Html(partial.render().unwrap_or_default()).into_response()
+}
+
+/// Confirm: start the import job for a Ready preview with something
+/// to write. Refusals re-render the preview with the reason instead of
+/// redirecting, so the user keeps their corrections on screen.
+pub async fn confirm(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Path(session_id): Path<String>,
+) -> Response {
+    if !session::is_valid_id(&session_id) {
+        return htmx_aware_redirect(is_htmx, &session_url(&session_id));
+    }
+    let Some(session) = session::get(&state.import_sessions, &session_id) else {
+        return htmx_aware_redirect(is_htmx, &session_url(&session_id));
+    };
+    if session.status != SessionStatus::Ready {
+        return htmx_aware_redirect(is_htmx, &session_url(&session_id));
+    }
+    let ctx = render_context(&state).await;
+    if ctx.media_root.is_empty() {
+        return render_session_page(
+            &state,
+            &session_id,
+            "Set a media root under Settings before importing.".to_string(),
+        )
+        .await
+        .into_response();
+    }
+    let writes = manual_import::import::writes_for(&session, &ctx.projection());
+    if writes == 0 {
+        return render_session_page(
+            &state,
+            &session_id,
+            "Nothing to import: every file is excluded, already present, or unmatched.".to_string(),
+        )
+        .await
+        .into_response();
+    }
+    match start_import(&state, &session_id, ImportOptions::default()).await {
+        Ok(()) => htmx_aware_redirect(is_htmx, &session_url(&session_id)),
+        Err(msg) => render_session_page(&state, &session_id, msg)
+            .await
+            .into_response(),
+    }
+}
+
+/// Cancel a running import. The job stops between files; the page
+/// shows the partial report when it lands.
+pub async fn cancel(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Path(session_id): Path<String>,
+) -> Response {
+    if session::is_valid_id(&session_id) {
+        session::update(&state.import_sessions, &session_id, |s| {
+            if s.status == SessionStatus::Importing {
+                s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    }
+    htmx_aware_redirect(is_htmx, &session_url(&session_id))
 }
 
 pub async fn discard(
@@ -995,7 +1084,7 @@ mod router_tests {
         assert!(body.contains("Files with no series hint"), "{body}");
         assert!(body.contains("Season 01/01.mkv"));
         assert!(body.contains("S01E01"));
-        assert!(body.contains("Preview only for now"));
+        assert!(body.contains("Nothing has been written yet"));
         let s = session::get(&state.import_sessions, &session_id).unwrap();
         assert_eq!(s.status, SessionStatus::Ready);
         assert_eq!(s.stats.files, 1);
@@ -1171,5 +1260,331 @@ mod router_tests {
             "/library/import"
         );
         assert!(session::get(&state.import_sessions, &id).is_none());
+    }
+}
+
+/// Confirm / cancel / report coverage. The confirm test runs the real
+/// job: AniList is pointed at a closed local port so the metadata
+/// hydration path executes and fails fast without the network.
+#[cfg(test)]
+mod import_router_tests {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+    use axum::routing::{get, post};
+    use std::sync::LazyLock;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::models::config::{Config, save_config};
+    use crate::services::anilist::{self, AnimeEntry};
+    use crate::services::manual_import::{CandidateFile, SeriesGroup, parse::TitleSource};
+    use crate::test_support::{build_test_app_state, in_memory_pool};
+
+    /// Serializes the env-var flip across tests in this module (nextest
+    /// runs one process per test, so this only matters under plain
+    /// `cargo test`).
+    static ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+    fn router(state: AppState) -> Router {
+        Router::new()
+            .route("/library/import", get(page).post(start))
+            .route("/library/import/{session_id}/confirm", post(confirm))
+            .route("/library/import/{session_id}/cancel", post(cancel))
+            .route("/library/import/{session_id}/discard", post(discard))
+            .with_state(state)
+    }
+
+    async fn body_text(resp: axum::response::Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    async fn get_page(app: &Router, uri: &str) -> String {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_text(resp).await
+    }
+
+    async fn post_empty(app: &Router, uri: &str, htmx: bool) -> axum::response::Response {
+        let mut req = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+        if htmx {
+            req = req.header("HX-Request", "true");
+        }
+        app.clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+    }
+
+    fn entry(id: i64, english: &str) -> AnimeEntry {
+        AnimeEntry {
+            id,
+            id_mal: None,
+            title_romaji: format!("{english} Romaji"),
+            title_english: english.to_string(),
+            title_native: String::new(),
+            cover_url: String::new(),
+            format: "TV".into(),
+            status: "FINISHED".into(),
+            status_display: String::new(),
+            episodes: Some(12),
+            season_year: Some(2020),
+            source: "anilist".into(),
+            average_score: None,
+        }
+    }
+
+    /// Real files under a tempdir so the job has something to link.
+    fn session_with_files(state: &AppState, root: &std::path::Path, selected: bool) -> String {
+        let mut files = Vec::new();
+        for (i, name) in ["Show - 01.mkv", "Show - 02.mkv"].iter().enumerate() {
+            let path = root.join("Show").join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"xx").unwrap();
+            files.push(CandidateFile {
+                path,
+                rel_path: format!("Show/{name}"),
+                file_name: name.to_string(),
+                size_bytes: 2,
+                parsed_title: Some("Show".into()),
+                title_source: TitleSource::Filename,
+                season: None,
+                episode: Some(i as i32 + 1),
+                year: None,
+                group: None,
+                quality_label: "Unknown".into(),
+                selected,
+            });
+        }
+        let mut s = ImportSession::new(
+            session::mint_id(),
+            root.to_path_buf(),
+            ImportMode::Hardlink,
+            false,
+            false,
+        );
+        s.status = SessionStatus::Ready;
+        s.stats.files = 2;
+        s.groups.push(SeriesGroup {
+            key: "show".into(),
+            parsed_title: "Show".into(),
+            season: None,
+            year: None,
+            query: "Show".into(),
+            files,
+            candidates: vec![entry(100, "Show")],
+            pick: Some(0),
+            low_confidence: false,
+            search_error: None,
+            skipped: false,
+            existing: None,
+        });
+        let id = s.id.clone();
+        session::insert(&state.import_sessions, s);
+        id
+    }
+
+    async fn seed_media_root(db: &sqlx::SqlitePool, media_root: &str) {
+        let cfg = Config {
+            media_root: media_root.to_string(),
+            ..Config::default()
+        };
+        save_config(db, &cfg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn confirm_runs_the_job_and_page_shows_the_report() {
+        let _gate = ENV_LOCK.lock().await;
+        // Closed port for every metadata provider: the hydration path
+        // runs, fails fast (AL, then the Jikan and Kitsu fallbacks),
+        // and the import carries on the way it would through an
+        // outage. Nothing here reaches the network.
+        anilist::reset_state_for_tests();
+        unsafe {
+            std::env::set_var("RYOKAN_ANILIST_API_BASE", "http://127.0.0.1:9");
+            std::env::set_var("JIKAN_API_BASE", "http://127.0.0.1:9");
+            std::env::set_var("RYOKAN_KITSU_API_BASE", "http://127.0.0.1:9");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let media = tmp.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let db = in_memory_pool().await;
+        seed_media_root(&db, media.to_str().unwrap()).await;
+        let state = build_test_app_state(db, None);
+        let id = session_with_files(&state, &tmp.path().join("src"), true);
+        let app = router(state.clone());
+
+        // Ready page carries the confirm bar.
+        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        assert!(body.contains("Import 2 files"), "{body}");
+        assert!(body.contains("data-ryokan-confirm-title"));
+
+        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("HX-Redirect").unwrap().to_str().unwrap(),
+            format!("/library/import?session={id}")
+        );
+
+        let mut body = String::new();
+        for _ in 0..1500 {
+            body = get_page(&app, &format!("/library/import?session={id}")).await;
+            if !body.contains("import-importing") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(body.contains("Import complete"), "{body}");
+        assert!(body.contains("import-status-import\">Created"), "{body}");
+        assert!(body.contains("<strong>2</strong> imported"), "{body}");
+        assert!(media.join("Show/Season 01/Show - 01.mkv").exists());
+        let row = series::get_by_anilist_id(&state.db, 100)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.folder_name, "Show");
+
+        // A second confirm on the finished session is refused (not
+        // Ready) and just routes back to the page.
+        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), false).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        unsafe {
+            std::env::remove_var("RYOKAN_ANILIST_API_BASE");
+            std::env::remove_var("JIKAN_API_BASE");
+            std::env::remove_var("RYOKAN_KITSU_API_BASE");
+        }
+        anilist::reset_state_for_tests();
+    }
+
+    #[tokio::test]
+    async fn confirm_refuses_when_nothing_would_be_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let media = tmp.path().join("media");
+        std::fs::create_dir_all(&media).unwrap();
+        let db = in_memory_pool().await;
+        seed_media_root(&db, media.to_str().unwrap()).await;
+        let state = build_test_app_state(db, None);
+        let id = session_with_files(&state, &tmp.path().join("src"), false);
+        let app = router(state.clone());
+
+        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        assert!(body.contains("Nothing to import"), "{body}");
+        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.headers().get("HX-Redirect").is_none());
+        let body = body_text(resp).await;
+        assert!(
+            body.contains("Nothing to import: every file is excluded"),
+            "{body}"
+        );
+        assert_eq!(
+            session::get(&state.import_sessions, &id).unwrap().status,
+            SessionStatus::Ready
+        );
+    }
+
+    #[tokio::test]
+    async fn confirm_refuses_without_media_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let id = session_with_files(&state, &tmp.path().join("src"), true);
+        let app = router(state.clone());
+        let resp = post_empty(&app, &format!("/library/import/{id}/confirm"), true).await;
+        let body = body_text(resp).await;
+        assert!(
+            body.contains("Set a media root under Settings before importing"),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_flags_only_a_running_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let id = session_with_files(&state, &tmp.path().join("src"), true);
+        let app = router(state.clone());
+
+        let resp = post_empty(&app, &format!("/library/import/{id}/cancel"), false).await;
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert!(
+            !session::get(&state.import_sessions, &id)
+                .unwrap()
+                .cancel
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "Ready session: no-op"
+        );
+
+        session::update(&state.import_sessions, &id, |s| {
+            s.status = SessionStatus::Importing
+        });
+        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        assert!(body.contains("import-importing"), "{body}");
+        assert!(
+            body.contains(&format!("data-import-progress=\"{id}-import\"")),
+            "{body}"
+        );
+        let resp = post_empty(&app, &format!("/library/import/{id}/cancel"), true).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            session::get(&state.import_sessions, &id)
+                .unwrap()
+                .cancel
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+    }
+
+    #[tokio::test]
+    async fn done_page_renders_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let id = session_with_files(&state, &tmp.path().join("src"), true);
+        let report = ImportReport {
+            series_created: 1,
+            files_written: 1,
+            files_failed: 1,
+            bytes_written: 2048,
+            groups: vec![manual_import::GroupReport {
+                parsed_title: "Show".into(),
+                series_title: "Show".into(),
+                anilist_id: 100,
+                series_id: Some(7),
+                folder_name: "Show".into(),
+                created: true,
+                written: 1,
+                errors: vec!["Show/Show - 02.mkv: permission denied".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        session::update(&state.import_sessions, &id, |s| {
+            s.status = SessionStatus::Done(Box::new(report));
+        });
+        let app = router(state);
+        let body = get_page(&app, &format!("/library/import?session={id}")).await;
+        assert!(body.contains("Import finished with errors"), "{body}");
+        assert!(body.contains("2.0 KiB"), "{body}");
+        assert!(body.contains("/series/100"));
+        assert!(body.contains("permission denied"));
+        assert!(body.contains("Import another folder"));
     }
 }

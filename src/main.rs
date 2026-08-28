@@ -614,6 +614,14 @@ async fn main() {
             post(handlers::library::manual_import::discard),
         )
         .route(
+            "/library/import/{session_id}/confirm",
+            post(handlers::library::manual_import::confirm),
+        )
+        .route(
+            "/library/import/{session_id}/cancel",
+            post(handlers::library::manual_import::cancel),
+        )
+        .route(
             "/api/library/recycle/empty",
             post(handlers::library::recycle::empty),
         )

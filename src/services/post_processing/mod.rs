@@ -1799,6 +1799,92 @@ async fn import_torrent(
 }
 
 /// Run one post-processing cycle. Called by the background task every minute.
+/// Series-level sidecars for one series: poster / banner / backdrop
+/// copies from the artwork cache, then `tvshow.nfo` and `season.nfo`
+/// with `<art>` blocks gated on what actually landed. This is the tail
+/// of the per-series import loop above, exposed on its own so the
+/// manual-import job (#122) can finish a series it just filled the
+/// same way a post-processed grab would. Best-effort throughout: a
+/// missing cached detail still writes the minimal series-row NFO.
+pub async fn write_series_sidecars(state: &AppState, series_id: i64) -> Result<(), String> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| format!("config read failed: {e}"))?
+        .ok_or_else(|| "config row missing".to_string())?;
+    if cfg.media_root.trim().is_empty() {
+        return Err("media root is not set".to_string());
+    }
+    let series_row = series::get_by_id(&state.db, series_id)
+        .await
+        .map_err(|e| format!("series lookup failed: {e}"))?
+        .ok_or_else(|| format!("series {series_id} not found"))?;
+    if series_row.folder_name.is_empty() {
+        return Err(format!("series {series_id} has no folder name"));
+    }
+    let cached_detail = metadata_cache::get_by_series_id(&state.db, series_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.detail);
+
+    let series_root = Path::new(cfg.media_root.trim()).join(&series_row.folder_name);
+    let season_dir = series_root.join(format!("Season {:02}", 1_i32));
+    {
+        let season_dir = season_dir.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&season_dir))
+            .await
+            .map_err(|e| format!("create season dir join: {e}"))?
+            .map_err(|e| format!("create season dir: {e}"))?;
+    }
+
+    let poster_dest = series_root.join("poster.jpg");
+    let season_poster_dest = season_dir.join("folder.jpg");
+    let banner_dest = series_root.join("banner.jpg");
+    let backdrop_dest = series_root.join("backdrop.jpg");
+    let cover_source = cached_detail.as_ref().map(|d| d.cover_url.as_str());
+    let banner_source = cached_detail.as_ref().map(|d| d.banner_url.as_str());
+
+    let poster_outcome = copy_series_and_season_poster(
+        &state.db,
+        series_id,
+        cover_source,
+        &poster_dest,
+        &season_poster_dest,
+    )
+    .await;
+    let banner_outcome = copy_series_banner_and_backdrop(
+        &state.db,
+        series_id,
+        banner_source,
+        &banner_dest,
+        &backdrop_dest,
+    )
+    .await;
+
+    nfo::write_series_nfo(
+        &series_root.join("tvshow.nfo"),
+        &series_row,
+        cached_detail.as_ref(),
+        &cfg.title_language,
+        poster_outcome.series_root,
+        banner_outcome.series_banner,
+        banner_outcome.series_backdrop,
+    )
+    .await
+    .map_err(|e| format!("tvshow.nfo: {e}"))?;
+    nfo::write_season_nfo(
+        &season_dir.join("season.nfo"),
+        1,
+        &series_row,
+        cached_detail.as_ref(),
+        &cfg.title_language,
+        poster_outcome.season_folder,
+    )
+    .await
+    .map_err(|e| format!("season.nfo: {e}"))?;
+    Ok(())
+}
+
 pub async fn run_once(state: &AppState) {
     let _guard = match POST_PROC_LOCK.try_lock() {
         Ok(g) => g,
