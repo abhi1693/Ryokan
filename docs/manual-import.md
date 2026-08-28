@@ -40,10 +40,10 @@ Seasons are read from wherever the name carries them: `S02E01`, a `S2` / `Season
 
 ### Seasons by id, not by name
 
-Once the search has found a show, the season itself is resolved through the same TMDB mappings the Sonarr and Radarr integrations use (the anibridge dataset Ryokan already keeps). Those map every AniList entry to a TMDB show and season with episode ranges, which is the numbering a `Season 3` folder in a Jellyfin or Plex library follows. So "season 3 of Fire Force" is looked up by id rather than guessed from how AniList names the sequel, and the card says **Season 3 through the TMDB mapping** when that happened. Two consequences worth knowing:
+Once the search has found a show, the season itself is resolved through the same TMDB mappings the Sonarr and Radarr integrations use (the anibridge dataset Ryokan already keeps). Those map every AniList entry to a TMDB show and season with episode ranges, which is the numbering a `Season 3` folder in a Jellyfin or Plex library follows. So "season 3 of Fire Force" is looked up by id rather than guessed from how AniList names the sequel. Two consequences worth knowing:
 
 - Where AniList lists one TMDB season as two entries (split cours), the files split into two cards, one per entry, with the episode range each covers. Where one AniList entry spans two TMDB seasons, `S02E05` becomes that entry's **E17**; the episode column shows the new number with a **was E05** note. The import records the AniList number, which is what the rest of Ryokan uses.
-- Files no mapping range covers keep their parsed numbers and stay with the search's pick, on their own card marked **Outside the TMDB mapping**. Shows the dataset hasn't caught up with yet fall back to the title matching above.
+- Files no mapping range covers keep their parsed numbers and stay with the search's pick, on their own card. Shows the dataset hasn't caught up with yet fall back to the title matching above.
 
 A folder with **no season and absolute numbering** (`Jujutsu Kaisen - 55.mkv`) gets the same treatment through AniList's own sequel chain: the search lands on the first entry, and when file numbers run past its episode count Ryokan follows the TV sequels from it and routes each file to the entry whose cumulative range holds it, renumbered relative to that entry (`55` becomes *JUJUTSU KAISEN Season 3* **E08**, with a **was E55** note). Files past the end of the chain keep their numbers on their own card. This is the same relation chain the grab path uses for absolute-numbered releases.
 
@@ -53,7 +53,7 @@ The episode column never shows a season: each AniList season is its own series i
 
 ### The file table
 
-Each row shows the file, its episode, the quality Ryokan reads from the filename, what the import would do with it, and where it would land. The result column is one of:
+Each row shows the file, its episode, the quality Ryokan reads from the filename, what the import would do with it, and where it would land. The action column is one of:
 
 - **Import**: the episode is not in your library yet.
 - **Replace**: you have the episode at a lower quality and the import would upgrade it.
@@ -63,7 +63,7 @@ Each row shows the file, its episode, the quality Ryokan reads from the filename
 - **No episode number**: see above.
 - **Excluded**: you unticked it.
 
-Files land at `<media root>/<series folder>/Season 01/<original filename>`. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name is generated from the AniList title, and if a folder of that name already exists under the media root without a series owning it, the preview shows the suffixed name (`Show (2)`) the import would use instead.
+Files land at `<media root>/<series folder>/Season 01/<original filename>`. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name is generated from the AniList title (the destination column shows it), and if a folder of that name already exists under the media root without a series owning it, the import uses a suffixed name (`Show (2)`) instead. Titles everywhere in the wizard, the progress messages, and the report follow your **Settings → General → Title language**.
 
 ### Badges worth a look
 

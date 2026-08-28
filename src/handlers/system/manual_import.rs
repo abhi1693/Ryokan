@@ -145,14 +145,10 @@ struct GroupCard {
     skipped: bool,
     existing_title: String,
     existing_anilist_id: i64,
-    folder_name: String,
-    folder_collision: bool,
     files: Vec<FileView>,
     counts: GroupCounts,
     /// Another group in this preview picked the same series.
     duplicate_of: String,
-    /// How the TMDB mapping shaped this group, if it did.
-    mapping_note: String,
     /// Inline error from the last override action on this card.
     action_error: String,
 }
@@ -373,12 +369,9 @@ fn build_card(
             .map(|e| e.title.clone())
             .unwrap_or_default(),
         existing_anilist_id: group.existing.as_ref().map(|e| e.anilist_id).unwrap_or(0),
-        folder_name: view.folder_name,
-        folder_collision: view.folder_collision,
         files: view.files,
         counts: view.counts,
         duplicate_of,
-        mapping_note: group.mapping_note.clone().unwrap_or_default(),
         action_error,
     }
 }
@@ -1356,10 +1349,6 @@ mod router_tests {
         // Pick the alternative, then none.
         let body = body_text(post_form(&app, &uri, "action=pick&candidate=1", true).await).await;
         assert!(body.contains("anilist.co/anime/101"), "{body}");
-        assert!(
-            body.contains("<code>Show Alternative</code>"),
-            "folder follows the new pick: {body}"
-        );
         assert_eq!(
             session::get(&state.import_sessions, &id).unwrap().groups[0].pick,
             Some(1)

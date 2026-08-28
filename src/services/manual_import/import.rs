@@ -356,7 +356,11 @@ pub async fn run_import(
                 }
             };
         gr.series_id = Some(row.id);
-        gr.series_title = row.title.clone();
+        // Every user-facing string about this series (report row,
+        // toast, recycle manifest, log lines) follows the configured
+        // title language, not the frozen `series.title` column.
+        let series_title = nfo::title_for_preference(&row, &cfg.title_language);
+        gr.series_title = series_title.clone();
         gr.created = created;
 
         // Folder: a created series keeps the upsert's generated name
@@ -390,7 +394,6 @@ pub async fn run_import(
             report.series_merged += 1;
         }
 
-        let series_title = nfo::title_for_preference(&row, &cfg.title_language);
         let season_dir = Path::new(&media_root)
             .join(&row.folder_name)
             .join("Season 01");
@@ -436,7 +439,7 @@ pub async fn run_import(
                         &cfg.recycle_bin_path,
                         RecycleKind::Episode,
                         Some(row.id),
-                        &row.title,
+                        &series_title,
                         old_path,
                     )
                     .await
@@ -509,7 +512,7 @@ pub async fn run_import(
             progress::emit(
                 "finish",
                 "info",
-                format!("Fetching metadata for {}", t.row.title),
+                format!("Fetching metadata for {}", series_title),
                 Some(format!("{} of {total_series} series", i + 1)),
                 false,
             )
@@ -521,7 +524,7 @@ pub async fn run_import(
                 logger::warn(
                     &state.db,
                     LogCategory::Library,
-                    &format!("Manual import: metadata fetch failed for {}", t.row.title),
+                    &format!("Manual import: metadata fetch failed for {}", series_title),
                     &e,
                 )
                 .await;
@@ -584,7 +587,7 @@ pub async fn run_import(
             logger::warn(
                 &state.db,
                 LogCategory::Library,
-                &format!("Manual import: sidecar write failed for {}", t.row.title),
+                &format!("Manual import: sidecar write failed for {}", series_title),
                 &e,
             )
             .await;
@@ -973,6 +976,52 @@ mod tests {
             states,
             vec!["replaced".to_string(), "completed".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn titles_follow_the_configured_language_everywhere() {
+        let f = fixture("hardlink", false).await;
+        let mut cfg = config::get_config(&f.state.db).await.unwrap().unwrap();
+        cfg.title_language = "romaji".into();
+        config::save_config(&f.state.db, &cfg).await.unwrap();
+        // A tracked series whose frozen `title` is the English one.
+        let sid = seed_series(&f.state.db, 100, "Show").await;
+        sqlx::query("UPDATE series SET title = 'Show English', title_english = 'Show English', title_romaji = 'Show Romaji' WHERE id = ?")
+            .bind(sid)
+            .execute(&f.state.db)
+            .await
+            .unwrap();
+        let files = vec![candidate(&f.src, "Show/Show - 01.mkv", Some(1))];
+        let mut e = entry(100, "Show English");
+        e.title_romaji = "Show Romaji".into();
+        let mut g = group(files, e);
+        crate::services::manual_import::resolve_existing(&f.state.db, &mut g).await;
+        assert_eq!(
+            g.existing.as_ref().map(|x| x.title.as_str()),
+            Some("Show Romaji"),
+            "the merge badge follows the preference, not series.title"
+        );
+        let id = ready_session(&f.state, &f.src, ImportMode::Hardlink, vec![g]);
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(report.groups[0].series_title, "Show Romaji");
+
+        // A created series is titled in the preference too.
+        let files = vec![candidate(&f.src, "Other/Other - 01.mkv", Some(1))];
+        let mut e = entry(200, "Other English");
+        e.title_romaji = "Other Romaji".into();
+        let id = ready_session(
+            &f.state,
+            &f.src,
+            ImportMode::Hardlink,
+            vec![group(files, e)],
+        );
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(report.groups[0].series_title, "Other Romaji");
+        let row = series::get_by_anilist_id(&f.state.db, 200)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.title, "Other Romaji");
     }
 
     #[tokio::test]

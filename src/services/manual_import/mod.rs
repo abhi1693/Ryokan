@@ -626,7 +626,11 @@ pub async fn match_groups(groups: &mut Vec<SeriesGroup>) {
 }
 
 /// Snapshot of a tracked series's episode tags, for the merge preview.
+/// `title` follows `config.title_language`, not the frozen
+/// `series.title` column.
 async fn existing_from_row(db: &SqlitePool, row: series::Series) -> ExistingSeries {
+    let pref = crate::services::library_link::title_language(db).await;
+    let title = crate::services::nfo::title_for_preference(&row, &pref);
     let tags = episode_tags::get_for_series(db, row.id)
         .await
         .unwrap_or_default()
@@ -655,7 +659,7 @@ async fn existing_from_row(db: &SqlitePool, row: series::Series) -> ExistingSeri
     ExistingSeries {
         id: row.id,
         anilist_id: row.anilist_id,
-        title: row.title,
+        title,
         folder_name: row.folder_name,
         tags,
     }
