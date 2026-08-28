@@ -1,6 +1,6 @@
 # Importing an existing library
 
-If you already have anime on disk, you do not have to download it again. **Library → Import** points Ryokan at a folder you already have, reads the filenames, matches each series on AniList, shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.
+If you already have anime on disk, you do not have to download it again. **System → Import Library** points Ryokan at a folder you already have, reads the filenames, matches each series on AniList, shows you exactly what it would bring in, and then (once you have checked the matches) hardlinks, copies, or moves the files into your media root and tags every episode the way a finished download would be.
 
 ## Before you start
 
@@ -19,7 +19,7 @@ The start form takes:
 
 Only video files count (`.mkv`, `.mp4`, `.avi`, `.wmv`, `.webm`, `.m4v`, `.ts`). Ryokan's own media root and recycle bin are skipped even when they sit inside the folder you chose. Folders it cannot read are counted and skipped, not fatal.
 
-Matching each series is one AniList lookup, and AniList allows about thirty a minute, so a library with hundreds of shows takes a few minutes on the first scan. The page updates itself when the preview is ready; you can leave it and come back through the Library page. A preview stays available for two hours after you last touched it.
+Matching each series is one AniList lookup, and AniList allows about thirty a minute, so a library with hundreds of shows takes a few minutes on the first scan. The page updates itself when the preview is ready. You can leave it and come back through **System → Import Library**, which lists recent scans, including any still running. A preview stays available for two hours after you last touched it.
 
 ## Reading the preview
 
@@ -73,7 +73,7 @@ Files where neither the filename nor any folder above them names a series are li
 
 ## Importing
 
-The bar at the bottom of the preview says how many files would be written and into how many series. **Import** asks you to confirm, then runs in the background; the page shows live progress ("Importing Frieren S01E05, 12 of 40 files") and updates itself when the run is done. You can leave the page and come back through the Library page.
+The bar at the bottom of the preview says how many files would be written and into how many series. **Import** asks you to confirm, then runs in the background; the page shows live progress ("Importing Frieren S01E05, 12 of 40 files") and updates itself when the run is done. You can leave the page and come back through **System → Import Library**.
 
 For each series with something to write, in order:
 

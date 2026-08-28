@@ -51,13 +51,8 @@
     margin-left: auto;
 }
 
-.library-add-btn,
-.library-import-btn {
+.library-add-btn {
     flex-shrink: 0;
-}
-
-.library-import-btn {
-    text-decoration: none;
 }
 
 .library-scope-row {
@@ -818,10 +813,6 @@
     }
     .library-add-btn {
         flex: 1 1 100%;
-    }
-    .library-import-btn {
-        flex: 1 1 100%;
-        text-align: center;
     }
     .library-scope-row {
         flex-wrap: wrap;

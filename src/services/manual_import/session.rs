@@ -90,6 +90,17 @@ pub fn update<R>(
     Some(f(s))
 }
 
+/// Every live session, newest-touched first. The start page lists
+/// them so a scan or import left running is reachable again without
+/// its URL.
+pub fn list(store: &ImportSessionStore) -> Vec<ImportSession> {
+    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    evict(&mut map);
+    let mut all: Vec<ImportSession> = map.values().cloned().collect();
+    all.sort_by_key(|s| std::cmp::Reverse(s.last_touched));
+    all
+}
+
 pub fn remove(store: &ImportSessionStore, id: &str) -> bool {
     let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
     map.remove(id).is_some()
@@ -131,6 +142,23 @@ mod tests {
         ));
         assert!(remove(&store, "a"));
         assert!(!remove(&store, "a"));
+    }
+
+    #[test]
+    fn list_is_newest_first_and_skips_stale() {
+        let store = new_store();
+        insert(&store, blank("first"));
+        std::thread::sleep(Duration::from_millis(2));
+        insert(&store, blank("second"));
+        let ids: Vec<String> = list(&store).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["second".to_string(), "first".to_string()]);
+        {
+            let mut map = store.lock().unwrap();
+            map.get_mut("first").unwrap().last_touched =
+                Instant::now() - SESSION_TTL - Duration::from_secs(1);
+        }
+        let ids: Vec<String> = list(&store).into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["second".to_string()]);
     }
 
     #[test]

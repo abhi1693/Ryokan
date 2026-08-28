@@ -36,6 +36,14 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg>
         <span>Scheduled Tasks</span>
     </a>
+    {# Manual import (#122) lives here rather than on the Library
+       toolbar: a one-time onboarding job, not a daily control. The
+       entry is a launcher for the wizard page, so it never renders
+       as the active tab. #}
+    <a href="/library/import" class="tabbed-side-tab" title="Import an existing library from a folder">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/><path d="M12 11v6"/><path d="M9 14l3 3 3-3"/></svg>
+        <span>Import Library</span>
+    </a>
     <a href="/system?tab=review" class="tabbed-side-tab {% if tab == "review" %}active{% endif %}">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg>
         <span>Needs Review</span>

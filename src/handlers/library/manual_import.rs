@@ -120,6 +120,25 @@ struct GroupCard {
     action_error: String,
 }
 
+/// A live session on the start page's "Recent scans" list.
+struct RecentView {
+    id: String,
+    root: String,
+    /// `Scanning` / `Ready to review` / `Importing` / `Imported` / `Failed`.
+    status: &'static str,
+    mode_label: &'static str,
+}
+
+fn recent_status(status: &SessionStatus) -> &'static str {
+    match status {
+        SessionStatus::Scanning => "Scanning",
+        SessionStatus::Ready => "Ready to review",
+        SessionStatus::Importing => "Importing",
+        SessionStatus::Done(_) => "Imported",
+        SessionStatus::Failed(_) => "Failed",
+    }
+}
+
 /// A file with no series hint at all, listed under its own heading.
 struct UnmatchedView {
     rel_path: String,
@@ -166,6 +185,8 @@ struct ImportTemplate {
     failed_message: String,
     groups: Vec<GroupCard>,
     unmatched: Vec<UnmatchedView>,
+    /// Start page only: live sessions, newest first.
+    recent: Vec<RecentView>,
 }
 
 fn format_display(format: &str) -> String {
@@ -370,7 +391,8 @@ fn empty_form() -> StartFormView {
 
 fn base_template(ctx: &RenderContext) -> ImportTemplate {
     ImportTemplate {
-        page: "library".to_string(),
+        // Reached from System → Import Library; highlight that nav entry.
+        page: "system".to_string(),
         title_language: ctx.title_pref.clone(),
         media_root: ctx.media_root.clone(),
         step: "start",
@@ -393,7 +415,20 @@ fn base_template(ctx: &RenderContext) -> ImportTemplate {
         failed_message: String::new(),
         groups: Vec::new(),
         unmatched: Vec::new(),
+        recent: Vec::new(),
     }
+}
+
+fn recent_sessions(state: &AppState) -> Vec<RecentView> {
+    session::list(&state.import_sessions)
+        .into_iter()
+        .map(|s| RecentView {
+            id: s.id.clone(),
+            root: s.root.display().to_string(),
+            status: recent_status(&s.status),
+            mode_label: s.mode.label(),
+        })
+        .collect()
 }
 
 fn render(t: ImportTemplate) -> Html<String> {
@@ -414,6 +449,7 @@ async fn render_session_page(state: &AppState, id: &str, notice: String) -> Html
     let ctx = render_context(state).await;
     let mut t = base_template(&ctx);
     if id.is_empty() {
+        t.recent = recent_sessions(state);
         return render(t);
     }
     let session = if session::is_valid_id(id) {
@@ -423,6 +459,7 @@ async fn render_session_page(state: &AppState, id: &str, notice: String) -> Html
     };
     let Some(session) = session else {
         t.error = "That preview has expired. Start a new scan.".to_string();
+        t.recent = recent_sessions(state);
         return render(t);
     };
 
@@ -547,6 +584,7 @@ pub async fn start(
         Err(msg) => {
             let mut t = base_template(&ctx);
             t.error = msg;
+            t.recent = recent_sessions(&state);
             t.form = StartFormView {
                 path: form.path.trim().to_string(),
                 mode: if ImportMode::parse(&form.mode).is_some() {
@@ -978,6 +1016,21 @@ mod router_tests {
             body.contains("disabled"),
             "scan button disabled without a media root"
         );
+    }
+
+    #[tokio::test]
+    async fn start_page_lists_live_sessions() {
+        let db = in_memory_pool().await;
+        let state = build_test_app_state(db, None);
+        let id = ready_session(&state);
+        let app = router(state);
+        let (_, body) = get_page(&app, "/library/import").await;
+        assert!(body.contains("Recent scans"), "{body}");
+        assert!(
+            body.contains(&format!("/library/import?session={id}")),
+            "{body}"
+        );
+        assert!(body.contains("Ready to review"), "{body}");
     }
 
     #[tokio::test]

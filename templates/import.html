@@ -5,7 +5,7 @@
 {% block content %}
 <div class="page-header import-header">
     <h2>Import Existing Library</h2>
-    <a href="/" class="btn btn-secondary">Back to Library</a>
+    <a href="/system" class="btn btn-secondary">Back to System</a>
 </div>
 
 {% if step == "start" %}
@@ -54,6 +54,23 @@
         <button type="submit" class="btn btn-primary"{% if media_root.is_empty() %} disabled{% endif %}>Scan folder</button>
     </div>
 </form>
+
+{% if !recent.is_empty() %}
+<section class="import-recent">
+    <h3>Recent scans</h3>
+    <p class="form-hint">Scans and imports from the last two hours, including any still running.</p>
+    <ul class="import-recent-list">
+        {% for r in recent %}
+        <li>
+            <a href="/library/import?session={{ r.id }}" class="import-recent-link">
+                <code class="import-recent-root" title="{{ r.root }}">{{ r.root }}</code>
+                <span class="import-recent-meta">{{ r.status }} &middot; {{ r.mode_label }}</span>
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
 
 {% else if step == "scanning" %}
 <div class="import-scanning" id="import-scanning" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
