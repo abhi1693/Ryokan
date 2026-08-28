@@ -51,19 +51,16 @@ function recycleSetRowBusy(id, busy) {
 function recycleRemoveRow(id) {
     var row = document.getElementById('recycle-' + id);
     if (row) {
-        var date = row.getAttribute('data-date');
+        var section = row.closest('.recycle-group');
         row.remove();
-        // Drop the date row once its last entry is gone.
-        if (date && !document.querySelector('#recycle-groups tr[data-date="' + date + '"]')) {
-            var dateRow = document.querySelector('#recycle-groups tr[data-date-row="' + date + '"]');
-            if (dateRow) dateRow.remove();
-        }
+        // Drop the date group once its last entry is gone.
+        if (section && !section.querySelector('tbody tr')) section.remove();
     }
     recycleRefreshSummary();
 }
 
 function recycleRefreshSummary() {
-    var rows = document.querySelectorAll('#recycle-groups tbody tr[data-bytes]');
+    var rows = document.querySelectorAll('#recycle-groups tbody tr');
     var count = rows.length;
     var bytes = 0;
     rows.forEach(function (r) { bytes += Number(r.getAttribute('data-bytes')) || 0; });
@@ -75,7 +72,6 @@ function recycleRefreshSummary() {
     if (emptyBtn) emptyBtn.disabled = count === 0;
     if (count === 0) {
         var groups = document.getElementById('recycle-groups');
-        if (groups) groups.hidden = true;
         if (!document.getElementById('recycle-empty-state') && groups) {
             var empty = document.createElement('div');
             empty.className = 'empty-state';
@@ -159,7 +155,7 @@ function recycleEmpty(btn) {
             .then(function (res) {
                 if (res.body && res.body.ok) {
                     recycleToast('success', 'Recycle bin emptied', res.body.message || '');
-                    document.querySelectorAll('#recycle-groups tbody tr').forEach(function (r) { r.remove(); });
+                    document.querySelectorAll('#recycle-groups .recycle-group').forEach(function (s) { s.remove(); });
                     recycleRefreshSummary();
                 } else {
                     recycleToast('error', 'Empty failed', (res.body && res.body.message) || ('HTTP ' + res.status));

@@ -65,32 +65,62 @@
     max-width: 340px;
 }
 
-/* One table for every date bucket, normal auto layout: columns size to
-   their content, so the actions column is exactly as wide as its two
-   buttons plus padding and the header sits over them. The min-width
-   makes narrow viewports scroll the wrap instead of crushing columns. */
+/* One table per date bucket (the separated look), normal auto layout so
+   the actions column is exactly its two buttons plus the cell's 12px
+   padding. Every non-path column has a pinned width wider than its
+   content, and the path column absorbs the remainder, so each group's
+   table computes identical column positions. The min-width makes narrow
+   viewports scroll the wrap instead of crushing columns. */
 .recycle-table {
+    table-layout: auto;
     width: 100%;
     min-width: 860px;
 }
 
+/* Auto layout ignores <col> widths once the path cell claims 100%, but
+   it honors `min-width` on the cells as a floor even against the
+   percentage column, and the column only grows past it if a single word
+   can't fit. Wrapping stays
+   allowed in these columns for exactly that reason: a fixed width plus
+   nowrap would let a long value push the column wider in one group and
+   break the alignment with the others. */
+.recycle-table th:nth-child(1),
+.recycle-table td:nth-child(1) {
+    min-width: 170px;
+}
+
+.recycle-table th:nth-child(2),
+.recycle-table td:nth-child(2) {
+    min-width: 150px;
+}
+
+.recycle-table th:nth-child(4),
+.recycle-table td:nth-child(4) {
+    min-width: 90px;
+}
+
+.recycle-table th:nth-child(5),
+.recycle-table td:nth-child(5) {
+    min-width: 110px;
+}
+
+.recycle-table th:nth-child(6),
+.recycle-table td:nth-child(6) {
+    min-width: 100px;
+}
+
 /* The path column is the flexible one: `max-width: 0` plus `width: 100%`
    makes auto layout hand it whatever the other columns leave, and the
-   inner span ellipsizes inside that, so the table never grows past its
-   container to fit a long path. */
+   inner span ellipsizes inside that. */
 .recycle-table td:nth-child(3),
 .recycle-table th:nth-child(3) {
     max-width: 0;
     width: 100%;
 }
 
-.recycle-date-row td {
-    padding: 16px 12px 6px;
-    font-size: 14px;
-    font-weight: 700;
-    color: var(--text-bright);
-    background: var(--bg-elevated);
-    border-bottom: 1px solid var(--border);
+.recycle-group h3 {
+    margin: 18px 0 8px;
+    font-size: 15px;
 }
 
 .recycle-path {
@@ -104,14 +134,15 @@
 }
 
 .recycle-series {
-    max-width: 260px;
     font-weight: 600;
     color: var(--text-bright);
     overflow-wrap: anywhere;
 }
 
+/* Numeric cells prefer one line but may wrap rather than widen their
+   column (see the width pins above). */
 .recycle-nowrap {
-    white-space: nowrap;
+    white-space: normal;
 }
 
 /* Auto layout sizes this column to the buttons; the cell's own 12px
@@ -125,15 +156,7 @@
 /* Auto layout would otherwise squeeze the wrappable columns to their
    narrowest and hand the space to the path; these floors keep titles on
    one or two lines. */
-.recycle-table td.recycle-series,
-.recycle-table th:first-child {
-    min-width: 180px;
-}
 
-.recycle-table td:nth-child(2),
-.recycle-table th:nth-child(2) {
-    white-space: nowrap;
-}
 
 /* Filters apply on change; the submit button is a no-JS / keyboard
    fallback, hidden when scripting is available. */
