@@ -157,7 +157,68 @@ pub(crate) fn validate_batch_episode_map(
 }
 
 pub(crate) fn requires_episode_map_preflight(is_batch: bool, video_file_count: usize) -> bool {
-    is_batch || video_file_count > 1
+    effective_batch_shape(is_batch, video_file_count)
+}
+
+pub(crate) fn effective_batch_shape(is_batch: bool, primary_video_file_count: usize) -> bool {
+    is_batch || primary_video_file_count > 1
+}
+
+const SECONDARY_MEDIA_PATH_MARKERS: &[&str] = &[
+    "behind the scenes",
+    "creditless endings",
+    "creditless openings",
+    "deleted scenes",
+    "extra",
+    "extras",
+    "featurette",
+    "featurettes",
+    "interview",
+    "interviews",
+    "sample",
+    "samples",
+    "trailer",
+    "trailers",
+];
+
+fn normalize_secondary_path_part(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if matches!(character, '.' | '_' | '-') {
+                ' '
+            } else {
+                character.to_ascii_lowercase()
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Identify non-episode video paths without treating a release root whose
+/// title merely advertises `[Extras]` as secondary. qBittorrent normally
+/// returns `release-root/Extras/file.mkv`; direct relative paths such as
+/// `Extras/file.mkv` are also supported.
+pub(crate) fn is_secondary_video_path(value: &str) -> bool {
+    let path_parts: Vec<String> = value
+        .split(['/', '\\'])
+        .filter(|part| !part.trim().is_empty())
+        .map(normalize_secondary_path_part)
+        .collect();
+
+    path_parts.iter().enumerate().any(|(index, part)| {
+        let first_component_is_marker = index == 0
+            && SECONDARY_MEDIA_PATH_MARKERS
+                .iter()
+                .any(|marker| part == marker);
+        let inspect_component = index > 0 || path_parts.len() == 1 || first_component_is_marker;
+        inspect_component
+            && SECONDARY_MEDIA_PATH_MARKERS
+                .iter()
+                .any(|marker| part == marker || part.starts_with(&format!("{} ", marker)))
+    })
 }
 
 /// Return the wanted video indices only when every one is complete. Unwanted
@@ -611,10 +672,29 @@ async fn import_torrent(
     // file falling back to the parent. Motivating case (#45): the
     // HorribleSubs JoJo P3 48-ep pack, where the grab-time wait timed
     // out and Egypt-hen never got auto-added.
-    if routes.is_empty() && grab.is_batch && grab.series_id > 0 {
+    let discovered_primary_video_count = files
+        .iter()
+        .filter(|file| {
+            file.wanted && is_video_file(&file.name) && !is_secondary_video_path(&file.name)
+        })
+        .count();
+    let discovered_batch = effective_batch_shape(grab.is_batch, discovered_primary_video_count);
+
+    if routes.is_empty() && discovered_batch && grab.series_id > 0 {
         match metadata_cache::get_by_series_id(&state.db, grab.series_id).await {
             Ok(Some(cached)) => {
-                let filenames: Vec<String> = files.iter().map(|f| f.name.clone()).collect();
+                // Preserve canonical file indices while hiding extras from
+                // episode coverage and sibling routing.
+                let filenames: Vec<String> = files
+                    .iter()
+                    .map(|file| {
+                        if is_secondary_video_path(&file.name) {
+                            String::new()
+                        } else {
+                            file.name.clone()
+                        }
+                    })
+                    .collect();
                 let parent_eps: Vec<i32> = cached
                     .detail
                     .episodes
@@ -779,8 +859,14 @@ async fn import_torrent(
     // indices still match the download client's canonical file indices.
     let mut files_for_readiness = files.clone();
     let mut unsafe_video_indices = HashSet::new();
+    let mut secondary_video_count = 0_usize;
     for (file_idx, file) in files.iter().enumerate() {
         if !file.wanted || !is_video_file(&file.name) {
+            continue;
+        }
+        if is_secondary_video_path(&file.name) {
+            files_for_readiness[file_idx].wanted = false;
+            secondary_video_count += 1;
             continue;
         }
         if let Err(reason) = validate_relative_path_fragment(&file.name) {
@@ -797,6 +883,18 @@ async fn import_torrent(
             files_for_readiness[file_idx].wanted = false;
             unsafe_video_indices.insert(file_idx);
         }
+    }
+    if secondary_video_count > 0 {
+        logger::info(
+            &state.db,
+            LogCategory::PostProcess,
+            &format!(
+                "Excluded {} secondary video(s) from episode import for '{}'",
+                secondary_video_count, grab.torrent_name
+            ),
+            &format!("grab_id={}, hash={}", grab.id, grab.hash),
+        )
+        .await;
     }
 
     let wanted_video_indices = match ready_wanted_video_indices(&files_for_readiness) {
@@ -825,6 +923,7 @@ async fn import_torrent(
             .iter()
             .map(|file_idx| (*file_idx, &files[*file_idx]))
             .collect();
+    let effective_is_batch = effective_batch_shape(grab.is_batch, video_files.len());
 
     // Resolve and validate the complete batch mapping before loading series
     // context, deleting an upgrade target, or moving/copying any source. A
@@ -833,38 +932,39 @@ async fn import_torrent(
     // grabs can predate (or have missed) batch classification; allowing a
     // multi-video import through the single-file path would reintroduce the
     // duplicate-destination overwrite that this preflight prevents.
-    let batch_episode_plan = if requires_episode_map_preflight(grab.is_batch, video_files.len()) {
-        let mut cumulative_by_series = HashMap::new();
-        let mut batch_files = Vec::with_capacity(video_files.len());
-        for (file_idx, file) in &video_files {
-            let route = routes_by_file.get(file_idx).copied();
-            let target_series_id = route
-                .map(|(series_id, _)| series_id)
-                .unwrap_or(grab.series_id);
-            let cumulative_prior_episodes =
-                if let Some(value) = cumulative_by_series.get(&target_series_id) {
-                    *value
-                } else {
-                    let value = series::get_by_id(&state.db, target_series_id)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| format!("series {} not found", target_series_id))?
-                        .cumulative_prior_episodes;
-                    cumulative_by_series.insert(target_series_id, value);
-                    value
-                };
-            batch_files.push((
-                *file_idx,
-                target_series_id,
-                route.map(|(_, offset)| offset),
-                cumulative_prior_episodes,
-                file.name.clone(),
-            ));
-        }
-        validate_batch_episode_map(&batch_files)?
-    } else {
-        HashMap::new()
-    };
+    let batch_episode_plan =
+        if requires_episode_map_preflight(effective_is_batch, video_files.len()) {
+            let mut cumulative_by_series = HashMap::new();
+            let mut batch_files = Vec::with_capacity(video_files.len());
+            for (file_idx, file) in &video_files {
+                let route = routes_by_file.get(file_idx).copied();
+                let target_series_id = route
+                    .map(|(series_id, _)| series_id)
+                    .unwrap_or(grab.series_id);
+                let cumulative_prior_episodes =
+                    if let Some(value) = cumulative_by_series.get(&target_series_id) {
+                        *value
+                    } else {
+                        let value = series::get_by_id(&state.db, target_series_id)
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| format!("series {} not found", target_series_id))?
+                            .cumulative_prior_episodes;
+                        cumulative_by_series.insert(target_series_id, value);
+                        value
+                    };
+                batch_files.push((
+                    *file_idx,
+                    target_series_id,
+                    route.map(|(_, offset)| offset),
+                    cumulative_prior_episodes,
+                    file.name.clone(),
+                ));
+            }
+            validate_batch_episode_map(&batch_files)?
+        } else {
+            HashMap::new()
+        };
 
     // Lazily-loaded per-series context cache. The single-series case
     // fills exactly one entry; a multi-series routed batch fills one
@@ -1090,7 +1190,7 @@ async fn import_torrent(
         // Skip stranger files. See `grab_claims_episode` doc for the
         // full rationale and matrix of cases.
         let claims_this_episode = grab_claims_episode(
-            grab.is_batch,
+            effective_is_batch,
             routes_by_file.contains_key(file_idx),
             &grab.episode_numbers,
             raw_ep_num,
@@ -1412,7 +1512,7 @@ async fn import_torrent(
                         season_year: ctx.series.season_year,
                         end_year: ctx.series.end_year,
                     }),
-                    grab.is_batch,
+                    effective_is_batch,
                 )
                 .await;
                 // Batch grabs often arrive here with no pre-existing tag
@@ -1470,7 +1570,7 @@ async fn import_torrent(
                         &grab.torrent_name,
                         "",
                         file.size,
-                        grab.is_batch,
+                        effective_is_batch,
                     )
                     .await
                     .map(|_| ());

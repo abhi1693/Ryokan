@@ -1,6 +1,7 @@
 use crate::services::download_client::DownloadFile;
 use crate::services::post_processing::{
-    ready_wanted_video_indices, requires_episode_map_preflight, validate_batch_episode_map,
+    effective_batch_shape, is_secondary_video_path, ready_wanted_video_indices,
+    requires_episode_map_preflight, validate_batch_episode_map,
 };
 
 #[test]
@@ -70,6 +71,13 @@ fn misclassified_multi_video_grab_still_rejects_duplicate_destination() {
 }
 
 #[test]
+fn multi_video_file_shape_corrects_a_misclassified_single_grab() {
+    assert!(effective_batch_shape(false, 220));
+    assert!(effective_batch_shape(true, 1));
+    assert!(!effective_batch_shape(false, 1));
+}
+
+#[test]
 fn same_episode_is_valid_when_routed_to_different_series() {
     let files = vec![
         (0, 42, None, 0, "Parent.S01E01.mkv".to_string()),
@@ -135,4 +143,30 @@ fn complete_unwanted_video_is_excluded_from_import_plan() {
         },
     ];
     assert_eq!(ready_wanted_video_indices(&files).unwrap(), vec![0]);
+}
+
+#[test]
+fn nested_naruto_extras_are_not_episode_import_candidates() {
+    let root = "Naruto.v4.480p.DVD.Dual-Audio.FLAC2.0.Hi10P.x264-JySzE";
+    assert!(is_secondary_video_path(&format!(
+        "{root}/Extras/Canon Cut/Naruto.135-220.Canon.Cut.mkv"
+    )));
+    assert!(is_secondary_video_path(&format!(
+        "{root}/Extras/NCED/NCED.01.mkv"
+    )));
+    assert!(!is_secondary_video_path(&format!(
+        "{root}/Naruto.001.v4.480p.DVD.mkv"
+    )));
+}
+
+#[test]
+fn extras_label_in_release_root_does_not_hide_real_episodes() {
+    let root = "[JySzE] Naruto Shippuden [Complete] [Extras] [x264]";
+    assert!(!is_secondary_video_path(&format!(
+        "{root}/Naruto.Shippuden.001.mkv"
+    )));
+    assert!(is_secondary_video_path(&format!(
+        "{root}/Extras/Creditless Openings/Opening 01.mkv"
+    )));
+    assert!(is_secondary_video_path("Extras/NCOP.01.mkv"));
 }

@@ -7,6 +7,12 @@ A self-hosted anime PVR written in Rust. Searches indexers for releases, scores 
 
 I built this because Sonarr doesn't always work well for anime. The RSS sync for currently airing shows works just fine, but downloading season batches of shows that've finished airing almost always hangs the interactive search. Sonarr searches Nyaa using `SXEXX`-style episode identifiers, which don't match how most anime torrents are named.
 
+Ryokan validates the complete wanted-video map before importing a batch. It
+also infers batch shape from the actual file list when an indexer labels a
+multi-episode release as a single episode, and excludes videos beneath
+secondary-media paths such as `Extras/`, `Samples/`, and `Trailers/` from the
+episode import plan.
+
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.
