@@ -2737,6 +2737,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Recycle bin (#123). Empty path = disabled (permanent deletes, the
+    // pre-1.8 behavior); age 0 = never auto-purge.
+    sqlx::query("ALTER TABLE config ADD COLUMN recycle_bin_path TEXT NOT NULL DEFAULT ''")
+        .execute(db)
+        .await
+        .ok();
+    sqlx::query("ALTER TABLE config ADD COLUMN recycle_bin_age_days INTEGER NOT NULL DEFAULT 14")
+        .execute(db)
+        .await
+        .ok();
+
     Ok(())
 }
 

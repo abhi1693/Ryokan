@@ -349,16 +349,18 @@ pub async fn remove_series(
     let cleanup_report: Option<super::cleanup::SeriesCleanupReport> = if delete_files
         && let Some(ref tracked) = tracked
     {
-        let media_root: Option<String> = config::get_config(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.media_root);
+        let (media_root, recycle_bin_path): (Option<String>, String) =
+            match config::get_config(&state.db).await.ok().flatten() {
+                Some(c) => (Some(c.media_root), c.recycle_bin_path),
+                None => (None, String::new()),
+            };
         match super::cleanup::cleanup_series_files(
             &state,
             series_id,
             &tracked.folder_name,
+            &tracked.title,
             media_root.as_deref(),
+            &recycle_bin_path,
         )
         .await
         {
@@ -1160,45 +1162,35 @@ pub async fn bulk_manual_override(
 /// one (series, episode) pair. Respects `manual_override` — returns
 /// 409 if the row is pinned so the caller can decide whether to clear
 /// the override first.
-#[utoipa::path(
-    post,
-    path = "/api/library/reclassify-episode",
-    tag = "Library",
-    summary = "Re-classify a single episode",
-    description = "Run the full-pipeline classifier against the on-disk file for one episode, bypassing the six-hour sweep cadence and the #53 attempted-at skip rule. Will not overwrite a manually-pinned row — clear the override first if you want to force a re-classify.",
-    request_body = ReclassifyEpisodeForm,
-    responses(
-        (status = 200, description = "Classification applied", body = serde_json::Value),
-        (status = 404, description = "Series or on-disk file not found"),
-        (status = 409, description = "Episode is pinned via manual_override"),
-        (status = 500, description = "Database or classifier error"),
-    ),
-)]
-pub async fn reclassify_episode(
-    State(state): State<AppState>,
-    HxRequest(is_htmx): HxRequest,
-    Form(form): Form<ReclassifyEpisodeForm>,
-) -> Result<Response, (StatusCode, String)> {
+/// Classify one on-disk episode and persist the tag, the shared core of
+/// the per-episode Reclassify button and the recycle-bin restore path
+/// (a restored file needs its quality tag back; the delete had cleared
+/// it). Errors carry the HTTP status the reclassify endpoint returns.
+pub(crate) async fn reclassify_on_disk_episode(
+    state: &AppState,
+    series_id: i64,
+    episode_number: i32,
+) -> Result<crate::services::source::ClassificationResult, (axum::http::StatusCode, String)> {
     use crate::services::source::{self, SeriesContext};
     use std::path::Path;
 
-    let series_row = series::get_by_id(&state.db, form.series_id)
+    let series_row = series::get_by_id(&state.db, series_id)
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((
             axum::http::StatusCode::NOT_FOUND,
-            format!("series {} not found", form.series_id),
+            format!("series {} not found", series_id),
         ))?;
 
     // Honor user-pinned rows — a re-classify would silently be a no-op
     // against `manual_override = 1` thanks to the COALESCE guard in
     // `update_classification`, and that's more confusing than a hard
     // 409. Caller clears the override first if they want to reclassify.
-    let existing_tags = episode_tags::get_for_series(&state.db, form.series_id)
+    let existing_tags = episode_tags::get_for_series(&state.db, series_id)
         .await
         .unwrap_or_default();
     if existing_tags
-        .get(&form.episode_number)
+        .get(&episode_number)
         .map(|t| t.manual_override)
         .unwrap_or(false)
     {
@@ -1234,13 +1226,13 @@ pub async fn reclassify_episode(
                 Some(s) => s == 1,
                 None => true,
             };
-            season_ok && f.episode_number == form.episode_number
+            season_ok && f.episode_number == episode_number
         })
         .ok_or((
             axum::http::StatusCode::NOT_FOUND,
             format!(
                 "no file on disk for episode {} — import or download it first",
-                form.episode_number
+                episode_number
             ),
         ))?;
 
@@ -1257,20 +1249,19 @@ pub async fn reclassify_episode(
     // prefer the original torrent name so release tags stripped from
     // the post-import filename still feed the filename layer, fall
     // back to the on-disk name for externally-imported files.
-    let imported_grabs = grabbed_torrents::imported_grabs_for_series(&state.db, form.series_id)
+    let imported_grabs = grabbed_torrents::imported_grabs_for_series(&state.db, series_id)
         .await
         .unwrap_or_default();
     let classify_title = imported_grabs
         .iter()
-        .find(|(_, eps)| eps.contains(&form.episode_number))
+        .find(|(_, eps)| eps.contains(&episode_number))
         .map(|(name, _)| name.clone())
         .or_else(|| imported_grabs.first().map(|(n, _)| n.clone()))
         .unwrap_or_else(|| file.filename.clone());
 
-    let is_batch =
-        grabbed_torrents::get_is_batch_by_name(&state.db, form.series_id, &classify_title)
-            .await
-            .unwrap_or(false);
+    let is_batch = grabbed_torrents::get_is_batch_by_name(&state.db, series_id, &classify_title)
+        .await
+        .unwrap_or(false);
 
     let result = source::classify_post_download(
         &state.db,
@@ -1288,16 +1279,11 @@ pub async fn reclassify_episode(
 
     // Persist via the same branching as the post-download / scan paths:
     // UPDATE when a row exists, UPSERT via record_grab otherwise.
-    let row_exists = existing_tags.contains_key(&form.episode_number);
+    let row_exists = existing_tags.contains_key(&episode_number);
     if row_exists {
-        episode_tags::update_classification(
-            &state.db,
-            form.series_id,
-            form.episode_number,
-            &result,
-        )
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        episode_tags::update_classification(&state.db, series_id, episode_number, &result)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         // Issue #118 — fire `ClassifierNeedsReview` for the manual
         // reclassify path (per-episode Reclassify button on the
         // series page). Same event shape as the sweep + post-
@@ -1305,9 +1291,9 @@ pub async fn reclassify_episode(
         if result.needs_review {
             let verdict = result.label();
             crate::services::notifications::emit_classifier_needs_review(
-                &state,
-                form.series_id,
-                form.episode_number,
+                state,
+                series_id,
+                episode_number,
                 result.confidence as i32,
                 &verdict,
             )
@@ -1320,8 +1306,8 @@ pub async fn reclassify_episode(
             .unwrap_or(0);
         episode_tags::record_grab(
             &state.db,
-            form.series_id,
-            form.episode_number,
+            series_id,
+            episode_number,
             &result,
             &classify_title,
             "",
@@ -1330,13 +1316,9 @@ pub async fn reclassify_episode(
         )
         .await
         .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        episode_tags::stamp_classification_attempted(
-            &state.db,
-            form.series_id,
-            form.episode_number,
-        )
-        .await
-        .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        episode_tags::stamp_classification_attempted(&state.db, series_id, episode_number)
+            .await
+            .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         // `record_grab` hardcodes state='grabbed' for both the tag and
         // history rows. The file is already on disk (checked above), so
         // flip both rows to 'completed' the same way the scan path does
@@ -1344,7 +1326,7 @@ pub async fn reclassify_episode(
         // Without this the UI renders a freshly-reclassified
         // externally-imported episode as download-in-progress until
         // the next 6h sweep corrects the state.
-        episode_tags::mark_completed(&state.db, form.series_id, &[form.episode_number])
+        episode_tags::mark_completed(&state.db, series_id, &[episode_number])
             .await
             .map_err(|e| (axum::http::StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let imported_basename = file_path
@@ -1354,8 +1336,8 @@ pub async fn reclassify_episode(
             .to_string();
         episode_tags::mark_grab_history_completed(
             &state.db,
-            form.series_id,
-            form.episode_number,
+            series_id,
+            episode_number,
             &imported_basename,
             file_size,
         )
@@ -1369,7 +1351,7 @@ pub async fn reclassify_episode(
         LogCategory::Library,
         &format!(
             "Manual re-classify for series {} ep {}: {}",
-            form.series_id, form.episode_number, label
+            series_id, episode_number, label
         ),
         &format!(
             "confidence={:.2}, needs_review={}",
@@ -1377,6 +1359,31 @@ pub async fn reclassify_episode(
         ),
     )
     .await;
+
+    Ok(result)
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/library/reclassify-episode",
+    tag = "Library",
+    summary = "Re-classify a single episode",
+    description = "Run the full-pipeline classifier against the on-disk file for one episode, bypassing the six-hour sweep cadence and the #53 attempted-at skip rule. Will not overwrite a manually-pinned row — clear the override first if you want to force a re-classify.",
+    request_body = ReclassifyEpisodeForm,
+    responses(
+        (status = 200, description = "Classification applied", body = serde_json::Value),
+        (status = 404, description = "Series or on-disk file not found"),
+        (status = 409, description = "Episode is pinned via manual_override"),
+        (status = 500, description = "Database or classifier error"),
+    ),
+)]
+pub async fn reclassify_episode(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    Form(form): Form<ReclassifyEpisodeForm>,
+) -> Result<Response, (StatusCode, String)> {
+    let result = reclassify_on_disk_episode(&state, form.series_id, form.episode_number).await?;
+    let label = result.label();
 
     if is_htmx {
         // Render the verdict into the save-status pill so the user sees

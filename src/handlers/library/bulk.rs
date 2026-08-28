@@ -160,11 +160,10 @@ pub struct BulkDeleteRequest {
 /// library. Per-series cleanup runs in a loop; failures don't abort
 /// the batch.
 ///
-/// Recycle bin (#123) hasn't shipped yet, so `delete_files: true`
-/// performs a permanent unlink. The Confirmation modal in the
-/// frontend warns that this can't be undone. When recycle ships,
-/// the file-removal branch swaps to a recycle-bin call without
-/// changing this handler's wire shape.
+/// With a recycle bin configured (#123), `delete_files: true` moves
+/// each series folder into its own recycle entry via
+/// `cleanup_series_files`; with no bin it is a permanent unlink and
+/// the confirmation modal says so.
 #[utoipa::path(
     post,
     path = "/api/library/bulk/delete",
@@ -190,20 +189,27 @@ pub async fn bulk_delete(
     // config fetch instead of N when delete_files is true. Returns
     // None when config isn't loaded (shouldn't happen post-setup; we
     // guard rather than crash).
-    let media_root: Option<String> = if req.delete_files {
-        config::get_config(&state.db)
-            .await
-            .ok()
-            .flatten()
-            .map(|c| c.media_root)
+    let (media_root, recycle_bin_path): (Option<String>, String) = if req.delete_files {
+        match config::get_config(&state.db).await.ok().flatten() {
+            Some(c) => (Some(c.media_root), c.recycle_bin_path),
+            None => (None, String::new()),
+        }
     } else {
-        None
+        (None, String::new())
     };
 
     let mut succeeded = Vec::with_capacity(req.series_ids.len());
     let mut failed = Vec::new();
     for series_id in &req.series_ids {
-        match delete_one_series(&state, *series_id, req.delete_files, media_root.as_deref()).await {
+        match delete_one_series(
+            &state,
+            *series_id,
+            req.delete_files,
+            media_root.as_deref(),
+            &recycle_bin_path,
+        )
+        .await
+        {
             Ok(()) => succeeded.push(*series_id),
             Err(reason) => failed.push(BulkFailure {
                 series_id: *series_id,
@@ -251,6 +257,7 @@ async fn delete_one_series(
     series_id: i64,
     delete_files: bool,
     media_root: Option<&str>,
+    recycle_bin_path: &str,
 ) -> Result<(), String> {
     if delete_files {
         // Look up the series row for `folder_name` (and to detect
@@ -264,9 +271,17 @@ async fn delete_one_series(
             .as_ref()
             .map(|t| t.folder_name.as_str())
             .unwrap_or("");
+        let series_title = tracked.as_ref().map(|t| t.title.as_str()).unwrap_or("");
 
-        let report =
-            super::cleanup::cleanup_series_files(state, series_id, folder_name, media_root).await?;
+        let report = super::cleanup::cleanup_series_files(
+            state,
+            series_id,
+            folder_name,
+            series_title,
+            media_root,
+            recycle_bin_path,
+        )
+        .await?;
         if !report.is_clean() {
             // Don't `?` — DB cascade still runs even on partial
             // cleanup so the library entry disappears (matches

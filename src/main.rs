@@ -596,6 +596,19 @@ async fn main() {
             "/library/review",
             get(handlers::library::pages::needs_review_page),
         )
+        .route("/library/recycle", get(handlers::library::recycle::page))
+        .route(
+            "/api/library/recycle/empty",
+            post(handlers::library::recycle::empty),
+        )
+        .route(
+            "/api/library/recycle/{entry_id}/restore",
+            post(handlers::library::recycle::restore),
+        )
+        .route(
+            "/api/library/recycle/{entry_id}/purge",
+            post(handlers::library::recycle::purge_entry),
+        )
         .route(
             "/series/{anilist_id}",
             get(handlers::library::pages::series_detail),
@@ -1700,6 +1713,44 @@ async fn main() {
                         // would linger until the process restarts. Hourly global
                         // sweep keeps the map bounded.
                         handlers::auth::sweep_login_failures();
+                        // Recycle-bin purge (#123). Date buckets older than
+                        // `recycle_bin_age_days` are dropped; 0 disables the
+                        // sweep and an empty path means no bin at all.
+                        if let Ok(Some(cfg)) = models::config::get_config(&cleanup_db).await
+                            && !cfg.recycle_bin_path.trim().is_empty()
+                        {
+                            match services::recycle::purge_old(
+                                &cfg.recycle_bin_path,
+                                cfg.recycle_bin_age_days,
+                            )
+                            .await
+                            {
+                                Ok(report) if report.entries > 0 || report.date_dirs > 0 => {
+                                    services::logger::info(
+                                        &cleanup_db,
+                                        models::log::LogCategory::System,
+                                        &format!(
+                                            "Recycle bin purge removed {} entr{} ({})",
+                                            report.entries,
+                                            if report.entries == 1 { "y" } else { "ies" },
+                                            services::recycle::human_bytes(report.bytes)
+                                        ),
+                                        &format!(
+                                            "age_days={} date_dirs={} bytes={}",
+                                            cfg.recycle_bin_age_days,
+                                            report.date_dirs,
+                                            report.bytes
+                                        ),
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    cleanup_errors.push(format!("recycle purge: {}", e));
+                                    tracing::error!("Recycle bin purge failed: {}", e);
+                                }
+                                _ => {}
+                            }
+                        }
                         let status = if cleanup_errors.is_empty() {
                             "ok"
                         } else {

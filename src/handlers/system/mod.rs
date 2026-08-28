@@ -128,6 +128,10 @@ struct SystemTemplate {
     /// for a fresh create form. With `?edit_id=N`, this is the loaded
     /// matrix for that provider.
     notification_event_toggles: Vec<notifications::EventToggleView>,
+    /// Recycle bin (#123) refused a delete because the bin isn't writable
+    /// (`recycle::RECYCLE_UNWRITABLE`); renders the top-of-page banner.
+    /// Flag only, no probe: this page shouldn't wake a spun-down disk.
+    recycle_unwritable: bool,
 }
 
 #[derive(Deserialize)]
@@ -371,6 +375,7 @@ pub async fn system_page(
     // got fewer than the limit, this is the last page.
     let (logs, log_older_id) = truncate_to_page(logs, 200, |e| e.id);
     let (rss_recent, rss_older_id) = truncate_to_page(rss_recent, 200, |e| e.id);
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -378,6 +383,7 @@ pub async fn system_page(
         force_kitsu_fallback,
         auto_grab_on_add,
         allow_non_english,
+        recycle_unwritable,
         debug_message: params.message,
         debug_error: params.error,
         logs,
@@ -469,6 +475,7 @@ pub async fn debug_settings_submit(
         }
     };
 
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
     let template = SystemTemplate {
         page: "system".to_string(),
         tab: "debug".to_string(),
@@ -476,6 +483,7 @@ pub async fn debug_settings_submit(
         force_kitsu_fallback: cfg.force_kitsu_fallback,
         auto_grab_on_add: cfg.auto_grab_on_add,
         allow_non_english: cfg.allow_non_english,
+        recycle_unwritable,
         debug_message: message,
         debug_error: error,
         logs: Vec::new(),

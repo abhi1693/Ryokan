@@ -682,6 +682,8 @@ mod non_htmx_path {
             post_processing_enabled: true,
             post_processing_mode: "copy".to_string(),
             search_on_monitoring_change: true,
+            recycle_bin_path: "/seed/recycle".to_string(),
+            recycle_bin_age_days: 7,
             ..config::Config::default()
         };
         config::save_config(db, &cfg)
@@ -718,6 +720,8 @@ mod non_htmx_path {
                 post_processing_mode: "move".to_string(), // seed=copy
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None, // submit→false, seed=true
+                recycle_bin_path: "/submit/recycle/".to_string(), // seed=/seed/recycle; trailing slash trimmed
+                recycle_bin_age_days: 45,                         // seed=7
             }),
         )
         .await
@@ -741,6 +745,8 @@ mod non_htmx_path {
         assert!(!saved.post_processing_enabled);
         assert_eq!(saved.post_processing_mode, "move");
         assert!(!saved.search_on_monitoring_change);
+        assert_eq!(saved.recycle_bin_path, "/submit/recycle");
+        assert_eq!(saved.recycle_bin_age_days, 45);
         // Cross-tab fields stay at seed values (regression guard
         // against the per-tab handler clobbering fields it
         // doesn't own).
@@ -929,6 +935,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await
@@ -963,6 +971,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await
@@ -1000,6 +1010,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await
@@ -1047,6 +1059,8 @@ mod non_htmx_path {
                 post_processing_mode: "garbage".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await
@@ -1076,6 +1090,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await
@@ -1495,6 +1511,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         );
         let quality = settings_quality_submit(
@@ -1550,6 +1568,8 @@ mod non_htmx_path {
                 post_processing_mode: "hardlink".to_string(),
                 search_on_monitoring_change: None,
                 manual_search_auto_add: None,
+                recycle_bin_path: String::new(),
+                recycle_bin_age_days: 30,
             }),
         )
         .await

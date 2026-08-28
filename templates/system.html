@@ -15,6 +15,13 @@
     <h2>System</h2>
 </div>
 
+{% if recycle_unwritable %}
+<div class="alert alert-warn" role="status">
+    <strong>Recycle bin is not writable. Deletes are refused until this is fixed.</strong>
+    Check the path and permissions under <a href="/settings">Settings &rarr; General</a>, or clear the path to delete permanently. The refused deletes are in the Logs tab.
+</div>
+{% endif %}
+
 <div class="tabbed-layout">
 <nav class="tabbed-sidebar" aria-label="System sections">
     <a href="/system?tab=logs" class="tabbed-side-tab {% if tab == "logs" %}active{% endif %}">
