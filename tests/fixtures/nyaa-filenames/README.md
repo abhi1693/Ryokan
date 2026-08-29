@@ -12,12 +12,13 @@ than scraped and carry `url: null`; the [SoM] DBox and Bleach entries
 specifically exercise the dot-delimited episode branch and its codec-token
 guard (PR #198).
 
-**These are characterization snapshots, not ground truth.** Some captured
-expectations are known mis-parses of extras (e.g. `Part 2 - SP` parsing as
-episode 2, `07_5` recap parsing as episode 7) and NC/PV/CM files
-deliberately parse to `None`. The test pins today's behavior so any parser
-change that shifts a real-world outcome shows up explicitly in review;
-updating an expectation alongside a deliberate parser fix is normal and
+**These are characterization snapshots, not ground truth.** Captured
+expectations may include known mis-parses; NC/PV/CM, bare `- SP`, and
+half-episode (`07_5`) extras deliberately parse to `None` (issue #203
+turned the last three from mis-parses into expectations). The test pins
+today's behavior so any parser change that shifts a real-world outcome
+shows up explicitly in review; updating an expectation alongside a
+deliberate parser fix is normal and
 expected.
 
 Category buckets:

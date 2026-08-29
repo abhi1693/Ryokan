@@ -108,6 +108,16 @@ fn resolve_episode(
     })
 }
 
+/// Resolved batch plan from [`validate_batch_episode_map`].
+#[derive(Debug, Default)]
+pub(crate) struct BatchPlan {
+    /// File index → destination slot for every file the loop imports.
+    pub(crate) slots: HashMap<usize, ResolvedEpisode>,
+    /// File index → index of the higher-version sibling that won the
+    /// same slot (issue #204). The loop skips these with an info log.
+    pub(crate) superseded: HashMap<usize, usize>,
+}
+
 /// Validate every wanted video in a batch before the import loop performs
 /// upgrades or file operations. Inputs carry the exact route and series
 /// cumulative offset used by execution, and the resolved plan returned here is
@@ -119,23 +129,35 @@ fn resolve_episode(
 /// to `None` by design, and an excluded file moves nothing, so skipping is
 /// non-destructive. (The import loop re-derives the same verdict for files
 /// absent from the plan and logs a per-file warning with series context.)
-/// Two files resolving to the same destination slot still fail the whole
-/// batch before any mutation — that ambiguity has no safe per-file answer,
-/// and importing either file could destroy the other.
+///
+/// Two files resolving to the same destination slot are compared by release
+/// version (issue #204): `E05` + `E05v2` keeps the v2 and lists the v1 under
+/// `superseded`, since a group re-releasing one episode inside its own pack
+/// is routine. Candidates that tie on version (true duplicates, or a
+/// mis-parse) still fail the whole batch before any mutation — that
+/// ambiguity has no safe per-file answer, and importing either file could
+/// destroy the other.
 pub(crate) fn validate_batch_episode_map(
     files: &[(usize, i64, Option<i32>, i32, String)],
-) -> Result<HashMap<usize, ResolvedEpisode>, String> {
-    let mut destinations: HashMap<(i64, i32), &str> = HashMap::new();
-    let mut plan = HashMap::new();
+) -> Result<BatchPlan, String> {
+    // (series, episode) → candidates in file order. BTreeMap so the
+    // error names a deterministic slot when several collide.
+    struct Candidate<'a> {
+        file_idx: usize,
+        version: u32,
+        name: &'a str,
+    }
+    let mut by_slot: std::collections::BTreeMap<(i64, i32), Vec<Candidate<'_>>> =
+        std::collections::BTreeMap::new();
+    let mut resolved_by_idx: HashMap<usize, ResolvedEpisode> = HashMap::new();
 
     for (file_idx, series_id, route_offset, cumulative_prior_episodes, name) in files {
         let filename = Path::new(name)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(name);
-        let Some((parsed_season, raw_episode)) =
-            media::parse_episode_number(&filename.to_lowercase())
-        else {
+        let lower = filename.to_lowercase();
+        let Some((parsed_season, raw_episode)) = media::parse_episode_number(&lower) else {
             continue;
         };
         let Ok(resolved) = resolve_episode(
@@ -146,14 +168,37 @@ pub(crate) fn validate_batch_episode_map(
         ) else {
             continue;
         };
+        // No version token reads as v1 so `E05` + `E05v2` compare 1 vs 2.
+        let version = media::parse_release_version(&lower).unwrap_or(1);
+        by_slot
+            .entry((*series_id, resolved.episode))
+            .or_default()
+            .push(Candidate {
+                file_idx: *file_idx,
+                version,
+                name: filename,
+            });
+        resolved_by_idx.insert(*file_idx, resolved);
+    }
 
-        if let Some(previous) = destinations.insert((*series_id, resolved.episode), filename) {
-            return Err(format!(
-                "batch preflight mapped both '{}' and '{}' to series {} episode {}; no files were changed",
-                previous, filename, series_id, resolved.episode
-            ));
+    let mut plan = BatchPlan::default();
+    for ((series_id, episode), mut candidates) in by_slot {
+        if candidates.len() > 1 {
+            // Highest version first; file order breaks ties so the
+            // error below names the same pair on every run.
+            candidates.sort_by(|a, b| b.version.cmp(&a.version).then(a.file_idx.cmp(&b.file_idx)));
+            if candidates[0].version == candidates[1].version {
+                return Err(format!(
+                    "batch preflight mapped both '{}' and '{}' to series {} episode {}; no files were changed",
+                    candidates[0].name, candidates[1].name, series_id, episode
+                ));
+            }
         }
-        plan.insert(*file_idx, resolved);
+        let winner_idx = candidates[0].file_idx;
+        plan.slots.insert(winner_idx, resolved_by_idx[&winner_idx]);
+        for loser in candidates.into_iter().skip(1) {
+            plan.superseded.insert(loser.file_idx, winner_idx);
+        }
     }
 
     Ok(plan)
@@ -434,6 +479,48 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
     })
     .await
     .map_err(|e| std::io::Error::other(format!("join error: {}", e)))?
+}
+
+/// Sibling temp name an upgrade lands at before the swap (issue #202):
+/// `.<basename>.ryokan-new` in the same directory as `dest`, so the
+/// final step is an atomic rename. The leading dot matters: retiring
+/// the old file goes through `recycle::recycle`, whose companion sweep
+/// takes everything prefixed `<stem>.`, and a `<dest>.ryokan-new` name
+/// would be swept away with the file it is about to replace. Not a
+/// video extension, so library scans ignore a leftover from a crash
+/// mid-swap; the next upgrade of the same slot lists it with the old
+/// files and retires it.
+pub(crate) fn staging_path(dest: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(dest.file_name().unwrap_or_default());
+    name.push(".ryokan-new");
+    dest.with_file_name(name)
+}
+
+/// Undo a staged placement after the old file could not be retired
+/// (issue #202). Hardlink / copy modes still have the source, so the
+/// staged file is simply removed. Move mode has already consumed the
+/// source; the staged file is moved back so a retry sees the original
+/// layout, and if even that fails the staged path is named in the log
+/// so the file is recoverable by hand.
+async fn unstage_upgrade(db: &sqlx::SqlitePool, mode: &str, landing: &Path, src: &Path) {
+    let outcome = if mode == "move" {
+        do_file_op("move", landing, src).await
+    } else {
+        tokio::fs::remove_file(landing).await
+    };
+    if let Err(e) = outcome {
+        logger::error(
+            db,
+            LogCategory::PostProcess,
+            &format!(
+                "Could not undo the staged upgrade file {}",
+                landing.display()
+            ),
+            &e.to_string(),
+        )
+        .await;
+    }
 }
 
 struct SeriesImportCtx {
@@ -868,7 +955,7 @@ async fn import_torrent(
         }
         validate_batch_episode_map(&batch_files)?
     } else {
-        HashMap::new()
+        BatchPlan::default()
     };
 
     // Lazily-loaded per-series context cache. The single-series case
@@ -1052,7 +1139,30 @@ async fn import_torrent(
         // here, landing in the warn-and-continue arms below. Singles use
         // the same resolver, retaining the legacy first-episode fallback
         // only when exactly one video exists.
-        let resolved = if let Some(resolved) = batch_episode_plan.get(file_idx) {
+        // Issue #204: a lower-version sibling of the file that won the
+        // same slot in the batch preflight. Nothing to import; the
+        // higher version lands instead.
+        if let Some(winner) = batch_episode_plan.superseded.get(file_idx) {
+            let winner_name = video_files
+                .iter()
+                .find(|(idx, _)| idx == winner)
+                .and_then(|(_, f)| Path::new(&f.name).file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("a higher version");
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Skipping '{}': superseded by '{}' in the same batch",
+                    filename_only, winner_name
+                ),
+                &format!("series={}", ctx.series.title),
+            )
+            .await;
+            continue;
+        }
+
+        let resolved = if let Some(resolved) = batch_episode_plan.slots.get(file_idx) {
             *resolved
         } else {
             let parsed = media::parse_episode_number(&filename_only.to_lowercase());
@@ -1197,7 +1307,27 @@ async fn import_torrent(
             .unwrap_or_default()
         };
 
-        if !existing_for_ep.is_empty() {
+        // Issue #202: on an upgrade, land the new file beside the
+        // destination FIRST and only then retire the old one. The
+        // previous order (recycle old, delete old torrent, then place)
+        // left the user with no old file and no old torrent data when
+        // the placement failed (cross-fs copy interrupted, disk full,
+        // permissions), and with no recycle bin configured that loss
+        // was permanent. Staging at `.<basename>.ryokan-new` makes the
+        // failure mode "nothing changed": hardlink mode pays nothing
+        // extra, copy / move pay the same cost they always did, just
+        // before the old file is touched. The swap itself is a
+        // same-directory rename, and the old torrent leaves the client
+        // only after the swap.
+        let is_upgrade = !existing_for_ep.is_empty();
+        let landing = if is_upgrade {
+            staging_path(&dest_video)
+        } else {
+            dest_video.clone()
+        };
+        let placed = do_file_op(&cfg.post_processing_mode, &src, &landing).await;
+
+        if placed.is_ok() && is_upgrade {
             // Check if this is an upgrade replacing a previously imported file.
             // If an older imported grab exists for this episode, this is an
             // upgrade — remove the old file and old torrent, then import the new one.
@@ -1286,10 +1416,10 @@ async fn import_torrent(
                 }
             }
             // A refused recycle (bin configured but not writable) must not
-            // turn into an overwrite: `do_file_op` clears an existing
-            // destination, so continuing here would destroy the file the
-            // bin was supposed to keep. Skip this episode; the grab stays
-            // partially imported and the log names the reason.
+            // turn into an overwrite: the swap below would replace the
+            // file the bin was supposed to keep. Undo the staging, skip
+            // this episode; the grab stays partially imported and the log
+            // names the reason.
             if retire_failed {
                 logger::error(
                     &state.db,
@@ -1299,6 +1429,51 @@ async fn import_torrent(
                         season, ep_num, ctx.series.title
                     ),
                     &grab.torrent_name,
+                )
+                .await;
+                unstage_upgrade(&state.db, &cfg.post_processing_mode, &landing, &src).await;
+                // Issue #118: a stalled upgrade is an import failure the
+                // user wants to hear about, same as a failed placement.
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    "the old file could not be recycled, so the upgrade was skipped",
+                )
+                .await;
+                failed_episodes.push(ep_num);
+                continue;
+            }
+
+            // Swap the staged file into place. Same directory, so this
+            // is a rename; the old files are retired, so the
+            // destination is free. A failure here is exotic (the
+            // directory changed under us) and leaves the new file at
+            // the staged path, named in the log.
+            if let Err(e) = tokio::fs::rename(&landing, &dest_video).await {
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Upgrade for S{:02}E{:02} of '{}' stalled: the new file is staged at {} but could not be renamed into place",
+                        season,
+                        ep_num,
+                        ctx.series.title,
+                        landing.display()
+                    ),
+                    &e.to_string(),
+                )
+                .await;
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    &format!(
+                        "the new file is staged at {} but could not be renamed into place: {e}",
+                        landing.display()
+                    ),
                 )
                 .await;
                 failed_episodes.push(ep_num);
@@ -1393,7 +1568,7 @@ async fn import_torrent(
                 episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
         }
 
-        match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {
+        match placed {
             Ok(()) => {
                 let _ = nfo::write_episode_nfo(
                     &dest_nfo,
@@ -1631,6 +1806,17 @@ async fn import_torrent(
                     &e.to_string(),
                 )
                 .await;
+                // A copy that died part-way (disk full, the hardlink
+                // fallback's `fs::copy`) leaves a partial file at the
+                // landing path: the hidden `.ryokan-new` on an upgrade,
+                // the destination itself on a first import. Neither is
+                // a finished file; drop it so the slot reads as empty on
+                // the next pass. Best effort: the same-inode guard means
+                // a landing that is the source's own link never gets
+                // here with `Err`.
+                if landing.is_file() && !files_share_inode(&src, &landing) {
+                    let _ = tokio::fs::remove_file(&landing).await;
+                }
                 failed_episodes.push(ep_num);
             }
         }
