@@ -19,6 +19,7 @@ pub mod jellyfin;
 
 pub mod auto_expand;
 pub mod auto_search;
+pub mod backup;
 pub mod grab_commit;
 pub mod grab_sweep;
 pub mod interactive_search_cache;

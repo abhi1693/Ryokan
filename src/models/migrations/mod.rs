@@ -2777,6 +2777,17 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .ok();
     }
 
+    // Scheduled backups (#126). Disabled by default: users with their
+    // own backup pipeline for the data dir shouldn't get a second copy.
+    for sql in [
+        "ALTER TABLE config ADD COLUMN backup_schedule TEXT NOT NULL DEFAULT 'disabled'",
+        "ALTER TABLE config ADD COLUMN backup_directory TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE config ADD COLUMN backup_retention_count INTEGER NOT NULL DEFAULT 7",
+        "ALTER TABLE config ADD COLUMN backup_include_artwork INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(sql).execute(db).await.ok();
+    }
+
     Ok(())
 }
 

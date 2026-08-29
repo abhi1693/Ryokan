@@ -616,6 +616,19 @@ pub struct GeneralForm {
     season_folder_format: String,
     #[serde(default)]
     episode_file_format: String,
+    /// Scheduled backups (#126).
+    #[serde(default)]
+    backup_schedule: String,
+    #[serde(default)]
+    backup_directory: String,
+    #[serde(default = "default_backup_retention_count")]
+    backup_retention_count: i64,
+    #[serde(default)]
+    backup_include_artwork: Option<String>,
+}
+
+fn default_backup_retention_count() -> i64 {
+    7
 }
 
 /// Empty or whitespace → the kind's default template; otherwise trimmed.
@@ -1405,6 +1418,23 @@ pub async fn settings_submit(
             .as_ref()
             .map(|c| c.episode_file_format.clone())
             .unwrap_or_else(|| config::Config::default().episode_file_format),
+        // Scheduled backups (#126): General subform only.
+        backup_schedule: existing_cfg
+            .as_ref()
+            .map(|c| c.backup_schedule.clone())
+            .unwrap_or_else(|| "disabled".to_string()),
+        backup_directory: existing_cfg
+            .as_ref()
+            .map(|c| c.backup_directory.clone())
+            .unwrap_or_default(),
+        backup_retention_count: existing_cfg
+            .as_ref()
+            .map(|c| c.backup_retention_count)
+            .unwrap_or(7),
+        backup_include_artwork: existing_cfg
+            .as_ref()
+            .map(|c| c.backup_include_artwork)
+            .unwrap_or(false),
         recycle_bin_path: if form.tab.as_deref() == Some("general") {
             form.recycle_bin_path
                 .trim()
@@ -1691,6 +1721,17 @@ pub async fn settings_general_submit(
             &form.episode_file_format,
             TemplateKind::EpisodeFile,
         ),
+        backup_schedule: match form.backup_schedule.as_str() {
+            "daily" | "weekly" => form.backup_schedule.clone(),
+            _ => "disabled".to_string(),
+        },
+        backup_directory: form
+            .backup_directory
+            .trim()
+            .trim_end_matches('/')
+            .to_string(),
+        backup_retention_count: form.backup_retention_count.clamp(1, 365),
+        backup_include_artwork: form.backup_include_artwork.is_some(),
         // Everything else: preserved verbatim.
         ..existing_cfg
     };
@@ -1786,6 +1827,31 @@ pub async fn settings_general_submit(
         }
         // Keep the banner flag in step with the fresh probe.
         crate::services::recycle::check_unwritable(&cfg.recycle_bin_path).await;
+    }
+    if cfg.backup_schedule != "disabled" {
+        let dir =
+            crate::services::backup::BackupPaths::from_env().backup_dir(&cfg.backup_directory);
+        let probe = dir.clone();
+        let writable = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            std::fs::create_dir_all(&probe).map_err(|e| e.to_string())?;
+            let marker = probe.join(".ryokan-write-probe");
+            std::fs::write(&marker, b"").map_err(|e| e.to_string())?;
+            let _ = std::fs::remove_file(&marker);
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
+        match writable {
+            Ok(()) => notices.push(format!(
+                "Scheduled backups will be written to {}.",
+                dir.display()
+            )),
+            Err(e) => notices.push(format!(
+                "Warning: the backup folder '{}' is not writable ({}). Scheduled backups will fail until this is fixed.",
+                dir.display(),
+                e
+            )),
+        }
     }
 
     general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await

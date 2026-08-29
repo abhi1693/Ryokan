@@ -259,6 +259,7 @@ function forceRunTask(btn, taskKey) {
         upgrade_search: '/api/tasks/upgrade-search',
         anibridge_refresh: '/api/system/reload-anibridge',
         external_sync: '/api/tasks/external-sync',
+        backup: '/api/tasks/backup',
     };
     const url = endpoints[taskKey];
     if (!url) {
@@ -611,3 +612,79 @@ function applyNotifInitialBindings() {
 }
 window.addEventListener('DOMContentLoaded', applyNotifInitialBindings);
 applyNotifInitialBindings();
+
+// ── Backup tab (issue #126) ─────────────────────────────────────────
+//
+// Two enhancements over the plain forms and links on the tab: the
+// Download link picks up the two option checkboxes as query params,
+// and the restore upload streams the chosen file as a raw gzip body
+// (no multipart, no buffering server-side) then paints the server's
+// verdict inline. Everything else on the tab is a form the confirm
+// bridge and hx-boost already handle.
+var bindBackupTab = function () {
+    const tab = document.getElementById('backup-tab');
+    if (!tab || tab.dataset.ryokanBound === '1') return;
+    tab.dataset.ryokanBound = '1';
+    const esc = window.ryokanEscapeHtml || ((s) => String(s));
+
+    const link = document.getElementById('backup-download');
+    const options = Array.from(tab.querySelectorAll('[data-backup-option]'));
+    const syncLink = () => {
+        if (!link) return;
+        const params = [];
+        options.forEach((o) => { if (o.checked) params.push(o.getAttribute('data-backup-option') + '=1'); });
+        link.href = '/api/backup/download' + (params.length ? '?' + params.join('&') : '');
+    };
+    options.forEach((o) => o.addEventListener('change', syncLink));
+    syncLink();
+
+    const fileInput = document.getElementById('restore-file');
+    const button = document.getElementById('restore-upload');
+    const out = document.getElementById('restore-result');
+    if (!fileInput || !button || !out) return;
+    button.addEventListener('click', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) {
+            out.hidden = false;
+            out.textContent = 'Choose a backup file first.';
+            return;
+        }
+        button.disabled = true;
+        out.hidden = false;
+        out.textContent = 'Uploading ' + file.name + ' (' + Math.round(file.size / 1048576) + ' MB)...';
+        try {
+            const r = await fetch('/api/restore/upload', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/gzip'},
+                credentials: 'same-origin',
+                body: file,
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || !data.ok) {
+                out.innerHTML = 'Not staged: ' + esc(data.error || ('HTTP ' + r.status));
+                button.disabled = false;
+                return;
+            }
+            let html = 'Restore staged from a backup made ' + esc(data.backup_time) + ' (Ryokan ' + esc(data.version) + '). '
+                + 'A backup of the current state was saved as ' + esc(data.pre_restore_backup) + '. '
+                + '<strong>Restart Ryokan to apply it.</strong>';
+            (data.warnings || []).forEach((w) => { html += '<br>' + esc(w); });
+            out.innerHTML = html;
+            // Re-render the tab so the staged banner and Cancel appear.
+            setTimeout(() => { window.location.href = '/system?tab=backup'; }, 1500);
+        } catch (e) {
+            out.textContent = 'Upload failed: ' + (e && e.message ? e.message : e);
+            button.disabled = false;
+        }
+    });
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('system-backup', {
+        check: function () { return !!document.getElementById('backup-tab'); },
+        mount: bindBackupTab,
+        unmount: function () {},
+    });
+} else {
+    bindBackupTab();
+}

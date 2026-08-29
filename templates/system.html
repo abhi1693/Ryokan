@@ -35,10 +35,12 @@
 {% if let Some(msg) = debug_message %}
     {% if tab == "debug" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Debug action complete">{{ msg }}</div>{% endif %}
     {% if tab == "notifications" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Notification provider">{{ msg }}</div>{% endif %}
+    {% if tab == "backup" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Backup">{{ msg }}</div>{% endif %}
 {% endif %}
 {% if let Some(err) = debug_error %}
     {% if tab == "debug" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Debug action failed">{{ err }}</div>{% endif %}
     {% if tab == "notifications" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Notification provider error">{{ err }}</div>{% endif %}
+    {% if tab == "backup" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Backup">{{ err }}</div>{% endif %}
 {% endif %}
 
 {% if tab == "logs" %}
@@ -385,6 +387,8 @@
 </div>
 {% else if tab == "notifications" %}
 {%~ include "partials/system/notifications.html" ~%}
+{% else if tab == "backup" %}
+{%~ include "partials/system/backup.html" ~%}
 {% else if tab == "debug" %}
 <div class="debug-panel">
     {# The form wraps just the two checkbox cards. Maintenance and RSS

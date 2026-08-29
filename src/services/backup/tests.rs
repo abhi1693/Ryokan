@@ -1,0 +1,464 @@
+use super::*;
+use std::collections::HashMap;
+use std::io::Read;
+
+/// A data dir laid out like a real install: a key file and an artwork
+/// dir; the database is created by [`pool_at`].
+fn temp_paths(tag: &str) -> BackupPaths {
+    let root = std::env::temp_dir().join(format!("ryokan-backup-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let data = root.join("data");
+    fs::create_dir_all(data.join("cache/artwork/blobs")).unwrap();
+    fs::write(data.join(".ryokan-key"), [7u8; 32]).unwrap();
+    fs::write(data.join("cache/artwork/blobs/aa.jpg"), b"jpeg bytes").unwrap();
+    BackupPaths {
+        data_dir: data.clone(),
+        db_path: data.join("ryokan.db"),
+        key_path: data.join(".ryokan-key"),
+        artwork_dir: data.join("cache/artwork"),
+    }
+}
+
+/// A migrated, file-backed pool at `paths.db_path`. File-backed on
+/// purpose: `VACUUM INTO` writes nothing for sqlx's shared in-memory
+/// database, and production is a file anyway.
+async fn pool_at(paths: &BackupPaths) -> SqlitePool {
+    let pool = SqlitePool::connect(&format!("sqlite://{}?mode=rwc", paths.db_path.display()))
+        .await
+        .expect("open file db");
+    crate::models::migrate(&pool).await.expect("migrate");
+    pool
+}
+
+fn cleanup(paths: &BackupPaths) {
+    if let Some(root) = paths.data_dir.parent() {
+        let _ = fs::remove_dir_all(root);
+    }
+}
+
+/// Every entry of a `.tar.gz` as `path → bytes`.
+fn read_archive(path: &Path) -> HashMap<String, Vec<u8>> {
+    let file = fs::File::open(path).expect("open archive");
+    let mut tar = tar::Archive::new(GzDecoder::new(BufReader::new(file)));
+    let mut out = HashMap::new();
+    for entry in tar.entries().expect("entries") {
+        let mut entry = entry.expect("entry");
+        let name = entry.path().unwrap().to_string_lossy().into_owned();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        out.insert(name, bytes);
+    }
+    out
+}
+
+async fn count(db: &SqlitePool, sql: &'static str) -> i64 {
+    sqlx::query_scalar(sql).fetch_one(db).await.unwrap()
+}
+
+async fn open_file_db(path: &Path) -> SqlitePool {
+    SqlitePool::connect(&format!("sqlite://{}?mode=rw", path.display()))
+        .await
+        .expect("open extracted db")
+}
+
+#[tokio::test]
+async fn backup_holds_manifest_db_key_and_recent_writes() {
+    let paths = temp_paths("full");
+    let db = pool_at(&paths).await;
+    crate::test_support::seed_series(&db, 1, "Frieren").await;
+
+    let out = paths.data_dir.join("out.tar.gz");
+    let manifest = create_backup(&db, &paths, BackupOptions::default(), &out)
+        .await
+        .expect("backup");
+    assert!(manifest.includes_key);
+    assert!(!manifest.includes_artwork);
+    assert!(!manifest.sanitized);
+    assert_eq!(manifest.ryokan_version, env!("CARGO_PKG_VERSION"));
+    assert!(!fs::exists(paths.data_dir.join(BACKUP_WORK_DIR_NAME).join("x")).unwrap());
+
+    let entries = read_archive(&out);
+    let mut names: Vec<&String> = entries.keys().collect();
+    names.sort();
+    assert_eq!(names, vec![".ryokan-key", "manifest.json", "ryokan.db"]);
+    assert_eq!(entries[".ryokan-key"], vec![7u8; 32]);
+    let parsed: BackupManifest = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+    assert_eq!(parsed, manifest);
+
+    // The snapshot is a real database carrying the row written just
+    // before the backup: VACUUM INTO, not a stale file copy.
+    let extracted = paths.data_dir.join("extracted.db");
+    fs::write(&extracted, &entries["ryokan.db"]).unwrap();
+    let copy = open_file_db(&extracted).await;
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM series").await, 1);
+    copy.close().await;
+
+    // Work dir is gone once the archive is written.
+    assert!(
+        !paths.data_dir.join(BACKUP_WORK_DIR_NAME).exists()
+            || fs::read_dir(paths.data_dir.join(BACKUP_WORK_DIR_NAME))
+                .unwrap()
+                .next()
+                .is_none()
+    );
+    cleanup(&paths);
+}
+
+#[tokio::test]
+async fn artwork_is_included_only_on_request() {
+    let paths = temp_paths("artwork");
+    let db = pool_at(&paths).await;
+    let out = paths.data_dir.join("out.tar.gz");
+    let manifest = create_backup(
+        &db,
+        &paths,
+        BackupOptions {
+            include_artwork: true,
+            sanitize: false,
+        },
+        &out,
+    )
+    .await
+    .expect("backup");
+    assert!(manifest.includes_artwork);
+    assert_eq!(manifest.artwork_size_bytes, "jpeg bytes".len() as u64);
+    let entries = read_archive(&out);
+    assert_eq!(entries["artwork/blobs/aa.jpg"], b"jpeg bytes");
+    cleanup(&paths);
+}
+
+#[tokio::test]
+async fn sanitized_backup_omits_key_and_hostname_and_trims_logs() {
+    let paths = temp_paths("sanitized");
+    let db = pool_at(&paths).await;
+    for i in 0..(SANITIZED_LOG_ROWS + 50) {
+        sqlx::query("INSERT INTO logs (level, category, message) VALUES ('info', 'system', ?)")
+            .bind(format!("row {i}"))
+            .execute(&db)
+            .await
+            .unwrap();
+    }
+    sqlx::query("INSERT INTO config (id, qbit_pass) VALUES (1, 'hunter2') ON CONFLICT(id) DO UPDATE SET qbit_pass = 'hunter2'")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    let out = paths.data_dir.join("support.tar.gz");
+    let manifest = create_backup(
+        &db,
+        &paths,
+        BackupOptions {
+            include_artwork: false,
+            sanitize: true,
+        },
+        &out,
+    )
+    .await
+    .expect("backup");
+    assert!(manifest.sanitized);
+    assert!(!manifest.includes_key);
+    assert!(manifest.hostname.is_none());
+
+    let entries = read_archive(&out);
+    assert!(!entries.contains_key(".ryokan-key"));
+    let extracted = paths.data_dir.join("support.db");
+    fs::write(&extracted, &entries["ryokan.db"]).unwrap();
+    let copy = open_file_db(&extracted).await;
+    assert_eq!(
+        count(&copy, "SELECT COUNT(*) FROM logs").await,
+        SANITIZED_LOG_ROWS
+    );
+    let pass: String = sqlx::query_scalar("SELECT qbit_pass FROM config WHERE id = 1")
+        .fetch_one(&copy)
+        .await
+        .unwrap();
+    assert_eq!(pass, "[REDACTED]");
+    copy.close().await;
+    cleanup(&paths);
+}
+
+#[tokio::test]
+async fn busy_lock_refuses_a_second_backup() {
+    let paths = temp_paths("busy");
+    let db = pool_at(&paths).await;
+    let _held = BACKUP_LOCK.lock().await;
+    let err = create_backup(
+        &db,
+        &paths,
+        BackupOptions::default(),
+        &paths.data_dir.join("x.tar.gz"),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, BackupError::Busy));
+    cleanup(&paths);
+}
+
+#[test]
+fn backup_names_round_trip_and_strangers_are_rejected() {
+    let name = backup_file_name(BackupKind::Scheduled, 1_700_000_000);
+    assert_eq!(name, "ryokan-backup-1700000000.tar.gz");
+    assert_eq!(
+        parse_backup_name(&name),
+        Some((BackupKind::Scheduled, 1_700_000_000))
+    );
+    assert_eq!(
+        parse_backup_name("auto-pre-restore-5.tar.gz"),
+        Some((BackupKind::PreRestore, 5))
+    );
+    for bad in [
+        "ryokan-backup-.tar.gz",
+        "ryokan-backup-12.tar",
+        "../ryokan-backup-12.tar.gz",
+        "ryokan-backup-12.tar.gz.partial",
+        "notes.txt",
+    ] {
+        assert_eq!(parse_backup_name(bad), None, "{bad}");
+    }
+}
+
+#[test]
+fn prune_keeps_the_newest_and_spares_pre_restore_backups() {
+    let paths = temp_paths("prune");
+    let dir = paths.data_dir.join("backups");
+    fs::create_dir_all(&dir).unwrap();
+    for ts in [10, 20, 30, 40] {
+        fs::write(dir.join(backup_file_name(BackupKind::Scheduled, ts)), b"x").unwrap();
+    }
+    fs::write(dir.join(backup_file_name(BackupKind::PreRestore, 5)), b"x").unwrap();
+    fs::write(dir.join("unrelated.txt"), b"x").unwrap();
+
+    let removed = prune_backups(&dir, 2).unwrap();
+    assert_eq!(
+        removed,
+        vec![
+            "ryokan-backup-20.tar.gz".to_string(),
+            "ryokan-backup-10.tar.gz".to_string()
+        ]
+    );
+    let names: Vec<String> = list_backups(&dir).into_iter().map(|b| b.name).collect();
+    assert_eq!(
+        names,
+        vec![
+            "ryokan-backup-40.tar.gz",
+            "ryokan-backup-30.tar.gz",
+            "auto-pre-restore-5.tar.gz"
+        ]
+    );
+    assert_eq!(newest_backup_timestamp(&dir), Some(40));
+    assert!(dir.join("unrelated.txt").exists());
+    cleanup(&paths);
+}
+
+#[tokio::test]
+async fn stage_restore_validates_stages_and_locks_until_cancelled() {
+    let paths = temp_paths("stage");
+    let db = pool_at(&paths).await;
+    crate::test_support::seed_series(&db, 1, "Frieren").await;
+    sqlx::query("INSERT INTO users (username, password_hash) VALUES ('u', 'h')")
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO sessions (token, user_id) VALUES ('live-session', 1)")
+        .execute(&db)
+        .await
+        .unwrap();
+    let upload = paths.data_dir.join("upload.tar.gz");
+    create_backup(&db, &paths, BackupOptions::default(), &upload)
+        .await
+        .unwrap();
+    let backup_dir = paths.data_dir.join("backups");
+
+    let staged = stage_restore(&db, &paths, &backup_dir, &upload)
+        .await
+        .expect("stage");
+    assert!(staged.warnings.is_empty(), "{:?}", staged.warnings);
+    assert!(!upload.exists(), "the upload is consumed");
+    let pending = paths.pending_dir();
+    assert!(pending.join("manifest.json").is_file());
+    assert!(pending.join(".ryokan-key").is_file());
+    assert!(
+        backup_dir.join(&staged.pre_restore_backup).is_file(),
+        "pre-restore backup {} exists",
+        staged.pre_restore_backup
+    );
+    let staged_db = open_file_db(&pending.join("ryokan.db")).await;
+    assert_eq!(count(&staged_db, "SELECT COUNT(*) FROM sessions").await, 0);
+    assert_eq!(count(&staged_db, "SELECT COUNT(*) FROM series").await, 1);
+    staged_db.close().await;
+    assert_eq!(
+        pending_restore(&paths).map(|m| m.backup_timestamp),
+        Some(staged.manifest.backup_timestamp)
+    );
+
+    // A second upload is refused while one is staged.
+    let again = paths.data_dir.join("again.tar.gz");
+    fs::write(&again, b"whatever").unwrap();
+    assert!(matches!(
+        stage_restore(&db, &paths, &backup_dir, &again).await,
+        Err(RestoreError::Pending)
+    ));
+
+    assert!(cancel_pending_restore(&paths).unwrap());
+    assert!(!pending.exists());
+    assert!(!cancel_pending_restore(&paths).unwrap());
+    cleanup(&paths);
+}
+
+#[tokio::test]
+async fn stage_restore_rejects_non_backups_and_newer_schemas() {
+    let paths = temp_paths("reject");
+    let db = pool_at(&paths).await;
+    let backup_dir = paths.data_dir.join("backups");
+
+    let junk = paths.data_dir.join("junk.tar.gz");
+    fs::write(&junk, b"not even gzip").unwrap();
+    assert!(matches!(
+        stage_restore(&db, &paths, &backup_dir, &junk).await,
+        Err(RestoreError::Invalid(_))
+    ));
+
+    // A well-formed archive from a newer schema.
+    let mut manifest = BackupManifest {
+        ryokan_version: env!("CARGO_PKG_VERSION").to_string(),
+        backup_timestamp: 1,
+        max_migration_id: max_migration_id(&db).await + 1000,
+        includes_artwork: false,
+        includes_key: false,
+        sanitized: false,
+        hostname: None,
+        db_size_bytes: 0,
+        artwork_size_bytes: 0,
+    };
+    let snapshot = paths.data_dir.join("snap.db");
+    vacuum_into(&db, &snapshot).await.unwrap();
+    let newer = paths.data_dir.join("newer.tar.gz");
+    write_archive(&newer, &manifest, &snapshot, None, None).unwrap();
+    let err = stage_restore(&db, &paths, &backup_dir, &newer)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RestoreError::Incompatible(_)), "{err}");
+    assert!(!paths.pending_dir().exists());
+
+    // Same schema, newer version string.
+    manifest.max_migration_id = 0;
+    manifest.ryokan_version = "99.0.0".to_string();
+    let newer_version = paths.data_dir.join("newer-version.tar.gz");
+    write_archive(&newer_version, &manifest, &snapshot, None, None).unwrap();
+    assert!(matches!(
+        stage_restore(&db, &paths, &backup_dir, &newer_version).await,
+        Err(RestoreError::Incompatible(_))
+    ));
+
+    // An archive smuggling an extra file is refused whole.
+    let extra = paths.data_dir.join("extra.tar.gz");
+    {
+        let file = fs::File::create(&extra).unwrap();
+        let mut tar = tar::Builder::new(GzEncoder::new(file, Compression::default()));
+        tar.append_path_with_name(&snapshot, "ryokan.db").unwrap();
+        tar.append_path_with_name(&snapshot, "evil.sh").unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+    }
+    let err = stage_restore(&db, &paths, &backup_dir, &extra)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("unexpected entry 'evil.sh'"),
+        "{err}"
+    );
+
+    // A key-less backup stages with a warning.
+    manifest.ryokan_version = env!("CARGO_PKG_VERSION").to_string();
+    let keyless = paths.data_dir.join("keyless.tar.gz");
+    write_archive(&keyless, &manifest, &snapshot, None, None).unwrap();
+    let staged = stage_restore(&db, &paths, &backup_dir, &keyless)
+        .await
+        .unwrap();
+    assert!(
+        staged
+            .warnings
+            .iter()
+            .any(|w| w.contains("no encryption key"))
+    );
+    cleanup(&paths);
+}
+
+#[test]
+fn apply_pending_restore_swaps_files_and_keeps_the_previous_database() {
+    let paths = temp_paths("apply");
+    fs::write(&paths.db_path, b"OLD DATABASE").unwrap();
+    fs::write(suffixed(&paths.db_path, "-wal"), b"old wal").unwrap();
+    let pending = paths.pending_dir();
+    fs::create_dir_all(pending.join("artwork/blobs")).unwrap();
+    let manifest = BackupManifest {
+        ryokan_version: "1.0.0".to_string(),
+        backup_timestamp: 42,
+        max_migration_id: 1,
+        includes_artwork: true,
+        includes_key: true,
+        sanitized: false,
+        hostname: None,
+        db_size_bytes: 0,
+        artwork_size_bytes: 0,
+    };
+    fs::write(
+        pending.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    let mut staged_db = DB_MAGIC.to_vec();
+    staged_db.extend_from_slice(b"NEW DATABASE");
+    fs::write(pending.join("ryokan.db"), &staged_db).unwrap();
+    fs::write(pending.join(".ryokan-key"), [9u8; 32]).unwrap();
+    fs::write(pending.join("artwork/blobs/bb.jpg"), b"new art").unwrap();
+
+    let applied = apply_pending_restore(&paths)
+        .expect("apply")
+        .expect("something was pending");
+    assert_eq!(applied.manifest, manifest);
+    assert!(applied.key_replaced);
+    assert!(applied.artwork_replaced);
+    assert_eq!(fs::read(&paths.db_path).unwrap(), staged_db);
+    assert_eq!(fs::read(&applied.previous_db).unwrap(), b"OLD DATABASE");
+    assert_eq!(
+        fs::read(suffixed(&applied.previous_db, "-wal")).unwrap(),
+        b"old wal",
+        "the old WAL moves with the old database"
+    );
+    assert!(!suffixed(&paths.db_path, "-wal").exists());
+    assert_eq!(fs::read(&paths.key_path).unwrap(), vec![9u8; 32]);
+    assert!(paths.artwork_dir.join("blobs/bb.jpg").is_file());
+    assert!(!paths.artwork_dir.join("blobs/aa.jpg").exists());
+    assert!(!pending.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&paths.key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+    // Nothing pending → nothing happens.
+    assert!(apply_pending_restore(&paths).unwrap().is_none());
+    cleanup(&paths);
+}
+
+#[test]
+fn apply_pending_restore_leaves_the_live_database_alone_on_a_bad_staging_dir() {
+    let paths = temp_paths("apply-bad");
+    fs::write(&paths.db_path, b"OLD DATABASE").unwrap();
+    let pending = paths.pending_dir();
+    fs::create_dir_all(&pending).unwrap();
+    fs::write(pending.join("ryokan.db"), b"not sqlite").unwrap();
+    // No manifest at all.
+    let err = apply_pending_restore(&paths).unwrap_err();
+    assert!(err.contains("manifest.json is missing"), "{err}");
+    assert_eq!(fs::read(&paths.db_path).unwrap(), b"OLD DATABASE");
+    assert!(pending.exists(), "left for inspection");
+    cleanup(&paths);
+}
+
+#[test]
+fn version_tuples_compare_numerically() {
+    assert!(version_tuple("1.10.0") > version_tuple("1.9.0"));
+    assert!(version_tuple("v2.0.0-rc1") > version_tuple("1.99.99"));
+    assert_eq!(version_tuple("garbage"), (0, 0, 0));
+}

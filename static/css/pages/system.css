@@ -809,3 +809,42 @@
     margin: 0;
 }
 
+
+/* ── Backup tab (issue #126) ─────────────────────────────────────── */
+.backup-options {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin: 0.75rem 0;
+}
+.backup-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin: 0.75rem 0;
+}
+/* The confirm-bridge forms wrap single buttons; `contents` lets the
+   buttons themselves sit in the flex row / table cell. */
+.backup-actions .inline-form,
+.backup-row-actions .inline-form {
+    display: contents;
+}
+.backup-row-actions {
+    white-space: nowrap;
+    text-align: right;
+}
+.backup-row-actions .btn + .btn,
+.backup-row-actions .btn + .inline-form .btn {
+    margin-left: 0.4rem;
+}
+.backup-pending {
+    border-color: var(--accent);
+}
+.backup-result {
+    margin-top: 0.5rem;
+    line-height: 1.5;
+}
+#restore-file {
+    max-width: 100%;
+}

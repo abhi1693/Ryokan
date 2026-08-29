@@ -318,18 +318,7 @@ async fn run_sanitize_cli() {
 }
 
 fn resolve_live_db_path() -> std::path::PathBuf {
-    // Prefer DATABASE_URL when it's a plain sqlite file URL; otherwise
-    // the canonical default. Query strings (`?mode=rwc`) and the
-    // `sqlite://` prefix are stripped so the path handed to
-    // `std::fs::copy` is usable.
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let without_scheme = url.strip_prefix("sqlite://").unwrap_or(&url);
-        let path_part = without_scheme.split('?').next().unwrap_or(without_scheme);
-        if !path_part.is_empty() {
-            return std::path::PathBuf::from(path_part);
-        }
-    }
-    std::path::PathBuf::from("data/ryokan.db")
+    services::backup::live_db_path()
 }
 
 #[tokio::main]
@@ -381,6 +370,41 @@ async fn main() {
     // OS power loss, which matches what Sonarr/Radarr ship). The pragmas
     // below size the page cache and enable mmap'd reads so hot tables stay
     // in memory on subsequent lookups.
+    // Issue #126: a restore staged from System → Backup is applied
+    // here, before the pool opens, by swapping the staged files into
+    // place. The previous database stays beside the restored one as
+    // `ryokan.db.pre-restore-<ts>`. A failure leaves the staged
+    // directory for inspection and boots the current data.
+    let backup_paths = services::backup::BackupPaths::from_env();
+    let restore_applied = match services::backup::apply_pending_restore(&backup_paths) {
+        Ok(applied) => applied,
+        Err(e) => {
+            tracing::error!(
+                "Staged restore was NOT applied: {e}. The staged files stay in {} for inspection; \
+                 cancel the restore from System → Backup or fix the directory and restart.",
+                backup_paths.pending_dir().display()
+            );
+            None
+        }
+    };
+    if let Some(applied) = &restore_applied {
+        tracing::warn!(
+            "Restore applied from a backup made {}: previous database kept at {}{}{}",
+            applied.manifest.timestamp_label(),
+            applied.previous_db.display(),
+            if applied.key_replaced {
+                "; encryption key replaced"
+            } else {
+                ""
+            },
+            if applied.artwork_replaced {
+                "; artwork cache replaced"
+            } else {
+                ""
+            },
+        );
+    }
+
     let connect_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("Invalid DATABASE_URL")
         .journal_mode(SqliteJournalMode::Wal)
@@ -400,6 +424,21 @@ async fn main() {
     models::migrate(&db)
         .await
         .expect("Failed to run migrations");
+
+    if let Some(applied) = restore_applied {
+        services::logger::info(
+            &db,
+            models::log::LogCategory::System,
+            "Restore applied at startup",
+            &format!(
+                "backup from {} (Ryokan {}); previous database kept at {}",
+                applied.manifest.timestamp_label(),
+                applied.manifest.ryokan_version,
+                applied.previous_db.display()
+            ),
+        )
+        .await;
+    }
 
     // #62 — one-shot genre backfill from existing
     // series_metadata_cache rows so the library filter dropdown
@@ -833,6 +872,43 @@ async fn main() {
         .route(
             "/api/settings/naming-preview",
             post(handlers::settings::naming::naming_preview),
+        )
+        // Issue #126: backup / restore. Cookie-auth only (protected
+        // group): a backup carries the encryption key and every stored
+        // password. The upload is a raw gzip body streamed to disk, so
+        // the default 2 MB body limit is lifted for that one route.
+        .route(
+            "/api/backup/download",
+            get(handlers::system::backup::api_backup_download),
+        )
+        .route(
+            "/api/backup/run",
+            post(handlers::system::backup::api_backup_run),
+        )
+        .route(
+            "/api/tasks/backup",
+            post(handlers::system::backup::api_backup_run),
+        )
+        .route(
+            "/system/backup/run",
+            post(handlers::system::backup::backup_run_form),
+        )
+        .route(
+            "/api/backup/files/{name}",
+            get(handlers::system::backup::api_backup_file),
+        )
+        .route(
+            "/api/backup/files/{name}/delete",
+            post(handlers::system::backup::backup_file_delete),
+        )
+        .route(
+            "/api/restore/upload",
+            post(handlers::system::backup::api_restore_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024 * 1024)),
+        )
+        .route(
+            "/api/restore/cancel",
+            post(handlers::system::backup::restore_cancel),
         )
         .route(
             "/settings/quality",
@@ -1622,6 +1698,104 @@ async fn main() {
     }
 
     // Background task: clean up logs and old RSS decisions older than 30 days every hour.
+    // Issue #126: scheduled backups. Hourly tick; a run happens when
+    // the newest scheduled backup in the folder is older than the
+    // configured cadence, so a restart never triggers an extra one and
+    // a missed day is caught up on the next tick. The folder is the
+    // state; nothing about "last backup" is stored in the DB.
+    {
+        let backup_db = db.clone();
+        let task_registry_backup = state.tasks.clone();
+        tokio::spawn(async move {
+            supervise(&task_registry_backup, "backup", move || {
+                let db = backup_db.clone();
+                async move {
+                    let touch = |db: sqlx::SqlitePool, enabled: bool| async move {
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &db,
+                            "backup",
+                            "Backup",
+                            "Daily or weekly (Settings → General)",
+                            enabled,
+                        )
+                        .await;
+                    };
+                    let initial = models::config::get_config(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    touch(db.clone(), initial.backup_schedule != "disabled").await;
+                    // Let boot settle before the first check.
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    loop {
+                        let cfg = models::config::get_config(&db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        touch(db.clone(), cfg.backup_schedule != "disabled").await;
+                        if let Some(interval) =
+                            services::backup::schedule_interval(&cfg.backup_schedule)
+                        {
+                            let paths = services::backup::BackupPaths::from_env();
+                            let dir = paths.backup_dir(&cfg.backup_directory);
+                            if services::backup::is_due(&dir, interval) {
+                                let _ = models::scheduled_tasks::mark_started(
+                                    &db,
+                                    "backup",
+                                    "Scheduled backup",
+                                )
+                                .await;
+                                match services::backup::run_to_folder(&db, &paths, &cfg).await {
+                                    Ok(run) => {
+                                        let detail = format!(
+                                            "{} written to {}{}",
+                                            run.file_name,
+                                            run.dir.display(),
+                                            if run.pruned.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(", pruned {}", run.pruned.join(", "))
+                                            }
+                                        );
+                                        services::logger::info(
+                                            &db,
+                                            models::log::LogCategory::System,
+                                            "Scheduled backup complete",
+                                            &detail,
+                                        )
+                                        .await;
+                                        let _ = models::scheduled_tasks::mark_finished(
+                                            &db, "backup", "ok", &detail,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        services::logger::error(
+                                            &db,
+                                            models::log::LogCategory::System,
+                                            "Scheduled backup failed",
+                                            &msg,
+                                        )
+                                        .await;
+                                        let _ = models::scheduled_tasks::mark_finished(
+                                            &db, "backup", "error", &msg,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
     {
         let cleanup_db = db.clone();
         let task_registry_cleanup = state.tasks.clone();

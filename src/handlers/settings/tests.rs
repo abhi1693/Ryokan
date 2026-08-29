@@ -725,6 +725,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -943,6 +947,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -982,6 +990,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1024,6 +1036,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1076,6 +1092,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1110,6 +1130,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1534,6 +1558,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         );
         let quality = settings_quality_submit(
@@ -1594,6 +1622,10 @@ mod non_htmx_path {
                 series_folder_format: String::new(),
                 season_folder_format: String::new(),
                 episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1645,6 +1677,10 @@ mod naming_templates {
             series_folder_format: series.to_string(),
             season_folder_format: season.to_string(),
             episode_file_format: episode.to_string(),
+            backup_schedule: String::new(),
+            backup_directory: String::new(),
+            backup_retention_count: 7,
+            backup_include_artwork: None,
         }
     }
 

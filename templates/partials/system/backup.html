@@ -1,0 +1,89 @@
+{# System → Backup (issue #126). `backup` is Some only on this tab. #}
+{% if let Some(b) = backup %}
+<div class="rss-panel" id="backup-tab">
+    {% if let Some(p) = b.pending %}
+    <div class="cf-section backup-pending">
+        <h3>Restore staged</h3>
+        <p class="form-hint">A backup from {{ p.when }} (Ryokan {{ p.version }}) is staged. Restart Ryokan to apply it. The database running now is kept next to the restored one as <code>ryokan.db.pre-restore-&lt;time&gt;</code>, and everyone is signed out afterwards.</p>
+        {% if !p.includes_key %}<p class="form-hint">This backup has no encryption key. Linked AniList and MyAnimeList accounts will need to be linked again.</p>{% endif %}
+        {% if p.sanitized %}<p class="form-hint">This is a sanitized backup. Passwords, API keys, and account tokens were blanked when it was made.</p>{% endif %}
+        {% if p.includes_artwork %}<p class="form-hint">The artwork cache is replaced too.</p>{% endif %}
+        <form method="post" action="/api/restore/cancel" class="inline-form"
+              data-ryokan-confirm-title="Cancel the staged restore?"
+              data-ryokan-confirm-body="The uploaded backup is discarded. Nothing about the current install changes."
+              data-ryokan-confirm-yes="Cancel restore">
+            <button type="submit" class="btn btn-secondary">Cancel restore</button>
+        </form>
+    </div>
+    {% endif %}
+
+    <div class="cf-section">
+        <h3>Back up</h3>
+        <p class="form-hint">A backup holds the database, the encryption key, and the activity log. Whoever has the file has your linked accounts and every stored password. Treat it like a password export.</p>
+        <div class="backup-options">
+            <label class="checkbox-row">
+                <input type="checkbox" id="backup-include-artwork" data-backup-option="include_artwork">
+                <span>Include cached artwork (larger file)</span>
+            </label>
+            <label class="checkbox-row">
+                <input type="checkbox" id="backup-sanitize" data-backup-option="sanitize">
+                <span>Sanitize for support (blank passwords, keys, and tokens, keep the last {{ crate::services::backup::SANITIZED_LOG_ROWS }} log lines, leave the key out)</span>
+            </label>
+        </div>
+        <div class="backup-actions">
+            <a class="btn btn-primary" id="backup-download" href="/api/backup/download">Download backup</a>
+            <form method="post" action="/system/backup/run" class="inline-form">
+                <button type="submit" class="btn btn-secondary">Save to backup folder</button>
+            </form>
+        </div>
+        <p class="form-hint">Scheduled backups are {{ b.schedule }}. Folder: <code>{{ b.backup_dir }}</code>. Keeping the newest {{ b.retention }}.{% if let Some(free) = b.free_space %} Free space there: {{ free }}.{% endif %} Change the schedule in <a href="/settings?tab=general">Settings → General</a>.</p>
+        {% if b.files.is_empty() %}
+        <div class="logs-empty">No backups in the folder yet.</div>
+        {% else %}
+        <div class="rss-table-wrap">
+            <table class="rss-table backup-table">
+                <thead>
+                    <tr>
+                        <th>File</th>
+                        <th>Made</th>
+                        <th>Size</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for f in b.files %}
+                    <tr>
+                        <td>
+                            <div>{{ f.name }}</div>
+                            {% if f.pre_restore %}<div class="rss-release-meta">Taken automatically before a restore. Never pruned.</div>{% endif %}
+                        </td>
+                        <td><span class="task-time">{{ f.when }}</span></td>
+                        <td>{{ f.size }}</td>
+                        <td class="backup-row-actions">
+                            <a class="btn btn-secondary btn-sm" href="/api/backup/files/{{ f.name }}">Download</a>
+                            <form method="post" action="/api/backup/files/{{ f.name }}/delete" class="inline-form"
+                                  data-ryokan-confirm-title="Delete this backup?"
+                                  data-ryokan-confirm-body="{{ f.name }} is removed from the backup folder. This cannot be undone."
+                                  data-ryokan-confirm-yes="Delete">
+                                <button type="submit" class="btn btn-secondary btn-sm">Delete</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="cf-section">
+        <h3>Restore</h3>
+        <p class="form-hint">Upload a backup made by this or an older Ryokan. It is checked, a backup of the current state is saved to the folder first, and the restore is applied when Ryokan restarts. A backup from a newer Ryokan is refused.</p>
+        <div class="backup-actions">
+            <input type="file" id="restore-file" accept=".tar.gz,.tgz,application/gzip">
+            <button type="button" class="btn btn-primary" id="restore-upload"{% if b.pending.is_some() %} disabled{% endif %}>Upload and stage restore</button>
+        </div>
+        <div id="restore-result" class="form-hint backup-result" hidden></div>
+    </div>
+</div>
+{% endif %}

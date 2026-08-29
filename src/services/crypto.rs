@@ -121,6 +121,14 @@ fn key_file_path_from_env() -> String {
         .unwrap_or_else(|| KEY_FILE_PATH_DEFAULT.to_string())
 }
 
+/// The effective key-file path (env override or default). Backup
+/// (#126) includes this file in the archive and restore writes it back.
+/// Not the source of truth when `RYOKAN_ENCRYPTION_KEY` is set; that
+/// key wins at load time regardless of the file.
+pub fn key_file_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(key_file_path_from_env())
+}
+
 fn decode_key_from_base64(s: &str) -> Result<[u8; 32], String> {
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(s)

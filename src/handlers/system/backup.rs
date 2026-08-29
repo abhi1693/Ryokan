@@ -1,0 +1,564 @@
+//! System → Backup (issue #126): download / save a backup, list and
+//! manage the backup folder, upload and stage a restore, cancel a
+//! staged restore. The work lives in `services::backup`; this module
+//! is the HTTP shape around it.
+//!
+//! Downloads stream from a temp dir that is removed when the response
+//! body is dropped (finished or abandoned). Uploads stream to a temp
+//! file first, so a multi-gigabyte artwork backup never sits in
+//! memory. Both stay cookie-authenticated: a backup carries the
+//! encryption key and every stored password, and no API-key scope
+//! from #114 is broad enough to hand that out.
+
+use axum::Json;
+use axum::body::{Body, Bytes};
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum_htmx::HxRequest;
+use futures_util::StreamExt;
+use serde::Deserialize;
+use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
+
+use crate::AppState;
+use crate::handlers::responses::htmx_aware_redirect;
+use crate::models::log::LogCategory;
+use crate::models::{config, scheduled_tasks};
+use crate::services::backup::{
+    self, BackupError, BackupKind, BackupOptions, BackupPaths, RestoreError,
+};
+use crate::services::logger;
+
+/// Hard cap on an uploaded archive. Artwork-inclusive backups of a
+/// large library run to a few gigabytes; anything past this is not a
+/// Ryokan backup.
+const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+pub struct BackupTabView {
+    pub backup_dir: String,
+    pub files: Vec<BackupFileView>,
+    pub pending: Option<PendingView>,
+    pub schedule: &'static str,
+    pub retention: i64,
+    pub free_space: Option<String>,
+}
+
+pub struct BackupFileView {
+    pub name: String,
+    pub size: String,
+    pub when: String,
+    pub pre_restore: bool,
+}
+
+pub struct PendingView {
+    pub when: String,
+    pub version: String,
+    pub includes_key: bool,
+    pub includes_artwork: bool,
+    pub sanitized: bool,
+}
+
+fn when_label(ts: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0)
+        .map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_else(|| ts.to_string())
+}
+
+pub async fn backup_tab_view(state: &AppState) -> BackupTabView {
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let paths = BackupPaths::from_env();
+    let dir = paths.backup_dir(&cfg.backup_directory);
+    let dir_for_task = dir.clone();
+    let data_dir = paths.data_dir.clone();
+    let (files, free) = tokio::task::spawn_blocking(move || {
+        (
+            backup::list_backups(&dir_for_task),
+            backup::free_bytes(&data_dir),
+        )
+    })
+    .await
+    .unwrap_or_default();
+    let pending = backup::pending_restore(&paths).map(|m| PendingView {
+        when: m.timestamp_label(),
+        version: m.ryokan_version.clone(),
+        includes_key: m.includes_key,
+        includes_artwork: m.includes_artwork,
+        sanitized: m.sanitized,
+    });
+    BackupTabView {
+        backup_dir: dir.display().to_string(),
+        files: files
+            .into_iter()
+            .map(|f| BackupFileView {
+                name: f.name,
+                size: backup::human_bytes(f.size_bytes),
+                when: when_label(f.timestamp),
+                pre_restore: f.kind == BackupKind::PreRestore,
+            })
+            .collect(),
+        pending,
+        schedule: match cfg.backup_schedule.as_str() {
+            "daily" => "daily",
+            "weekly" => "weekly",
+            _ => "off",
+        },
+        retention: cfg.backup_retention_count,
+        free_space: free.map(backup::human_bytes),
+    }
+}
+
+/// Removes a temp dir when dropped: the download's work dir lives
+/// exactly as long as its response body.
+struct TempDirGuard(Option<PathBuf>);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        if let Some(dir) = self.0.take() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+}
+
+/// Stream `path` as an attachment. `guard` rides along in the stream
+/// state so its cleanup runs when the body is done.
+async fn file_response(
+    path: &Path,
+    download_name: &str,
+    guard: TempDirGuard,
+) -> Result<Response, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let size = file.metadata().await.ok().map(|m| m.len());
+    let stream = futures_util::stream::unfold((file, guard), |(mut file, guard)| async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        match tokio::io::AsyncReadExt::read(&mut file, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok::<Bytes, std::io::Error>(Bytes::from(buf)), (file, guard)))
+            }
+            Err(e) => Some((Err(e), (file, guard))),
+        }
+    });
+    let mut resp = Response::new(Body::from_stream(stream));
+    let headers = resp.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        header::HeaderValue::from_static("application/gzip"),
+    );
+    // Names come from `backup_file_name`: ASCII, no quotes.
+    if let Ok(v) =
+        header::HeaderValue::from_str(&format!("attachment; filename=\"{download_name}\""))
+    {
+        headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+    if let Some(size) = size
+        && let Ok(v) = header::HeaderValue::from_str(&size.to_string())
+    {
+        headers.insert(header::CONTENT_LENGTH, v);
+    }
+    Ok(resp)
+}
+
+fn json_error(status: StatusCode, message: String) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "ok": false, "error": message })),
+    )
+        .into_response()
+}
+
+fn backup_error_response(e: BackupError) -> Response {
+    let status = match e {
+        BackupError::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        BackupError::NoSpace { .. } => StatusCode::INSUFFICIENT_STORAGE,
+        BackupError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    json_error(status, e.to_string())
+}
+
+fn flag(v: &Option<String>) -> bool {
+    match v.as_deref().map(str::trim) {
+        None => false,
+        Some("") | Some("0") | Some("false") | Some("off") => false,
+        Some(_) => true,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    #[serde(default)]
+    include_artwork: Option<String>,
+    #[serde(default)]
+    sanitize: Option<String>,
+}
+
+/// `GET /api/backup/download?include_artwork=1&sanitize=1`. Builds the
+/// archive in a temp dir under the data dir and streams it; 503 while
+/// another backup runs, 507 when the disk-space precheck fails.
+pub async fn api_backup_download(
+    State(state): State<AppState>,
+    Query(q): Query<DownloadQuery>,
+) -> Response {
+    let opts = BackupOptions {
+        include_artwork: flag(&q.include_artwork),
+        sanitize: flag(&q.sanitize),
+    };
+    let paths = BackupPaths::from_env();
+    let work = paths.data_dir.join(".backup-tmp").join(format!(
+        "download-{}",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    let guard = TempDirGuard(Some(work.clone()));
+    let name = backup::backup_file_name(BackupKind::Scheduled, chrono::Utc::now().timestamp());
+    let out = work.join(&name);
+    let manifest = match backup::create_backup(&state.db, &paths, opts, &out).await {
+        Ok(m) => m,
+        Err(e) => {
+            logger::warn(
+                &state.db,
+                LogCategory::System,
+                "Backup download failed",
+                &e.to_string(),
+            )
+            .await;
+            return backup_error_response(e);
+        }
+    };
+    logger::info(
+        &state.db,
+        LogCategory::System,
+        "Backup downloaded",
+        &format!(
+            "{} ({}{}{})",
+            name,
+            backup::human_bytes(manifest.db_size_bytes),
+            if manifest.includes_artwork {
+                " + artwork"
+            } else {
+                ""
+            },
+            if manifest.sanitized {
+                ", sanitized"
+            } else {
+                ""
+            }
+        ),
+    )
+    .await;
+    match file_response(&out, &name, guard).await {
+        Ok(resp) => resp,
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// One folder run with the scheduled-task bookkeeping the supervised
+/// loop also does, so a manual run shows up in System → Scheduled
+/// Tasks the same way.
+async fn run_to_folder_tracked(state: &AppState) -> Result<backup::FolderRun, BackupError> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let paths = BackupPaths::from_env();
+    let _ = scheduled_tasks::mark_started(&state.db, "backup", "Manual backup").await;
+    match backup::run_to_folder(&state.db, &paths, &cfg).await {
+        Ok(run) => {
+            let detail = format!(
+                "{} written to {}{}",
+                run.file_name,
+                run.dir.display(),
+                if run.pruned.is_empty() {
+                    String::new()
+                } else {
+                    format!(", pruned {}", run.pruned.join(", "))
+                }
+            );
+            logger::info(&state.db, LogCategory::System, "Backup saved", &detail).await;
+            let _ = scheduled_tasks::mark_finished(&state.db, "backup", "ok", &detail).await;
+            Ok(run)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            logger::error(&state.db, LogCategory::System, "Backup failed", &msg).await;
+            let _ = scheduled_tasks::mark_finished(&state.db, "backup", "error", &msg).await;
+            Err(e)
+        }
+    }
+}
+
+/// `POST /api/backup/run` and `POST /api/tasks/backup`: JSON shape for
+/// the Scheduled Tasks tab's Run now.
+pub async fn api_backup_run(State(state): State<AppState>) -> Response {
+    match run_to_folder_tracked(&state).await {
+        Ok(run) => Json(serde_json::json!({
+            "ok": true,
+            "message": format!("Backup saved as {} in {}.", run.file_name, run.dir.display()),
+            "file": run.file_name,
+        }))
+        .into_response(),
+        Err(e) => match e {
+            BackupError::Busy => {
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })).into_response()
+            }
+            other => backup_error_response(other),
+        },
+    }
+}
+
+/// `POST /system/backup/run`: the form button on the Backup tab.
+pub async fn backup_run_form(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+) -> Response {
+    let target = match run_to_folder_tracked(&state).await {
+        Ok(run) => format!(
+            "/system?tab=backup&message={}",
+            urlencoding::encode(&format!("Backup saved as {}.", run.file_name))
+        ),
+        Err(e) => format!(
+            "/system?tab=backup&error={}",
+            urlencoding::encode(&e.to_string())
+        ),
+    };
+    htmx_aware_redirect(is_htmx, &target)
+}
+
+fn named_backup(dir: &Path, name: &str) -> Option<PathBuf> {
+    backup::parse_backup_name(name)?;
+    let path = dir.join(name);
+    path.is_file().then_some(path)
+}
+
+async fn configured_backup_dir(state: &AppState) -> PathBuf {
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    BackupPaths::from_env().backup_dir(&cfg.backup_directory)
+}
+
+/// `GET /api/backup/files/{name}`: download a backup from the folder.
+/// The name must parse as one of ours, which is also the traversal
+/// guard.
+pub async fn api_backup_file(
+    State(state): State<AppState>,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let dir = configured_backup_dir(&state).await;
+    let Some(path) = named_backup(&dir, &name) else {
+        return json_error(StatusCode::NOT_FOUND, "No such backup.".to_string());
+    };
+    match file_response(&path, &name, TempDirGuard(None)).await {
+        Ok(resp) => resp,
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+    }
+}
+
+/// `POST /api/backup/files/{name}/delete` (form): remove one backup.
+pub async fn backup_file_delete(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+    AxumPath(name): AxumPath<String>,
+) -> Response {
+    let dir = configured_backup_dir(&state).await;
+    let target = match named_backup(&dir, &name) {
+        Some(path) => match tokio::fs::remove_file(&path).await {
+            Ok(()) => {
+                logger::info(&state.db, LogCategory::System, "Backup deleted", &name).await;
+                format!(
+                    "/system?tab=backup&message={}",
+                    urlencoding::encode(&format!("Deleted {name}."))
+                )
+            }
+            Err(e) => format!(
+                "/system?tab=backup&error={}",
+                urlencoding::encode(&format!("Could not delete {name}: {e}"))
+            ),
+        },
+        None => "/system?tab=backup&error=No+such+backup.".to_string(),
+    };
+    htmx_aware_redirect(is_htmx, &target)
+}
+
+/// `POST /api/restore/upload`: raw `application/gzip` body. Streams to
+/// a temp file, then validates and stages through
+/// `backup::stage_restore`. Nothing is applied until the next restart.
+pub async fn api_restore_upload(State(state): State<AppState>, body: Body) -> Response {
+    let paths = BackupPaths::from_env();
+    if paths.pending_dir().exists() {
+        return json_error(StatusCode::CONFLICT, RestoreError::Pending.to_string());
+    }
+    let work = paths.data_dir.join(".restore-staging-tmp");
+    if let Err(e) = tokio::fs::create_dir_all(&work).await {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("create {}: {e}", work.display()),
+        );
+    }
+    let upload = work.join(format!(
+        "upload-{}.tar.gz",
+        hex::encode(rand::random::<[u8; 8]>())
+    ));
+    if let Err(e) = write_body_to_file(body, &upload).await {
+        let _ = tokio::fs::remove_file(&upload).await;
+        return json_error(StatusCode::BAD_REQUEST, e);
+    }
+
+    let dir = configured_backup_dir(&state).await;
+    match backup::stage_restore(&state.db, &paths, &dir, &upload).await {
+        Ok(staged) => {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                "Restore staged; restart to apply",
+                &format!(
+                    "backup from {} (Ryokan {}), pre-restore backup {}",
+                    staged.manifest.timestamp_label(),
+                    staged.manifest.ryokan_version,
+                    staged.pre_restore_backup
+                ),
+            )
+            .await;
+            Json(serde_json::json!({
+                "ok": true,
+                "restart_required": true,
+                "backup_time": staged.manifest.timestamp_label(),
+                "version": staged.manifest.ryokan_version,
+                "includes_key": staged.manifest.includes_key,
+                "includes_artwork": staged.manifest.includes_artwork,
+                "sanitized": staged.manifest.sanitized,
+                "pre_restore_backup": staged.pre_restore_backup,
+                "warnings": staged.warnings,
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            logger::warn(
+                &state.db,
+                LogCategory::System,
+                "Restore upload rejected",
+                &e.to_string(),
+            )
+            .await;
+            let status = match e {
+                RestoreError::Pending => StatusCode::CONFLICT,
+                RestoreError::Invalid(_) => StatusCode::BAD_REQUEST,
+                RestoreError::Incompatible(_) => StatusCode::UNPROCESSABLE_ENTITY,
+                RestoreError::Other(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            json_error(status, e.to_string())
+        }
+    }
+}
+
+async fn write_body_to_file(body: Body, path: &Path) -> Result<(), String> {
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| format!("create {}: {e}", path.display()))?;
+    let mut stream = body.into_data_stream();
+    let mut written: u64 = 0;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("upload interrupted: {e}"))?;
+        written += chunk.len() as u64;
+        if written > MAX_UPLOAD_BYTES {
+            return Err("The upload is larger than any Ryokan backup can be.".to_string());
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|e| format!("write upload: {e}"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|e| format!("flush upload: {e}"))?;
+    if written == 0 {
+        return Err("The upload is empty.".to_string());
+    }
+    Ok(())
+}
+
+/// `POST /api/restore/cancel` (form): drop the staged restore.
+pub async fn restore_cancel(
+    State(state): State<AppState>,
+    HxRequest(is_htmx): HxRequest,
+) -> Response {
+    let paths = BackupPaths::from_env();
+    let target = match backup::cancel_pending_restore(&paths) {
+        Ok(true) => {
+            logger::info(
+                &state.db,
+                LogCategory::System,
+                "Staged restore cancelled",
+                "",
+            )
+            .await;
+            "/system?tab=backup&message=Restore+cancelled.+Nothing+was+changed.".to_string()
+        }
+        Ok(false) => "/system?tab=backup&message=No+restore+was+staged.".to_string(),
+        Err(e) => format!("/system?tab=backup&error={}", urlencoding::encode(&e)),
+    };
+    htmx_aware_redirect(is_htmx, &target)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_flags_read_checkbox_and_boolean_shapes() {
+        assert!(!flag(&None));
+        assert!(!flag(&Some(String::new())));
+        assert!(!flag(&Some("0".to_string())));
+        assert!(!flag(&Some("false".to_string())));
+        assert!(flag(&Some("1".to_string())));
+        assert!(flag(&Some("on".to_string())));
+        assert!(flag(&Some("true".to_string())));
+    }
+
+    #[test]
+    fn named_backup_only_resolves_files_this_module_produced() {
+        let dir = std::env::temp_dir().join(format!("ryokan-named-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ryokan-backup-100.tar.gz"), b"x").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert!(named_backup(&dir, "ryokan-backup-100.tar.gz").is_some());
+        assert!(
+            named_backup(&dir, "ryokan-backup-999.tar.gz").is_none(),
+            "missing file"
+        );
+        assert!(
+            named_backup(&dir, "notes.txt").is_none(),
+            "not a backup name"
+        );
+        assert!(
+            named_backup(&dir, "../ryokan-backup-100.tar.gz").is_none(),
+            "traversal never parses as a backup name"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn body_writer_rejects_empty_uploads_and_keeps_bytes_otherwise() {
+        let dir = std::env::temp_dir().join(format!("ryokan-body-writer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("empty.bin");
+        let err = write_body_to_file(Body::empty(), &empty).await.unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        let full = dir.join("full.bin");
+        write_body_to_file(Body::from("gzip bytes"), &full)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&full).unwrap(), b"gzip bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
