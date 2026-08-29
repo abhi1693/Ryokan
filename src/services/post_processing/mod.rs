@@ -112,6 +112,15 @@ fn resolve_episode(
 /// cumulative offset used by execution, and the resolved plan returned here is
 /// consumed by the loop. Validation and execution therefore cannot drift onto
 /// different destination slots.
+///
+/// Unparseable and non-positive files are excluded from the plan rather than
+/// failing it: batches routinely ship NCOP/NCED/PV/CM/menu extras that parse
+/// to `None` by design, and an excluded file moves nothing, so skipping is
+/// non-destructive. (The import loop re-derives the same verdict for files
+/// absent from the plan and logs a per-file warning with series context.)
+/// Two files resolving to the same destination slot still fail the whole
+/// batch before any mutation — that ambiguity has no safe per-file answer,
+/// and importing either file could destroy the other.
 pub(crate) fn validate_batch_episode_map(
     files: &[(usize, i64, Option<i32>, i32, String)],
 ) -> Result<HashMap<usize, ResolvedEpisode>, String> {
@@ -126,23 +135,16 @@ pub(crate) fn validate_batch_episode_map(
         let Some((parsed_season, raw_episode)) =
             media::parse_episode_number(&filename.to_lowercase())
         else {
-            return Err(format!(
-                "batch preflight rejected unparseable video '{}'; no files were changed",
-                filename
-            ));
+            continue;
         };
-        let resolved = resolve_episode(
+        let Ok(resolved) = resolve_episode(
             parsed_season,
             raw_episode,
             *route_offset,
             *cumulative_prior_episodes,
-        )
-        .map_err(|reason| {
-            format!(
-                "batch preflight rejected '{}' because {}; no files were changed",
-                filename, reason
-            )
-        })?;
+        ) else {
+            continue;
+        };
 
         if let Some(previous) = destinations.insert((*series_id, resolved.episode), filename) {
             return Err(format!(
@@ -926,8 +928,10 @@ async fn import_torrent(
     let effective_is_batch = effective_batch_shape(grab.is_batch, video_files.len());
 
     // Resolve and validate the complete batch mapping before loading series
-    // context, deleting an upgrade target, or moving/copying any source. A
-    // single malformed filename must fail the whole import without mutation.
+    // context, deleting an upgrade target, or moving/copying any source.
+    // Duplicate destination slots fail the whole import without mutation;
+    // unparseable extras (NCOP/PV/CM/menu files) are merely absent from the
+    // plan and get skipped with a per-file warning in the loop below.
     // Trust the files we actually received over the stored classifier. Older
     // grabs can predate (or have missed) batch classification; allowing a
     // multi-video import through the single-file path would reintroduce the
@@ -1141,9 +1145,12 @@ async fn import_torrent(
             .and_then(|n| n.to_str())
             .unwrap_or(&file.name);
 
-        // Batch imports consume the exact plan validated before this loop.
-        // Singles use the same resolver, retaining the legacy first-episode
-        // fallback only when exactly one video exists.
+        // Batch imports consume the exact plan validated before this loop;
+        // a batch file absent from the plan was preflight-skipped
+        // (unparseable or non-positive) and re-derives the same verdict
+        // here, landing in the warn-and-continue arms below. Singles use
+        // the same resolver, retaining the legacy first-episode fallback
+        // only when exactly one video exists.
         let resolved = if let Some(resolved) = batch_episode_plan.get(file_idx) {
             *resolved
         } else {

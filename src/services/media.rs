@@ -95,8 +95,15 @@ fn starts_with_non_episode_marker(rest: &str) -> bool {
 /// precede the episode token (`86.Eighty.Six.023...`). Four-digit years and
 /// resolutions, one-digit audio channel tokens, and alphanumeric codec tokens
 /// remain ineligible. A glued revision suffix (`023v2`) is accepted.
+///
+/// Dotted codec spellings (`H.264`, `x.265`, `MPEG.2`) put a bare digit
+/// token immediately right of a codec marker; without the marker guard the
+/// rightmost scan would return 264/265 as the episode number. The marker
+/// check looks at the last word of the preceding token so mixed-delimiter
+/// names (`Title 023 1080p H.264.mkv`, `[BD 1080p x.264]`) are covered too.
 fn parse_dot_delimited_episode(lower: &str) -> Option<i32> {
-    lower.split('.').rev().find_map(|token| {
+    let tokens: Vec<&str> = lower.split('.').collect();
+    tokens.iter().enumerate().rev().find_map(|(i, token)| {
         let digits = token
             .split_once('v')
             .filter(|(_, version)| {
@@ -104,11 +111,18 @@ fn parse_dot_delimited_episode(lower: &str) -> Option<i32> {
             })
             .map(|(digits, _)| digits)
             .unwrap_or(token);
-        if (2..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit()) {
-            digits.parse().ok()
-        } else {
-            None
+        if !((2..=3).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_digit())) {
+            return None;
         }
+        let follows_codec_marker = i > 0
+            && tokens[i - 1]
+                .rsplit([' ', '-', '_', '(', '['])
+                .next()
+                .is_some_and(|word| matches!(word, "h" | "x" | "mpeg"));
+        if follows_codec_marker {
+            return None;
+        }
+        digits.parse().ok()
     })
 }
 
@@ -882,6 +896,48 @@ mod tests {
         assert_eq!(
             parse("86.Eighty.Six.023v2.1080p.WEB-DL.mkv"),
             Some((None, 23))
+        );
+    }
+
+    #[test]
+    fn dot_delimited_parser_skips_dotted_codec_tokens() {
+        // `H.264` / `x.265` / `MPEG.2` split into a bare digit token that
+        // the rightmost scan would otherwise return as the episode.
+        assert_eq!(
+            parse("Dragon.Ball.023.DVD.480p.H.264.mkv"),
+            Some((None, 23))
+        );
+        assert_eq!(parse("Show.023.1080p.H.265.mkv"), Some((None, 23)));
+        assert_eq!(parse("Show.023.1080p.x.264.mkv"), Some((None, 23)));
+        // Mixed space/dot delimiters keep the guard: the codec marker is
+        // the last word of the preceding token, not the whole token. With
+        // `264` guarded, the bare-number-before-bracket fallback recovers
+        // the real episode.
+        assert_eq!(
+            parse("[Group] Title 023 (1080p) H.264.mkv"),
+            Some((None, 23))
+        );
+        // A codec-digit token with no other candidate yields no episode
+        // rather than 264.
+        assert_eq!(parse("Movie.Name.1080p.H.264.mkv"), None);
+    }
+
+    #[test]
+    fn sxxeyy_outranks_dot_delimited_codec_names() {
+        // Real WEB-DL scene names carrying dotted `AAC2.0.H.264` tokens;
+        // the explicit season marker must keep winning over any bare
+        // dot-delimited number.
+        assert_eq!(
+            parse(
+                "Bleach.S17E45.Thousand-Year.Blood.War.DEFEND.YOU.1080p.DSNP.WEB-DL.AAC2.0.H.264-NTb.mkv"
+            ),
+            Some((Some(17), 45))
+        );
+        assert_eq!(
+            parse(
+                "BLEACH.Thousand-Year.Blood.War.S01E45.DEFEND.YOU.1080p.CR.WEB-DL.JPN.AAC2.0.H.264.MSubs-ToonsHub.mkv"
+            ),
+            Some((Some(1), 45))
         );
     }
 

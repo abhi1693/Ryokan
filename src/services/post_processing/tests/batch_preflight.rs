@@ -33,14 +33,40 @@ fn accepts_unique_dot_delimited_complete_series_batch() {
 }
 
 #[test]
-fn rejects_unparseable_file_before_batch_import() {
+fn unparseable_extras_are_skipped_without_failing_the_batch() {
+    // Real packs routinely ship NCOP/NCED/PV/CM/menu videos that parse to
+    // `None` by design. They must be absent from the plan (the import loop
+    // warn-skips them) without stranding the parseable siblings.
     let files = vec![
         (0, 42, None, 0, "Dragon.Ball.001.mkv".to_string()),
         (1, 42, None, 0, "Dragon.Ball.movie.mkv".to_string()),
+        (
+            2,
+            42,
+            None,
+            0,
+            "[Moozzi2] Anne of Green Gables [SP01] NCOP (BD 1440x1080 x.265 Flac).mkv".to_string(),
+        ),
+        (3, 42, None, 0, "Dragon.Ball.002.mkv".to_string()),
     ];
-    let err = validate_batch_episode_map(&files).unwrap_err();
-    assert!(err.contains("unparseable video 'Dragon.Ball.movie.mkv'"));
-    assert!(err.contains("no files were changed"));
+    let plan = validate_batch_episode_map(&files).unwrap();
+    assert!(plan.contains_key(&0));
+    assert!(plan.contains_key(&3));
+    assert!(!plan.contains_key(&1));
+    assert!(!plan.contains_key(&2));
+}
+
+#[test]
+fn non_positive_resolved_episode_is_skipped_without_failing_the_batch() {
+    // E00 specials (and files landing on a sibling whose offset exceeds
+    // their own number) resolve non-positive; skip them, keep the rest.
+    let files = vec![
+        (0, 42, None, 0, "Show - 00 - Special.mkv".to_string()),
+        (1, 42, None, 0, "Show - 01.mkv".to_string()),
+    ];
+    let plan = validate_batch_episode_map(&files).unwrap();
+    assert!(!plan.contains_key(&0));
+    assert!(plan.contains_key(&1));
 }
 
 #[test]
