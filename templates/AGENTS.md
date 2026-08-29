@@ -60,6 +60,10 @@ Per-page scripts call `window.ryokanRegisterPageInit` / `ryokanProgressToast` / 
 
 Boost-nav users don't notice because the helpers stay loaded from a prior page; only direct-URL loads hit the bug. The `{% block page_js %}` placeholder is at end-of-body after `base.js`, so per-page scripts render LAST.
 
+## Links inside forms that carry `hx-target`
+
+htmx attributes inherit down the DOM. A plain `<a href>` inside a form with `hx-target="#some-region" hx-swap="outerHTML"` (the per-tab Settings subforms) is boosted by the body-wide `hx-boost` **using the form's target and swap**, so the destination page renders nested inside that region with two sidebars overlapping. Every such form carries `hx-disinherit="hx-target hx-swap"`; keep it when adding a subform, and prefer that over per-link `hx-boost="false"` so the links keep the boosted navigation everything else has. Download links are the exception: `hx-boost="false"` there, because a boosted click would swap the attachment's bytes into the page.
+
 ## Per-page JS quirks under hx-boost
 
 - **Use `var` at module scope, not `let` / `const`.** Top-level `let` / `const` throws "redeclaration" SyntaxError on body-swap re-execute.

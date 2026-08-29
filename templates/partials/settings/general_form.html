@@ -13,7 +13,15 @@
    handler returns this same partial on the HTMX path so successful
    saves replace the form in place. The non-HTMX path returns the
    full SettingsTemplate and the browser does a normal redirect-style
-   reload — progressive enhancement for users with JS off. #}
+   reload — progressive enhancement for users with JS off.
+
+   hx-disinherit="hx-target hx-swap": htmx attributes inherit down the
+   tree, so a plain link inside this form (the Recycle Bin and
+   System → Backup hints) would otherwise be boosted INTO
+   #settings-general-region and render the destination page nested
+   inside Settings, sidebars overlapping. Disinheriting the two swap
+   attributes lets those links boost to the body like every other
+   link; the form's own hx-post still uses them. #}
 <div id="settings-general-region">
     {% if let Some(msg) = message %}
     <div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Settings saved">{{ msg }}</div>
@@ -25,7 +33,8 @@
     <form method="post" action="/settings/general" class="settings-form"
           hx-post="/settings/general"
           hx-target="#settings-general-region"
-          hx-swap="outerHTML">
+          hx-swap="outerHTML"
+          hx-disinherit="hx-target hx-swap">
 {%~ include "partials/settings/general.html" ~%}
         <button type="submit" class="btn btn-primary">Save Settings</button>
     </form>
