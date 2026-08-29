@@ -536,6 +536,12 @@ fn keyword_from(haystack: &str, keyword: &str, min_at: usize) -> bool {
 /// `S02E10v2` → 2, `.V2.` → 2). `None` when no version token is
 /// present; callers treat that as v1. Issue #204 uses it to prefer the
 /// highest version when a batch ships `E05` and `E05v2`.
+///
+/// Leftmost match, not episode-adjacent: a `vN` token in a group tag
+/// or title (`[Group v2] Show - 05v3`) wins over the real one. Both
+/// files in a colliding pair share that prefix in practice, so they
+/// read the same wrong version, tie, and the preflight fails closed
+/// rather than picking wrongly.
 pub fn parse_release_version(lower: &str) -> Option<u32> {
     RE_VERSION
         .captures(lower)

@@ -1432,6 +1432,16 @@ async fn import_torrent(
                 )
                 .await;
                 unstage_upgrade(&state.db, &cfg.post_processing_mode, &landing, &src).await;
+                // Issue #118: a stalled upgrade is an import failure the
+                // user wants to hear about, same as a failed placement.
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    "the old file could not be recycled, so the upgrade was skipped",
+                )
+                .await;
                 failed_episodes.push(ep_num);
                 continue;
             }
@@ -1453,6 +1463,17 @@ async fn import_torrent(
                         landing.display()
                     ),
                     &e.to_string(),
+                )
+                .await;
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    &format!(
+                        "the new file is staged at {} but could not be renamed into place: {e}",
+                        landing.display()
+                    ),
                 )
                 .await;
                 failed_episodes.push(ep_num);
@@ -1785,6 +1806,17 @@ async fn import_torrent(
                     &e.to_string(),
                 )
                 .await;
+                // A copy that died part-way (disk full, the hardlink
+                // fallback's `fs::copy`) leaves a partial file at the
+                // landing path: the hidden `.ryokan-new` on an upgrade,
+                // the destination itself on a first import. Neither is
+                // a finished file; drop it so the slot reads as empty on
+                // the next pass. Best effort: the same-inode guard means
+                // a landing that is the source's own link never gets
+                // here with `Err`.
+                if landing.is_file() && !files_share_inode(&src, &landing) {
+                    let _ = tokio::fs::remove_file(&landing).await;
+                }
                 failed_episodes.push(ep_num);
             }
         }
