@@ -405,6 +405,17 @@ async fn main() {
         );
     }
 
+    if let Some(applied) = &restore_applied {
+        for warning in &applied.warnings {
+            tracing::warn!("Restore: {warning}");
+        }
+    }
+    // Whatever a crash left in the backup / upload work dirs is dead
+    // weight now (a half-written multi-GB upload, a vacuum snapshot).
+    for dir in services::backup::sweep_work_dirs(&backup_paths) {
+        tracing::info!("Cleared stranded backup work dir {}", dir.display());
+    }
+
     let connect_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("Invalid DATABASE_URL")
         .journal_mode(SqliteJournalMode::Wal)
@@ -438,6 +449,15 @@ async fn main() {
             ),
         )
         .await;
+        for warning in &applied.warnings {
+            services::logger::warn(
+                &db,
+                models::log::LogCategory::System,
+                "Restore applied with a warning",
+                warning,
+            )
+            .await;
+        }
     }
 
     // #62 — one-shot genre backfill from existing
@@ -903,8 +923,9 @@ async fn main() {
         )
         .route(
             "/api/restore/upload",
-            post(handlers::system::backup::api_restore_upload)
-                .layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024 * 1024)),
+            post(handlers::system::backup::api_restore_upload).layer(
+                axum::extract::DefaultBodyLimit::max(services::backup::MAX_UPLOAD_BYTES as usize),
+            ),
         )
         .route(
             "/api/restore/cancel",

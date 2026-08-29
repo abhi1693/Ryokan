@@ -625,7 +625,6 @@ var bindBackupTab = function () {
     const tab = document.getElementById('backup-tab');
     if (!tab || tab.dataset.ryokanBound === '1') return;
     tab.dataset.ryokanBound = '1';
-    const esc = window.ryokanEscapeHtml || ((s) => String(s));
 
     const link = document.getElementById('backup-download');
     const options = Array.from(tab.querySelectorAll('[data-backup-option]'));
@@ -642,6 +641,15 @@ var bindBackupTab = function () {
     const button = document.getElementById('restore-upload');
     const out = document.getElementById('restore-result');
     if (!fileInput || !button || !out) return;
+    // Server strings (error bodies, manifest fields) are rendered as
+    // text nodes, never markup, so nothing from an uploaded archive
+    // can reach innerHTML.
+    const show = (parts) => {
+        out.textContent = '';
+        parts.forEach((p) => {
+            out.appendChild(typeof p === 'string' ? document.createTextNode(p) : p);
+        });
+    };
     button.addEventListener('click', async () => {
         const file = fileInput.files && fileInput.files[0];
         if (!file) {
@@ -661,15 +669,22 @@ var bindBackupTab = function () {
             });
             const data = await r.json().catch(() => ({}));
             if (!r.ok || !data.ok) {
-                out.innerHTML = 'Not staged: ' + esc(data.error || ('HTTP ' + r.status));
+                show(['Not staged: ' + String(data.error || ('HTTP ' + r.status))]);
                 button.disabled = false;
                 return;
             }
-            let html = 'Restore staged from a backup made ' + esc(data.backup_time) + ' (Ryokan ' + esc(data.version) + '). '
-                + 'A backup of the current state was saved as ' + esc(data.pre_restore_backup) + '. '
-                + '<strong>Restart Ryokan to apply it.</strong>';
-            (data.warnings || []).forEach((w) => { html += '<br>' + esc(w); });
-            out.innerHTML = html;
+            const strong = document.createElement('strong');
+            strong.textContent = 'Restart Ryokan to apply it.';
+            const parts = [
+                'Restore staged from a backup made ' + String(data.backup_time) + ' (Ryokan ' + String(data.version) + '). '
+                + 'A backup of the current state was saved as ' + String(data.pre_restore_backup) + '. ',
+                strong,
+            ];
+            (data.warnings || []).forEach((w) => {
+                parts.push(document.createElement('br'));
+                parts.push(String(w));
+            });
+            show(parts);
             // Re-render the tab so the staged banner and Cancel appear.
             setTimeout(() => { window.location.href = '/system?tab=backup'; }, 1500);
         } catch (e) {

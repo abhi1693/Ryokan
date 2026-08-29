@@ -53,8 +53,15 @@ pub static BACKUP_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 
 /// Directory under the data dir whose presence means "apply at boot".
 pub const PENDING_DIR_NAME: &str = ".ryokan-restore-pending";
-const BACKUP_WORK_DIR_NAME: &str = ".backup-tmp";
-const RESTORE_WORK_DIR_NAME: &str = ".restore-staging-tmp";
+/// Work dirs under the data dir. Their contents live exactly as long as
+/// one backup / one upload; [`sweep_work_dirs`] clears what a crash
+/// stranded.
+pub const BACKUP_WORK_DIR_NAME: &str = ".backup-tmp";
+pub const RESTORE_WORK_DIR_NAME: &str = ".restore-staging-tmp";
+/// Hard cap on an uploaded archive. Artwork-inclusive backups of a
+/// large library run to a few gigabytes; anything past this is not a
+/// Ryokan backup.
+pub const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 /// Log rows a sanitized backup keeps.
 pub const SANITIZED_LOG_ROWS: i64 = 1000;
 const DB_MAGIC: &[u8] = b"SQLite format 3\0";
@@ -387,12 +394,23 @@ pub async fn create_backup(
     } else {
         0
     };
-    // The vacuumed copy plus the archive, before compression helps.
-    let needed = db_size.saturating_mul(2).saturating_add(artwork_size);
-    if let Some(free) = free_bytes(&paths.data_dir)
-        && free < needed
-    {
-        return Err(BackupError::NoSpace { needed, free });
+    // The work dir briefly holds the snapshot (plus the scrubbed copy
+    // when sanitizing); the archive lands at `out`, which can sit on
+    // another filesystem (a mounted share is the point of a backup
+    // folder). Both get checked, before compression helps.
+    let work_needed = db_size.saturating_mul(if opts.sanitize { 3 } else { 2 });
+    let out_needed = db_size.saturating_add(artwork_size);
+    let out_dir = out
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| paths.data_dir.clone());
+    for (dir, needed) in [(&paths.data_dir, work_needed), (&out_dir, out_needed)] {
+        if let Some(free) = free_bytes(dir)
+            && free < needed
+        {
+            return Err(BackupError::NoSpace { needed, free });
+        }
     }
 
     let work = paths.data_dir.join(BACKUP_WORK_DIR_NAME).join(random_id());
@@ -916,16 +934,26 @@ pub struct RestoreApplied {
     pub previous_db: PathBuf,
     pub key_replaced: bool,
     pub artwork_replaced: bool,
+    /// Steps after the database swap that did not go to plan. The
+    /// restore is applied regardless; these are for the boot log.
+    pub warnings: Vec<String>,
 }
 
 /// Boot-time half of restore. Runs before the pool opens. Validates the
 /// staged directory again (the restart window is when it could have
-/// been tampered with), moves the current database aside as
-/// `<db>.pre-restore-<ts>` (with any `-wal` / `-shm` companions, so a
-/// leftover WAL can never be replayed onto the restored file), and
-/// moves the staged files into place. On any failure the staged
-/// directory is left for inspection and the live database is put back;
-/// the caller boots normally.
+/// been tampered with), then swaps in this order:
+///
+/// 1. the key (highest value, smallest file; nothing else has moved
+///    yet if it fails, so the error is a clean "nothing applied"),
+/// 2. the database, moving the live one aside as
+///    `<db>.pre-restore-<ts>` with any `-wal` / `-shm` companions so a
+///    leftover WAL can never be replayed onto the restored file; a
+///    failure here puts the live database and the key back,
+/// 3. the artwork cache, which can only produce a warning: from here
+///    on the restore is applied and never rolled back.
+///
+/// `Err` therefore always means "nothing changed, the staged directory
+/// is left for inspection".
 pub fn apply_pending_restore(paths: &BackupPaths) -> Result<Option<RestoreApplied>, String> {
     let pending = paths.pending_dir();
     if !pending.is_dir() {
@@ -935,14 +963,57 @@ pub fn apply_pending_restore(paths: &BackupPaths) -> Result<Option<RestoreApplie
     let staged_db = pending.join("ryokan.db");
     check_database_file(&staged_db).map_err(|e| e.to_string())?;
 
-    let ts = now_unix();
-    let previous_db = suffixed(&paths.db_path, &format!(".pre-restore-{ts}"));
+    let suffix = format!(".pre-restore-{}", now_unix());
+
+    // 1. Key.
+    let staged_key = pending.join(".ryokan-key");
+    let key_aside = suffixed(&paths.key_path, &suffix);
+    let key_replaced = if staged_key.is_file() {
+        if paths.key_path.is_file() {
+            fs::rename(&paths.key_path, &key_aside)
+                .map_err(|e| format!("move {} aside: {e}", paths.key_path.display()))?;
+        }
+        if let Some(parent) = paths.key_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Err(e) = move_file(&staged_key, &paths.key_path) {
+            if key_aside.exists() {
+                let _ = fs::rename(&key_aside, &paths.key_path);
+            }
+            return Err(format!("place restored key: {e}"));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&paths.key_path, fs::Permissions::from_mode(0o600));
+        }
+        true
+    } else {
+        false
+    };
+    let undo_key = || {
+        if key_replaced {
+            let _ = fs::rename(&paths.key_path, &staged_key);
+            if key_aside.exists() {
+                let _ = fs::rename(&key_aside, &paths.key_path);
+            }
+        }
+    };
+
+    // 2. Database.
+    let previous_db = suffixed(&paths.db_path, &suffix);
     let mut moved_aside: Vec<(PathBuf, PathBuf)> = Vec::new();
     for companion in ["", "-wal", "-shm"] {
         let live = suffixed(&paths.db_path, companion);
         if live.exists() {
             let aside = suffixed(&previous_db, companion);
-            fs::rename(&live, &aside).map_err(|e| format!("move {} aside: {e}", live.display()))?;
+            if let Err(e) = fs::rename(&live, &aside) {
+                for (live, aside) in moved_aside.iter().rev() {
+                    let _ = fs::rename(aside, live);
+                }
+                undo_key();
+                return Err(format!("move {} aside: {e}", live.display()));
+            }
             moved_aside.push((live, aside));
         }
     }
@@ -953,54 +1024,62 @@ pub fn apply_pending_restore(paths: &BackupPaths) -> Result<Option<RestoreApplie
         for (live, aside) in moved_aside.iter().rev() {
             let _ = fs::rename(aside, live);
         }
+        undo_key();
         return Err(format!("place restored database: {e}"));
     }
 
-    let staged_key = pending.join(".ryokan-key");
-    let key_replaced = if staged_key.is_file() {
-        if paths.key_path.is_file() {
-            let _ = fs::rename(
-                &paths.key_path,
-                suffixed(&paths.key_path, &format!(".pre-restore-{ts}")),
-            );
-        }
-        if let Some(parent) = paths.key_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        move_file(&staged_key, &paths.key_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&paths.key_path, fs::Permissions::from_mode(0o600));
-        }
-        true
-    } else {
-        false
-    };
-
+    // 3. Artwork, and the staging dir itself: warnings only.
+    let mut warnings = Vec::new();
     let staged_art = pending.join("artwork");
-    let artwork_replaced = if staged_art.is_dir() {
-        if paths.artwork_dir.is_dir() {
-            let aside = suffixed(&paths.artwork_dir, &format!(".pre-restore-{ts}"));
-            fs::rename(&paths.artwork_dir, &aside)
-                .map_err(|e| format!("move artwork aside: {e}"))?;
+    let mut artwork_replaced = false;
+    if staged_art.is_dir() {
+        let placed = (|| -> Result<(), String> {
+            if paths.artwork_dir.is_dir() {
+                fs::rename(&paths.artwork_dir, suffixed(&paths.artwork_dir, &suffix))
+                    .map_err(|e| format!("move artwork aside: {e}"))?;
+            }
+            if let Some(parent) = paths.artwork_dir.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            move_tree(&staged_art, &paths.artwork_dir)
+        })();
+        match placed {
+            Ok(()) => artwork_replaced = true,
+            Err(e) => warnings.push(format!(
+                "The artwork cache was not replaced ({e}). Missing artwork is fetched again on demand."
+            )),
         }
-        if let Some(parent) = paths.artwork_dir.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        move_tree(&staged_art, &paths.artwork_dir)?;
-        true
-    } else {
-        false
-    };
-
-    fs::remove_dir_all(&pending).map_err(|e| format!("remove {}: {e}", pending.display()))?;
+    }
+    if let Err(e) = fs::remove_dir_all(&pending) {
+        warnings.push(format!(
+            "The staged directory {} could not be removed ({e}). Remove it by hand; until then every boot reports the restore as missing its database.",
+            pending.display()
+        ));
+    }
     Ok(Some(RestoreApplied {
         manifest,
         previous_db,
         key_replaced,
         artwork_replaced,
+        warnings,
     }))
+}
+
+/// Remove whatever a crash left in the two work dirs. Their contents
+/// are only ever meaningful during one backup or one upload, both of
+/// which are over once the process restarts. Returns the dirs cleared.
+pub fn sweep_work_dirs(paths: &BackupPaths) -> Vec<PathBuf> {
+    let mut cleared = Vec::new();
+    for name in [BACKUP_WORK_DIR_NAME, RESTORE_WORK_DIR_NAME] {
+        let dir = paths.data_dir.join(name);
+        let has_entries = fs::read_dir(&dir)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if has_entries && fs::remove_dir_all(&dir).is_ok() {
+            cleared.push(dir);
+        }
+    }
+    cleared
 }
 
 fn suffixed(path: &Path, suffix: &str) -> PathBuf {

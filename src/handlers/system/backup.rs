@@ -26,14 +26,10 @@ use crate::handlers::responses::htmx_aware_redirect;
 use crate::models::log::LogCategory;
 use crate::models::{config, scheduled_tasks};
 use crate::services::backup::{
-    self, BackupError, BackupKind, BackupOptions, BackupPaths, RestoreError,
+    self, BACKUP_WORK_DIR_NAME, BackupError, BackupKind, BackupOptions, BackupPaths,
+    MAX_UPLOAD_BYTES, RESTORE_WORK_DIR_NAME, RestoreError,
 };
 use crate::services::logger;
-
-/// Hard cap on an uploaded archive. Artwork-inclusive backups of a
-/// large library run to a few gigabytes; anything past this is not a
-/// Ryokan backup.
-const MAX_UPLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 pub struct BackupTabView {
     pub backup_dir: String,
@@ -74,11 +70,13 @@ pub async fn backup_tab_view(state: &AppState) -> BackupTabView {
     let paths = BackupPaths::from_env();
     let dir = paths.backup_dir(&cfg.backup_directory);
     let dir_for_task = dir.clone();
-    let data_dir = paths.data_dir.clone();
+    // Free space is reported for the backup folder, which is what the
+    // page labels it as; the work dir under the data dir is checked at
+    // backup time by `create_backup`.
     let (files, free) = tokio::task::spawn_blocking(move || {
         (
             backup::list_backups(&dir_for_task),
-            backup::free_bytes(&data_dir),
+            backup::free_bytes(&dir_for_task),
         )
     })
     .await
@@ -109,6 +107,18 @@ pub async fn backup_tab_view(state: &AppState) -> BackupTabView {
         },
         retention: cfg.backup_retention_count,
         free_space: free.map(backup::human_bytes),
+    }
+}
+
+/// Name for a downloaded archive. A sanitized support share gets a
+/// `-sanitized` marker so it can't be mistaken for the key-bearing kind
+/// sitting next to it in a Downloads folder. Downloads never go
+/// through `parse_backup_name`, so the marker costs nothing.
+fn download_file_name(sanitize: bool, timestamp: i64) -> String {
+    if sanitize {
+        format!("ryokan-backup-{timestamp}-sanitized.tar.gz")
+    } else {
+        backup::backup_file_name(BackupKind::Scheduled, timestamp)
     }
 }
 
@@ -211,12 +221,12 @@ pub async fn api_backup_download(
         sanitize: flag(&q.sanitize),
     };
     let paths = BackupPaths::from_env();
-    let work = paths.data_dir.join(".backup-tmp").join(format!(
+    let work = paths.data_dir.join(BACKUP_WORK_DIR_NAME).join(format!(
         "download-{}",
         hex::encode(rand::random::<[u8; 8]>())
     ));
     let guard = TempDirGuard(Some(work.clone()));
-    let name = backup::backup_file_name(BackupKind::Scheduled, chrono::Utc::now().timestamp());
+    let name = download_file_name(opts.sanitize, chrono::Utc::now().timestamp());
     let out = work.join(&name);
     let manifest = match backup::create_backup(&state.db, &paths, opts, &out).await {
         Ok(m) => m,
@@ -397,7 +407,7 @@ pub async fn api_restore_upload(State(state): State<AppState>, body: Body) -> Re
     if paths.pending_dir().exists() {
         return json_error(StatusCode::CONFLICT, RestoreError::Pending.to_string());
     }
-    let work = paths.data_dir.join(".restore-staging-tmp");
+    let work = paths.data_dir.join(RESTORE_WORK_DIR_NAME);
     if let Err(e) = tokio::fs::create_dir_all(&work).await {
         return json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -511,6 +521,16 @@ pub async fn restore_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitized_downloads_carry_a_marker_in_the_name() {
+        assert_eq!(download_file_name(false, 5), "ryokan-backup-5.tar.gz");
+        assert_eq!(
+            download_file_name(true, 5),
+            "ryokan-backup-5-sanitized.tar.gz"
+        );
+        assert!(backup::parse_backup_name(&download_file_name(true, 5)).is_none());
+    }
 
     #[test]
     fn query_flags_read_checkbox_and_boolean_shapes() {

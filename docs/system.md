@@ -53,6 +53,8 @@ A backup is a `.tar.gz` holding a consistent snapshot of the database (`ryokan.d
 
 **Restore** is two steps. Upload a backup: Ryokan checks that it is a Ryokan archive from this or an older version, saves a backup of the current state to the folder first (`auto-pre-restore-<time>.tar.gz`, never pruned), and stages the files. Then restart Ryokan. The staged files are swapped in before the database opens, the previous database stays next to the restored one as `ryokan.db.pre-restore-<time>` for a manual rollback, and everyone is signed out. Until the restart, the tab shows the staged backup with a **Cancel restore** button. A backup made by a newer Ryokan is refused. A sanitized backup restores but needs passwords and account links entered again.
 
+The `ryokan.db.pre-restore-<time>` file (and `.ryokan-key.pre-restore-<time>` / `artwork.pre-restore-<time>` when those were replaced) is never cleaned up automatically. Delete it yourself once you are sure the restore is what you wanted. A sanitized download is named `ryokan-backup-<time>-sanitized.tar.gz` so it cannot be mistaken for the key-bearing kind.
+
 Ryokan does not restart itself. In Docker, `docker compose restart ryokan`. Backups land under `/data/backups` by default there, on the same volume as the database, so point the folder at another disk or a mounted share if the goal is surviving that volume.
 
 ## Needs Review

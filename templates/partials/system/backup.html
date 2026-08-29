@@ -31,7 +31,9 @@
             </label>
         </div>
         <div class="backup-actions">
-            <a class="btn btn-primary" id="backup-download" href="/api/backup/download">Download backup</a>
+            {# hx-boost="false": a boosted anchor would AJAX the archive and swap
+               its bytes into the page. htmx 2 has no download-attribute exemption. #}
+            <a class="btn btn-primary" id="backup-download" href="/api/backup/download" hx-boost="false">Download backup</a>
             <form method="post" action="/system/backup/run" class="inline-form">
                 <button type="submit" class="btn btn-secondary">Save to backup folder</button>
             </form>
@@ -60,7 +62,7 @@
                         <td><span class="task-time">{{ f.when }}</span></td>
                         <td>{{ f.size }}</td>
                         <td class="backup-row-actions">
-                            <a class="btn btn-secondary btn-sm" href="/api/backup/files/{{ f.name }}">Download</a>
+                            <a class="btn btn-secondary btn-sm" href="/api/backup/files/{{ f.name }}" hx-boost="false">Download</a>
                             <form method="post" action="/api/backup/files/{{ f.name }}/delete" class="inline-form"
                                   data-ryokan-confirm-title="Delete this backup?"
                                   data-ryokan-confirm-body="{{ f.name }} is removed from the backup folder. This cannot be undone."

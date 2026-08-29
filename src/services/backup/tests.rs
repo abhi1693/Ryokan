@@ -418,6 +418,22 @@ fn apply_pending_restore_swaps_files_and_keeps_the_previous_database() {
     assert_eq!(applied.manifest, manifest);
     assert!(applied.key_replaced);
     assert!(applied.artwork_replaced);
+    assert!(applied.warnings.is_empty(), "{:?}", applied.warnings);
+    let kept_keys: Vec<_> = fs::read_dir(&paths.data_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(".ryokan-key.pre-restore-"))
+        .collect();
+    assert_eq!(
+        kept_keys.len(),
+        1,
+        "the previous key is kept aside: {kept_keys:?}"
+    );
+    assert_eq!(
+        fs::read(paths.data_dir.join(&kept_keys[0])).unwrap(),
+        vec![7u8; 32]
+    );
     assert_eq!(fs::read(&paths.db_path).unwrap(), staged_db);
     assert_eq!(fs::read(&applied.previous_db).unwrap(), b"OLD DATABASE");
     assert_eq!(
@@ -461,4 +477,25 @@ fn version_tuples_compare_numerically() {
     assert!(version_tuple("1.10.0") > version_tuple("1.9.0"));
     assert!(version_tuple("v2.0.0-rc1") > version_tuple("1.99.99"));
     assert_eq!(version_tuple("garbage"), (0, 0, 0));
+}
+
+#[test]
+fn sweep_work_dirs_clears_stranded_temp_files_only() {
+    let paths = temp_paths("sweep");
+    let work = paths.data_dir.join(BACKUP_WORK_DIR_NAME).join("abc");
+    fs::create_dir_all(&work).unwrap();
+    fs::write(work.join("ryokan.db"), b"half written").unwrap();
+    fs::create_dir_all(paths.data_dir.join(RESTORE_WORK_DIR_NAME)).unwrap();
+    let cleared = sweep_work_dirs(&paths);
+    assert_eq!(cleared, vec![paths.data_dir.join(BACKUP_WORK_DIR_NAME)]);
+    assert!(!paths.data_dir.join(BACKUP_WORK_DIR_NAME).exists());
+    assert!(
+        paths.data_dir.join(RESTORE_WORK_DIR_NAME).exists(),
+        "an empty work dir is left alone"
+    );
+    assert!(
+        paths.key_path.is_file(),
+        "nothing outside the work dirs is touched"
+    );
+    cleanup(&paths);
 }
