@@ -50,6 +50,40 @@
             </div>
         </fieldset>
 
+        <fieldset id="naming-settings">
+            <legend>File naming</legend>
+            {% for f in naming.fields %}
+            <div class="form-group naming-field">
+                <label for="{{ f.input_name }}">{{ f.label }}</label>
+                <div class="naming-input-row">
+                    <input type="text" name="{{ f.input_name }}" id="{{ f.input_name }}" value="{{ f.value }}" data-naming-default="{{ f.default }}" spellcheck="false" autocomplete="off">
+                    <button type="button" class="btn btn-secondary naming-reset" data-naming-reset="{{ f.input_name }}">Reset</button>
+                </div>
+                <div class="naming-preview{% if f.error.is_some() %} naming-preview-error{% endif %}" data-naming-preview="{{ f.input_name }}">{% if let Some(e) = f.error %}{{ e }}{% else %}{{ f.preview }}{% endif %}</div>
+                <span class="form-hint">{{ f.hint }}</span>
+            </div>
+            {% endfor %}
+            <div class="form-group">
+                <label>Sample</label>
+                <div class="naming-path" data-naming-path>{{ naming.path_preview }}</div>
+                {% if let Some(w) = naming.path_warning %}
+                <span class="form-hint naming-warning" data-naming-warning>{{ w }}</span>
+                {% else %}
+                <span class="form-hint naming-warning" data-naming-warning hidden></span>
+                {% endif %}
+            </div>
+            <details class="naming-tokens">
+                <summary>Tokens</summary>
+                <table class="naming-token-table">
+                    <tbody>
+                    {% for t in naming.tokens %}
+                        <tr><td><code>{{ t.token }}</code></td><td>{{ t.what }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        </fieldset>
+
         <fieldset>
             <legend>Recycle Bin</legend>
             <div class="form-group">

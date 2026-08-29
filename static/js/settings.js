@@ -1093,6 +1093,80 @@ if (typeof window.ryokanRegisterPageInit === 'function') {
     bindSettingsDirtyGuard();
 }
 
+// ── File naming live preview (issue #124) ────────────────────────
+//
+// Every keystroke in one of the three template inputs (debounced)
+// posts all three to /api/settings/naming-preview and paints the
+// server's verdict under each field plus the combined sample path.
+// The server renders the same way it will at import time, so there
+// is no JS resolver to drift. Reset puts the default template back
+// and fires `input` so the dirty guard and the preview both notice.
+var bindNamingPreview = function () {
+    const box = document.getElementById('naming-settings');
+    if (!box || box.dataset.ryokanNamingBound === '1') return;
+    box.dataset.ryokanNamingBound = '1';
+    const inputs = Array.from(box.querySelectorAll('input[data-naming-default]'));
+    let timer = null;
+    const payload = () => {
+        const p = {};
+        inputs.forEach((i) => { p[i.name] = i.value; });
+        return p;
+    };
+    const paint = (data) => {
+        inputs.forEach((input) => {
+            const out = box.querySelector('[data-naming-preview="' + input.name + '"]');
+            const f = data.fields && data.fields[input.name];
+            if (!out || !f) return;
+            out.textContent = f.ok ? f.preview : (f.error || '');
+            out.classList.toggle('naming-preview-error', !f.ok);
+        });
+        const path = box.querySelector('[data-naming-path]');
+        if (path) path.textContent = data.path || '';
+        const warn = box.querySelector('[data-naming-warning]');
+        if (warn) {
+            warn.textContent = data.warning || '';
+            warn.hidden = !data.warning;
+        }
+    };
+    const refresh = async () => {
+        try {
+            const r = await fetch('/api/settings/naming-preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'same-origin',
+                body: JSON.stringify(payload()),
+            });
+            if (!r.ok) return;
+            paint(await r.json());
+        } catch (e) {
+            // Leave the last server-rendered preview in place.
+        }
+    };
+    const schedule = () => {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 250);
+    };
+    inputs.forEach((i) => i.addEventListener('input', schedule));
+    box.querySelectorAll('[data-naming-reset]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const input = box.querySelector('input[name="' + btn.getAttribute('data-naming-reset') + '"]');
+            if (!input) return;
+            input.value = input.dataset.namingDefault || '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-naming-preview', {
+        check: function () { return !!document.getElementById('naming-settings'); },
+        mount: bindNamingPreview,
+        unmount: function () {},
+    });
+} else {
+    bindNamingPreview();
+}
+
 // ── External Accounts (AL / MAL, issue #62) ──────────────────────
 //
 // Three interactions on the Settings → Integrations → External

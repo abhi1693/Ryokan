@@ -12,6 +12,7 @@ use std::sync::LazyLock;
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, custom_formats as cf_model, group_source_map};
+use crate::services::naming::{self as naming_service, TemplateKind};
 use crate::services::{
     custom_formats as cf_service, jellyfin::JellyfinClient, logger, source::Source,
 };
@@ -21,6 +22,7 @@ pub mod custom_formats;
 pub mod direct_rss_feeds;
 pub mod download_clients;
 pub mod indexers;
+pub mod naming;
 use custom_formats::ImportReviewView;
 
 /// Process-wide serializer for `config` row read-modify-write across
@@ -135,6 +137,8 @@ struct SettingsTemplate {
     page: String,
     tab: String,
     config: config::Config,
+    /// Settings → General → File naming (#124).
+    naming: NamingPanel,
     groups: Vec<group_source_map::GroupSourceEntry>,
     suggestions: Vec<group_source_map::GroupSuggestion>,
     custom_formats: Vec<CustomFormatView>,
@@ -604,6 +608,24 @@ pub struct GeneralForm {
     /// Purge horizon in days; 0 = never auto-purge.
     #[serde(default = "default_recycle_bin_age_days")]
     recycle_bin_age_days: i64,
+    /// Naming templates (#124). Empty falls back to the default so a
+    /// form that omits them (or a cleared field) never stores a blank.
+    #[serde(default)]
+    series_folder_format: String,
+    #[serde(default)]
+    season_folder_format: String,
+    #[serde(default)]
+    episode_file_format: String,
+}
+
+/// Empty or whitespace → the kind's default template; otherwise trimmed.
+fn naming_or_default(raw: &str, kind: TemplateKind) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        kind.default_template().to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn default_recycle_bin_age_days() -> i64 {
@@ -614,6 +636,8 @@ fn default_recycle_bin_age_days() -> i64 {
 #[template(path = "partials/settings/general_form.html")]
 pub struct GeneralFormPartial {
     pub config: config::Config,
+    /// Settings → General → File naming (#124).
+    pub naming: NamingPanel,
     pub message: Option<String>,
     pub error: Option<String>,
     pub version: &'static str,
@@ -932,6 +956,7 @@ async fn build_settings_template(
     SettingsTemplate {
         page: "settings".to_string(),
         tab: normalize_settings_tab(tab),
+        naming: naming_panel(&cfg),
         config: cfg,
         groups,
         suggestions,
@@ -1366,6 +1391,20 @@ pub async fn settings_submit(
                 .map(|c| c.manual_search_auto_add)
                 .unwrap_or(true)
         },
+        // Naming templates (#124) are owned by the General subform;
+        // the legacy bulk POST preserves whatever is stored.
+        series_folder_format: existing_cfg
+            .as_ref()
+            .map(|c| c.series_folder_format.clone())
+            .unwrap_or_else(|| config::Config::default().series_folder_format),
+        season_folder_format: existing_cfg
+            .as_ref()
+            .map(|c| c.season_folder_format.clone())
+            .unwrap_or_else(|| config::Config::default().season_folder_format),
+        episode_file_format: existing_cfg
+            .as_ref()
+            .map(|c| c.episode_file_format.clone())
+            .unwrap_or_else(|| config::Config::default().episode_file_format),
         recycle_bin_path: if form.tab.as_deref() == Some("general") {
             form.recycle_bin_path
                 .trim()
@@ -1430,6 +1469,7 @@ pub async fn settings_submit(
         let template = SettingsTemplate {
             page: "settings".to_string(),
             tab: active_tab,
+            naming: naming_panel(&cfg),
             config: cfg,
             groups,
             suggestions,
@@ -1554,6 +1594,7 @@ pub async fn settings_submit(
     let template = SettingsTemplate {
         page: "settings".to_string(),
         tab: active_tab,
+        naming: naming_panel(&cfg),
         config: cfg,
         groups,
         suggestions,
@@ -1638,9 +1679,43 @@ pub async fn settings_general_submit(
             .trim_end_matches('/')
             .to_string(),
         recycle_bin_age_days: form.recycle_bin_age_days.clamp(0, 3650),
+        series_folder_format: naming_or_default(
+            &form.series_folder_format,
+            TemplateKind::SeriesFolder,
+        ),
+        season_folder_format: naming_or_default(
+            &form.season_folder_format,
+            TemplateKind::SeasonFolder,
+        ),
+        episode_file_format: naming_or_default(
+            &form.episode_file_format,
+            TemplateKind::EpisodeFile,
+        ),
         // Everything else: preserved verbatim.
         ..existing_cfg
     };
+
+    // Naming templates (#124): the server-side check is the load-bearing
+    // half; the page's live preview calls the same function. A rejected
+    // template re-renders the form with the user's input and saves
+    // nothing.
+    let naming_error = [
+        (
+            TemplateKind::SeriesFolder,
+            cfg.series_folder_format.as_str(),
+        ),
+        (
+            TemplateKind::SeasonFolder,
+            cfg.season_folder_format.as_str(),
+        ),
+        (TemplateKind::EpisodeFile, cfg.episode_file_format.as_str()),
+    ]
+    .into_iter()
+    .find_map(|(kind, template)| naming_service::validate(kind, template).err());
+    if let Some(e) = naming_error {
+        drop(_guard);
+        return general_response(&state, Some(cfg), None, Some(e), is_htmx).await;
+    }
 
     if let Err(e) = config::save_config(&state.db, &cfg).await {
         logger::error(
@@ -1716,6 +1791,116 @@ pub async fn settings_general_submit(
     general_response(&state, Some(cfg), Some(notices.join(" ")), None, is_htmx).await
 }
 
+/// Settings → General → File naming (#124): the three template fields
+/// with their server-rendered sample previews, the combined sample
+/// path, and the token reference.
+pub struct NamingPanel {
+    pub fields: Vec<NamingField>,
+    pub tokens: Vec<NamingToken>,
+    /// `<series folder>/<season folder>/<file>` for the sample; empty
+    /// while any of the three templates is invalid.
+    pub path_preview: String,
+    pub path_warning: Option<String>,
+}
+
+pub struct NamingField {
+    pub input_name: &'static str,
+    pub label: &'static str,
+    pub value: String,
+    pub default: &'static str,
+    pub preview: String,
+    pub error: Option<String>,
+    pub hint: &'static str,
+}
+
+pub struct NamingToken {
+    pub token: &'static str,
+    pub what: &'static str,
+}
+
+/// Field metadata shared by the page render and the live-preview
+/// endpoint: (kind, input name, label, hint).
+pub(crate) const NAMING_FIELDS: [(TemplateKind, &str, &str, &str); 3] = [
+    (
+        TemplateKind::SeriesFolder,
+        "series_folder_format",
+        "Series folder",
+        "Applies when a series is added. Series already in the library keep their folder name.",
+    ),
+    (
+        TemplateKind::SeasonFolder,
+        "season_folder_format",
+        "Season folder",
+        "Applies to every import. Changing it sends new episodes of existing series into a new season folder.",
+    ),
+    (
+        TemplateKind::EpisodeFile,
+        "episode_file_format",
+        "Episode file",
+        "Applies to every import. Files already in the library keep their names. Must end with {ext} and include {episode.number}.",
+    ),
+];
+
+pub fn naming_panel(cfg: &config::Config) -> NamingPanel {
+    let stored = [
+        cfg.series_folder_format.as_str(),
+        cfg.season_folder_format.as_str(),
+        cfg.episode_file_format.as_str(),
+    ];
+    let mut fields = Vec::with_capacity(3);
+    let mut parts = Vec::with_capacity(3);
+    for ((kind, input_name, label, hint), raw) in NAMING_FIELDS.into_iter().zip(stored) {
+        let value = naming_or_default(raw, kind);
+        let (preview, error) = match naming_service::preview(kind, &value) {
+            Ok(r) => (r.name, None),
+            Err(e) => (String::new(), Some(e)),
+        };
+        parts.push(preview.clone());
+        fields.push(NamingField {
+            input_name,
+            label,
+            value,
+            default: kind.default_template(),
+            preview,
+            error,
+            hint,
+        });
+    }
+    let (path_preview, path_warning) = naming_path_preview(&cfg.media_root, &parts);
+    NamingPanel {
+        fields,
+        tokens: naming_service::TOKEN_REFERENCE
+            .iter()
+            .map(|(token, what)| NamingToken { token, what })
+            .collect(),
+        path_preview,
+        path_warning,
+    }
+}
+
+/// The sample's full relative path plus the Windows 260-character
+/// warning when the media root and the three components exceed it.
+/// Linux paths run to 4096, so this is advice, not a rejection.
+pub(crate) fn naming_path_preview(media_root: &str, parts: &[String]) -> (String, Option<String>) {
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
+        return (String::new(), None);
+    }
+    let rel = parts.join("/");
+    let root = media_root.trim().trim_end_matches('/');
+    let full_len = if root.is_empty() {
+        rel.len()
+    } else {
+        root.len() + 1 + rel.len()
+    };
+    let warning = (full_len > naming_service::WINDOWS_MAX_PATH).then(|| {
+        format!(
+            "This sample path is {full_len} characters. Windows limits paths to {} characters unless long paths are enabled. Linux is not affected.",
+            naming_service::WINDOWS_MAX_PATH
+        )
+    });
+    (rel, warning)
+}
+
 /// Render the General response in either HTMX (subform partial) or
 /// non-HTMX (full SettingsTemplate) shape. Factored out so the
 /// success + DB-error paths in `settings_general_submit` share the
@@ -1739,6 +1924,7 @@ async fn general_response(
     if is_htmx {
         return Html(
             GeneralFormPartial {
+                naming: naming_panel(&cfg),
                 config: cfg,
                 message,
                 error,

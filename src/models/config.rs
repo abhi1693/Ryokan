@@ -183,6 +183,13 @@ pub struct Config {
     /// purges its date bucket. `0` disables auto-purge (forever-recycle,
     /// manual "Empty recycle bin" only). Default 14.
     pub recycle_bin_age_days: i64,
+    /// Naming templates (#124). See `services::naming` for the token
+    /// language. The series-folder template applies once, at add time
+    /// (`series::upsert`); the other two on every import. Empty is
+    /// treated as the default at every read site.
+    pub series_folder_format: String,
+    pub season_folder_format: String,
+    pub episode_file_format: String,
 }
 
 impl Default for Config {
@@ -249,6 +256,9 @@ impl Default for Config {
             manual_search_auto_add: true,
             recycle_bin_path: String::new(),
             recycle_bin_age_days: 14,
+            series_folder_format: crate::services::naming::DEFAULT_SERIES_FOLDER_FORMAT.to_string(),
+            season_folder_format: crate::services::naming::DEFAULT_SEASON_FOLDER_FORMAT.to_string(),
+            episode_file_format: crate::services::naming::DEFAULT_EPISODE_FILE_FORMAT.to_string(),
         }
     }
 }
@@ -316,6 +326,9 @@ struct ConfigRow {
     manual_search_auto_add: i64,
     recycle_bin_path: String,
     recycle_bin_age_days: i64,
+    series_folder_format: String,
+    season_folder_format: String,
+    episode_file_format: String,
 }
 
 /// Cheap title-language lookup with a safe default. Used by every page
@@ -335,9 +348,47 @@ pub async fn get_title_language(db: &SqlitePool) -> String {
 }
 
 /// Get the singleton config row.
+/// The two config values the series-folder template needs at add time.
+/// `series::upsert` reads this itself so its fifteen call sites don't
+/// have to thread a `Config` through. Defaults on any error (no row yet
+/// during first-run, transient failure) so an add never fails on naming.
+#[derive(Clone, Debug)]
+pub struct NamingPrefs {
+    pub title_language: String,
+    pub series_folder_format: String,
+}
+
+pub async fn get_naming_prefs(db: &SqlitePool) -> NamingPrefs {
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT title_language, series_folder_format FROM config WHERE id = 1")
+            .fetch_optional(db)
+            .await
+            .ok()
+            .flatten();
+    let defaults = Config::default();
+    match row {
+        Some((lang, fmt)) => NamingPrefs {
+            title_language: if lang.is_empty() {
+                defaults.title_language
+            } else {
+                lang
+            },
+            series_folder_format: if fmt.trim().is_empty() {
+                defaults.series_folder_format
+            } else {
+                fmt
+            },
+        },
+        None => NamingPrefs {
+            title_language: defaults.title_language,
+            series_folder_format: defaults.series_folder_format,
+        },
+    }
+}
+
 pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> {
     let row: Option<ConfigRow> = sqlx::query_as(
-        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days FROM config WHERE id = 1",
+        "SELECT active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, nyaa_download_client_id, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format FROM config WHERE id = 1",
     )
     .fetch_optional(db)
     .await?;
@@ -404,6 +455,9 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
         manual_search_auto_add: r.manual_search_auto_add != 0,
         recycle_bin_path: r.recycle_bin_path,
         recycle_bin_age_days: r.recycle_bin_age_days,
+        series_folder_format: r.series_folder_format,
+        season_folder_format: r.season_folder_format,
+        episode_file_format: r.episode_file_format,
     }))
 }
 
@@ -411,8 +465,8 @@ pub async fn get_config(db: &SqlitePool) -> Result<Option<Config>, sqlx::Error> 
 pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days)
-        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO config (id, active_client, qbit_url, qbit_user, qbit_pass, qbit_category, qbit_download_path, deluge_url, deluge_password, deluge_label, deluge_download_path, transmission_url, transmission_user, transmission_password, transmission_label, transmission_download_path, rtorrent_url, rtorrent_user, rtorrent_password, rtorrent_label, rtorrent_download_path, jellyfin_url, jellyfin_api_key, preferred_groups, blocked_groups, preferred_resolution, preferred_source, cutoff_source, cutoff_resolution, quality_profile, quality_cutoff, finished_series_quality, media_root, title_language, force_mal_fallback, rss_enabled, rss_interval_minutes, rss_master_enabled, disable_nyaa_rss, force_kitsu_fallback, post_processing_enabled, post_processing_mode, auto_grab_on_add, search_on_monitoring_change, prefer_subs, allow_non_english, sonarr_enabled, sonarr_api_key, radarr_enabled, radarr_api_key, autobrr_api_key, upgrade_search_enabled, custom_format_minimum_score, seadex_enabled, default_custom_query_tokens, default_restrict_to_uploader, grab_preview_mode, external_sync_interval_minutes, manual_search_auto_add, recycle_bin_path, recycle_bin_age_days, series_folder_format, season_folder_format, episode_file_format)
+        VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             active_client = excluded.active_client,
             qbit_url = excluded.qbit_url,
@@ -473,7 +527,10 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
             external_sync_interval_minutes = excluded.external_sync_interval_minutes,
             manual_search_auto_add = excluded.manual_search_auto_add,
             recycle_bin_path = excluded.recycle_bin_path,
-            recycle_bin_age_days = excluded.recycle_bin_age_days
+            recycle_bin_age_days = excluded.recycle_bin_age_days,
+            series_folder_format = excluded.series_folder_format,
+            season_folder_format = excluded.season_folder_format,
+            episode_file_format = excluded.episode_file_format
         "#,
     )
     .bind(&config.active_client)
@@ -544,6 +601,9 @@ pub async fn save_config(db: &SqlitePool, config: &Config) -> Result<(), sqlx::E
     })
     .bind(&config.recycle_bin_path)
     .bind(config.recycle_bin_age_days)
+    .bind(&config.series_folder_format)
+    .bind(&config.season_folder_format)
+    .bind(&config.episode_file_format)
     .execute(db)
     .await?;
 

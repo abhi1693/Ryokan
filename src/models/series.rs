@@ -335,16 +335,23 @@ pub async fn upsert(db: &SqlitePool, core: SeriesCore<'_>) -> Result<(i64, bool)
         return Ok((existing.id, false));
     }
 
-    // Auto-generate a folder name from the best available title.
+    // Folder name from the series-folder template (#124), rendered in
+    // the preferred title language. Applied once here and persisted;
+    // later template or language changes never rename existing folders.
     let folder = {
-        let raw = if !core.title_english.is_empty() {
-            core.title_english
-        } else if !core.title_romaji.is_empty() {
-            core.title_romaji
-        } else {
-            core.title
+        let prefs = crate::models::config::get_naming_prefs(db).await;
+        let names = crate::services::naming::SeriesNames {
+            title: core.title,
+            romaji: core.title_romaji,
+            english: core.title_english,
+            native: core.title_native,
+            year: core.season_year,
         };
-        crate::services::media::sanitize_folder_name(raw)
+        crate::services::naming::series_folder(
+            &prefs.series_folder_format,
+            &prefs.title_language,
+            &names,
+        )
     };
 
     let result = sqlx::query(

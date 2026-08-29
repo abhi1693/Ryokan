@@ -828,6 +828,12 @@ async fn main() {
             "/settings/general",
             post(handlers::settings::settings_general_submit),
         )
+        // Issue #124: live preview for the naming templates on the
+        // General tab. JSON in, JSON out, saves nothing.
+        .route(
+            "/api/settings/naming-preview",
+            post(handlers::settings::naming::naming_preview),
+        )
         .route(
             "/settings/quality",
             post(handlers::settings::settings_quality_submit),

@@ -2748,6 +2748,31 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Naming templates (#124). Defaults are the pre-#124 hardcoded
+    // layout, so existing installs see no change. Built with format!
+    // so the column default can never drift from the constant.
+    for (column, default) in [
+        (
+            "series_folder_format",
+            crate::services::naming::DEFAULT_SERIES_FOLDER_FORMAT,
+        ),
+        (
+            "season_folder_format",
+            crate::services::naming::DEFAULT_SEASON_FOLDER_FORMAT,
+        ),
+        (
+            "episode_file_format",
+            crate::services::naming::DEFAULT_EPISODE_FILE_FORMAT,
+        ),
+    ] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE config ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'"
+        )))
+        .execute(db)
+        .await
+        .ok();
+    }
+
     Ok(())
 }
 

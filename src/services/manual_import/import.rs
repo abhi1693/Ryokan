@@ -30,6 +30,7 @@ use crate::models::{
     config, episode_tags, local_metadata, log::LogCategory, metadata_cache, series,
 };
 use crate::services::monitoring as monitoring_service;
+use crate::services::naming;
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::{library_link, logger, media, metadata_sync, nfo, post_processing, progress};
 
@@ -286,6 +287,8 @@ pub async fn run_import(
             owned_folders: &owned_folders,
             disk_folders: &disk,
             title_pref: &cfg.title_language,
+            series_folder_format: &cfg.series_folder_format,
+            season_folder_format: &cfg.season_folder_format,
         };
         sess.groups
             .iter()
@@ -320,6 +323,8 @@ pub async fn run_import(
             owned_folders: &owned_folders,
             disk_folders: &disk,
             title_pref: &cfg.title_language,
+            series_folder_format: &cfg.series_folder_format,
+            season_folder_format: &cfg.season_folder_format,
         };
         let view = preview::project_group(group, &ctx);
         let mut gr = GroupReport {
@@ -372,7 +377,11 @@ pub async fn run_import(
         // folder yet gets one the same way.
         if created || row.folder_name.is_empty() {
             let base = if row.folder_name.is_empty() {
-                media::sanitize_folder_name(&nfo::best_title(&row))
+                naming::series_folder(
+                    &cfg.series_folder_format,
+                    &cfg.title_language,
+                    &naming::SeriesNames::from_series(&row),
+                )
             } else {
                 row.folder_name.clone()
             };
@@ -400,7 +409,12 @@ pub async fn run_import(
 
         let season_dir = Path::new(&media_root)
             .join(&row.folder_name)
-            .join("Season 01");
+            .join(naming::season_folder(
+                &cfg.season_folder_format,
+                &cfg.title_language,
+                &naming::SeriesNames::from_series(&row),
+                1,
+            ));
         let mut landed: Vec<(i32, PathBuf)> = Vec::new();
 
         for (file, fv) in group.files.iter().zip(view.files.iter()) {
@@ -901,6 +915,8 @@ mod tests {
             owned_folders: &owned,
             disk_folders: &disk,
             title_pref: "english",
+            series_folder_format: naming::DEFAULT_SERIES_FOLDER_FORMAT,
+            season_folder_format: naming::DEFAULT_SEASON_FOLDER_FORMAT,
         };
         let view = preview::project_group(&g, &ctx);
         assert_eq!(view.kind, GroupKind::Merge);

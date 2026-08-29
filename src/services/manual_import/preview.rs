@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use super::{ImportSession, SeriesGroup};
 use crate::services::library_link::pick_title;
 use crate::services::recycle::human_bytes;
-use crate::services::{media, post_processing, source};
+use crate::services::{naming, post_processing, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupKind {
@@ -184,20 +184,37 @@ pub struct ProjectionContext<'a> {
     pub disk_folders: &'a HashSet<String>,
     /// `config.title_language`.
     pub title_pref: &'a str,
+    /// Naming templates (#124): the folder a new series gets and the
+    /// season folder every file lands in.
+    pub series_folder_format: &'a str,
+    pub season_folder_format: &'a str,
 }
 
-/// The folder name `series::upsert` would generate for an AL entry.
-/// Same english → romaji → native preference the insert path uses, so
-/// the preview shows the folder the import actually creates.
-pub fn default_folder_name(entry: &crate::services::anilist::AnimeEntry) -> String {
-    let raw = if !entry.title_english.is_empty() {
-        &entry.title_english
-    } else if !entry.title_romaji.is_empty() {
-        &entry.title_romaji
-    } else {
-        &entry.title_native
+/// The folder name `series::upsert` would generate for an AL entry:
+/// the series-folder template in the preferred title language, so the
+/// preview shows the folder the import actually creates.
+pub fn default_folder_name(
+    entry: &crate::services::anilist::AnimeEntry,
+    ctx: &ProjectionContext<'_>,
+) -> String {
+    naming::series_folder(
+        ctx.series_folder_format,
+        ctx.title_pref,
+        &naming::SeriesNames::from_entry(entry),
+    )
+}
+
+/// The season folder a group's files land in (#124).
+pub fn season_folder_name(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> String {
+    let names = match (&group.existing, group.picked()) {
+        (Some(existing), _) => naming::SeriesNames {
+            title: &existing.title,
+            ..Default::default()
+        },
+        (None, Some(entry)) => naming::SeriesNames::from_entry(entry),
+        (None, None) => naming::SeriesNames::default(),
     };
-    media::sanitize_folder_name(raw)
+    naming::season_folder(ctx.season_folder_format, ctx.title_pref, &names, 1)
 }
 
 /// A folder name that collides with nothing: the plain name when it is
@@ -230,11 +247,11 @@ pub fn episode_label(episode: Option<i32>) -> String {
 /// Destination for the preview, relative to the media root: every
 /// file lands under it, so repeating the root on every row is noise.
 /// The import job builds the absolute path itself.
-fn dest_for(media_root: &str, folder: &str, file_name: &str) -> String {
+fn dest_for(media_root: &str, folder: &str, season_folder: &str, file_name: &str) -> String {
     if media_root.is_empty() || folder.is_empty() {
         return String::new();
     }
-    format!("{folder}/Season 01/{file_name}")
+    format!("{folder}/{season_folder}/{file_name}")
 }
 
 pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupView {
@@ -251,9 +268,10 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
 
     let (folder_name, folder_collision) = match (&group.existing, picked) {
         (Some(existing), _) => (existing.folder_name.clone(), false),
-        (None, Some(entry)) => unique_folder_name(&default_folder_name(entry), ctx),
+        (None, Some(entry)) => unique_folder_name(&default_folder_name(entry, ctx), ctx),
         (None, None) => (String::new(), false),
     };
+    let season_folder = season_folder_name(group, ctx);
 
     // Only a folder that exists can hold a stranger at a destination
     // path; a new series' folder doesn't, so no stat calls for those.
@@ -308,7 +326,7 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
             if status == FileStatus::Import && folder_on_disk {
                 let dest = std::path::Path::new(ctx.media_root)
                     .join(&folder_name)
-                    .join("Season 01")
+                    .join(&season_folder)
                     .join(&f.file_name);
                 if dest.exists() && !post_processing::files_share_inode(&f.path, &dest) {
                     status = FileStatus::AlreadyOnDisk;
@@ -333,7 +351,7 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
                 counts.write_bytes += f.size_bytes;
             }
             let dest = if status.writes() {
-                dest_for(ctx.media_root, &folder_name, &f.file_name)
+                dest_for(ctx.media_root, &folder_name, &season_folder, &f.file_name)
             } else {
                 String::new()
             };
@@ -517,6 +535,8 @@ mod tests {
             owned_folders: owned,
             disk_folders: disk,
             title_pref: "english",
+            series_folder_format: naming::DEFAULT_SERIES_FOLDER_FORMAT,
+            season_folder_format: naming::DEFAULT_SEASON_FOLDER_FORMAT,
         }
     }
 
@@ -681,6 +701,8 @@ mod tests {
             owned_folders: &owned,
             disk_folders: &disk,
             title_pref: "english",
+            series_folder_format: naming::DEFAULT_SERIES_FOLDER_FORMAT,
+            season_folder_format: naming::DEFAULT_SEASON_FOLDER_FORMAT,
         };
         let v = project_group(&g, &ctx);
         let statuses: Vec<FileStatus> = v.files.iter().map(|f| f.status).collect();
