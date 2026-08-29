@@ -633,6 +633,10 @@
     color: var(--text-bright);
 }
 
+.import-confirm-error {
+    font-size: 13px;
+}
+
 .import-confirm-actions {
     display: flex;
     gap: 8px;

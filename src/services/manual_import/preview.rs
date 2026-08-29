@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use super::{ImportSession, SeriesGroup};
 use crate::services::library_link::pick_title;
 use crate::services::recycle::human_bytes;
-use crate::services::{media, source};
+use crate::services::{media, post_processing, source};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GroupKind {
@@ -66,6 +66,12 @@ pub enum FileStatus {
     Unmatched,
     /// The group is skipped.
     Skipped,
+    /// A different file already sits at the destination path and
+    /// Ryokan has no tag for it (a drop-in, or a folder scanned
+    /// twice). Never overwritten: that would bypass the recycle bin.
+    AlreadyOnDisk,
+    /// Another file in this group lands on the same destination name.
+    DuplicateName,
 }
 
 impl FileStatus {
@@ -80,6 +86,8 @@ impl FileStatus {
             Self::Deselected => "deselected",
             Self::Unmatched => "unmatched",
             Self::Skipped => "skipped",
+            Self::AlreadyOnDisk => "on-disk",
+            Self::DuplicateName => "duplicate",
         }
     }
 
@@ -94,6 +102,8 @@ impl FileStatus {
             Self::Deselected => "Excluded",
             Self::Unmatched => "No match",
             Self::Skipped => "Skipped",
+            Self::AlreadyOnDisk => "Already on disk",
+            Self::DuplicateName => "Duplicate name",
         }
     }
 
@@ -138,6 +148,10 @@ pub struct GroupCounts {
     pub pinned: usize,
     pub no_episode: usize,
     pub deselected: usize,
+    /// Untagged file already at the destination, left alone.
+    pub on_disk: usize,
+    /// Second file in the group with the same destination name.
+    pub duplicate: usize,
     /// Bytes across the files that would be written.
     pub write_bytes: u64,
 }
@@ -241,6 +255,10 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
         (None, None) => (String::new(), false),
     };
 
+    // Only a folder that exists can hold a stranger at a destination
+    // path; a new series' folder doesn't, so no stat calls for those.
+    let folder_on_disk = !folder_name.is_empty() && ctx.disk_folders.contains(&folder_name);
+    let mut names_taken: HashSet<&str> = HashSet::new();
     let mut counts = GroupCounts::default();
     let files = group
         .files
@@ -248,7 +266,7 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
         .enumerate()
         .map(|(idx, f)| {
             let mut existing_quality = String::new();
-            let status = match kind {
+            let mut status = match kind {
                 GroupKind::Skipped => FileStatus::Skipped,
                 GroupKind::NoMatch => FileStatus::Unmatched,
                 GroupKind::New | GroupKind::Merge => {
@@ -287,6 +305,18 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
                     }
                 }
             };
+            if status == FileStatus::Import && folder_on_disk {
+                let dest = std::path::Path::new(ctx.media_root)
+                    .join(&folder_name)
+                    .join("Season 01")
+                    .join(&f.file_name);
+                if dest.exists() && !post_processing::files_share_inode(&f.path, &dest) {
+                    status = FileStatus::AlreadyOnDisk;
+                }
+            }
+            if status.writes() && !names_taken.insert(f.file_name.as_str()) {
+                status = FileStatus::DuplicateName;
+            }
             match status {
                 FileStatus::Import => counts.import += 1,
                 FileStatus::AlreadyPresent => counts.present += 1,
@@ -295,6 +325,8 @@ pub fn project_group(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> GroupV
                 FileStatus::Pinned => counts.pinned += 1,
                 FileStatus::NoEpisodeNumber => counts.no_episode += 1,
                 FileStatus::Deselected => counts.deselected += 1,
+                FileStatus::AlreadyOnDisk => counts.on_disk += 1,
+                FileStatus::DuplicateName => counts.duplicate += 1,
                 FileStatus::Unmatched | FileStatus::Skipped => {}
             }
             if status.writes() {
@@ -459,6 +491,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            resolved_by_id: false,
             mapping_note: None,
             search_results: Vec::new(),
         }
@@ -593,6 +626,77 @@ mod tests {
         assert_eq!(v.counts.downloading, 1);
         assert_eq!(v.counts.import, 2);
         assert_eq!(v.counts.writes(), 3);
+    }
+
+    #[test]
+    fn stranger_at_the_destination_and_duplicate_names_are_never_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let media = tmp.path().join("media");
+        let season = media.join("Show Folder").join("Season 01");
+        std::fs::create_dir_all(&season).unwrap();
+        // An untagged file already at the destination name (a drop-in
+        // the classify sweep hasn't seen), and a source file that is
+        // a hardlink of its destination (a prior import: fine).
+        std::fs::write(season.join("[G] Show - 01 [BD 1080p].mkv"), b"stranger").unwrap();
+        let src_linked = tmp.path().join("src").join("[G] Show - 02 [BD 1080p].mkv");
+        std::fs::create_dir_all(src_linked.parent().unwrap()).unwrap();
+        std::fs::write(&src_linked, b"same").unwrap();
+        std::fs::hard_link(&src_linked, season.join("[G] Show - 02 [BD 1080p].mkv")).unwrap();
+
+        let mut f1 = file("[G] Show - 01 [BD 1080p].mkv", Some(1));
+        f1.path = tmp.path().join("src").join("[G] Show - 01 [BD 1080p].mkv");
+        std::fs::write(&f1.path, b"incoming").unwrap();
+        let mut f2 = file("[G] Show - 02 [BD 1080p].mkv", Some(2));
+        f2.path = src_linked.clone();
+        let mut f3 = file("[G] Show - 03 [BD 1080p].mkv", Some(3));
+        f3.path = tmp
+            .path()
+            .join("src")
+            .join("a")
+            .join("[G] Show - 03 [BD 1080p].mkv");
+        let mut f3b = file("[G] Show - 03 [BD 1080p].mkv", Some(4));
+        f3b.path = tmp
+            .path()
+            .join("src")
+            .join("b")
+            .join("[G] Show - 03 [BD 1080p].mkv");
+
+        let mut g = group(
+            vec![f1, f2, f3, f3b],
+            vec![entry(1, "Show", "Show")],
+            Some(0),
+        );
+        g.existing = Some(ExistingSeries {
+            id: 7,
+            anilist_id: 1,
+            title: "Show".into(),
+            folder_name: "Show Folder".into(),
+            tags: HashMap::new(),
+        });
+        let owned: HashSet<String> = ["Show Folder".to_string()].into_iter().collect();
+        let disk: HashSet<String> = ["Show Folder".to_string()].into_iter().collect();
+        let media_s = media.to_string_lossy().into_owned();
+        let ctx = ProjectionContext {
+            media_root: &media_s,
+            owned_folders: &owned,
+            disk_folders: &disk,
+            title_pref: "english",
+        };
+        let v = project_group(&g, &ctx);
+        let statuses: Vec<FileStatus> = v.files.iter().map(|f| f.status).collect();
+        assert_eq!(
+            statuses,
+            vec![
+                FileStatus::AlreadyOnDisk,
+                FileStatus::Import,
+                FileStatus::Import,
+                FileStatus::DuplicateName,
+            ]
+        );
+        assert_eq!(v.counts.on_disk, 1);
+        assert_eq!(v.counts.duplicate, 1);
+        assert_eq!(v.counts.writes(), 2);
+        assert!(v.files[0].dest.is_empty(), "nothing written for a stranger");
     }
 
     #[test]

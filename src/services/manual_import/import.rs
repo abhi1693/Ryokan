@@ -296,6 +296,10 @@ pub async fn run_import(
     let mut report = ImportReport::default();
     let mut done_files = 0usize;
     let mut touched: Vec<Touched> = Vec::new();
+    // One listing of the media root, maintained as this run creates
+    // folders, rather than a readdir per group on a runtime worker
+    // (a network mount makes that the >5ms blocking case).
+    let mut disk: HashSet<String> = media::list_media_folders(&media_root).into_iter().collect();
 
     // ── Phase 1: land files ─────────────────────────────────────────
     for stored in &sess.groups {
@@ -311,7 +315,6 @@ pub async fn run_import(
         let mut group = stored.clone();
         super::resolve_existing(&state.db, &mut group).await;
         let group = &group;
-        let disk: HashSet<String> = media::list_media_folders(&media_root).into_iter().collect();
         let ctx = ProjectionContext {
             media_root: &media_root,
             owned_folders: &owned_folders,
@@ -382,6 +385,7 @@ pub async fn run_import(
             }
         }
         owned_folders.insert(row.folder_name.clone());
+        disk.insert(row.folder_name.clone());
         gr.folder_name = row.folder_name.clone();
 
         if created {
@@ -460,6 +464,21 @@ pub async fn run_import(
             }
 
             let dest = season_dir.join(&file.file_name);
+            // Backstop for the preview's "Already on disk": a stranger
+            // at the destination is never overwritten (do_file_op
+            // would unlink it outside the recycle bin). The same-inode
+            // case is a re-import of the same file and passes through
+            // to do_file_op's no-op.
+            if !replacing && dest.exists() && !post_processing::files_share_inode(&file.path, &dest)
+            {
+                gr.errors.push(format!(
+                    "{}: a different file is already at the destination, left alone",
+                    file.rel_path
+                ));
+                report.files_failed += 1;
+                done_files += 1;
+                continue;
+            }
             match post_processing::do_file_op(mode, &file.path, &dest).await {
                 Ok(()) => {
                     if replacing {
@@ -731,6 +750,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            resolved_by_id: false,
             mapping_note: None,
             search_results: Vec::new(),
         }
@@ -1022,6 +1042,34 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(row.title, "Other Romaji");
+    }
+
+    #[tokio::test]
+    async fn a_stranger_at_the_destination_is_never_overwritten() {
+        let f = fixture("copy", false).await;
+        seed_series(&f.state.db, 100, "Show").await;
+        // Untagged file already sitting where the import would write.
+        let dest = f.media.join("Show/Season 01/Show - 01.mkv");
+        touch(&dest);
+        std::fs::write(&dest, b"the original").unwrap();
+        let files = vec![candidate(&f.src, "Show/Show - 01.mkv", Some(1))];
+        let mut g = group(files, entry(100, "Show"));
+        crate::services::manual_import::resolve_existing(&f.state.db, &mut g).await;
+        let id = ready_session(&f.state, &f.src, ImportMode::Copy, vec![g]);
+        let report = run_import(f.state.clone(), id, OPTS).await.unwrap();
+        assert_eq!(report.files_written, 0, "{:?}", report.groups[0].errors);
+        assert_eq!(std::fs::read(&dest).unwrap(), b"the original", "left alone");
+        // The preview projects it as "Already on disk" (skipped); the
+        // phase-1 backstop covers the case where it did not.
+        assert!(
+            report.groups[0].skipped == 1
+                || report.groups[0]
+                    .errors
+                    .iter()
+                    .any(|e| e.contains("already at the destination")),
+            "{:?}",
+            report.groups[0]
+        );
     }
 
     #[tokio::test]

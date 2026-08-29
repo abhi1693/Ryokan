@@ -62,6 +62,8 @@ Each row shows the file, its episode, the quality Ryokan reads from the filename
 - **Pinned**: the existing episode has a manual quality override and is never touched.
 - **No episode number**: see above.
 - **Excluded**: you unticked it.
+- **Already on disk**: a different file already sits at the destination name and Ryokan has no tag for it (a file dropped in by hand, or a folder scanned twice); it is left alone rather than overwritten, since an overwrite would skip the recycle bin.
+- **Duplicate name**: another file in the same series lands on the same destination name; only the first is written.
 
 Files land at `<media root>/<series folder>/Season 01/<original filename>`. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name is generated from the AniList title (the destination column shows it), and if a folder of that name already exists under the media root without a series owning it, the import uses a suffixed name (`Show (2)`) instead. Titles everywhere in the wizard, the progress messages, and the report follow your **Settings → General → Title language**.
 
@@ -110,4 +112,4 @@ Importing is safe to repeat. Scan the same folder again and every episode that l
 - Files without an episode number are never imported; rename them so the parser can see the number.
 - Filenames are kept as they are. Renaming into Ryokan's own naming scheme is a separate feature.
 - Folders named after something AniList does not know (`misc`, `To sort`) become no-match cards rather than being hidden. Skip them or search for the right title.
-- The **Discard preview** button forgets a scan; so does leaving it untouched for two hours.
+- The **Discard preview** button forgets a scan; so does leaving it untouched for two hours. A scan or import still running is never forgotten, however long it takes.

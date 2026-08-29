@@ -73,6 +73,7 @@ fn group() -> SeriesGroup {
         search_error: None,
         skipped: false,
         existing: None,
+        resolved_by_id: false,
         mapping_note: None,
         search_results: Vec::new(),
     }

@@ -11,17 +11,20 @@
         <strong>Nothing to import.</strong>
         <span class="form-hint">Every file is excluded, already present, or unmatched.</span>
         {% endif %}
+        {% if !error.is_empty() %}<span class="text-error import-confirm-error" role="alert">{{ error }}</span>{% endif %}
     </div>
     <div class="import-confirm-actions">
         <form method="post" action="/system/import/{{ session_id }}/discard" class="import-inline-form">
             <button type="submit" class="btn btn-secondary">Discard</button>
         </form>
-        {# hx-post so the confirm bridge gates it via htmx:confirm; the
-           HX-Redirect reply navigates to the importing state. #}
+        {# hx-post so the confirm bridge gates it via htmx:confirm. The
+           success reply is an HX-Redirect to the importing state; a
+           refusal comes back as this bar with the reason, which is why
+           the form targets it. #}
         <form method="post" action="/system/import/{{ session_id }}/confirm" class="import-inline-form"
-              hx-post="/system/import/{{ session_id }}/confirm" hx-swap="none"
+              hx-post="/system/import/{{ session_id }}/confirm" hx-target="#import-confirm" hx-swap="outerHTML"
               data-ryokan-confirm-title="Start the import?"
-              data-ryokan-confirm-body="{{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} will be {{ mode_label|lower }}ed into the media root{% if summary.replace > 0 %}, and {{ summary.replace }} existing episode{% if summary.replace != 1 %}s{% endif %} will be replaced (the old files go to the recycle bin when one is configured){% endif %}. New series are monitored for future episodes only, so nothing is grabbed until you say so. You can cancel while it runs; files already imported stay."
+              data-ryokan-confirm-body="{{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %} will be {{ mode_past }} into the media root{% if summary.replace > 0 %}, and {{ summary.replace }} existing episode{% if summary.replace != 1 %}s{% endif %} will be replaced (the old files go to the recycle bin when one is configured){% endif %}. New series are monitored for future episodes only, so nothing is grabbed until you say so. You can cancel while it runs; files already imported stay."
               data-ryokan-confirm-yes="Import"
               data-ryokan-confirm-no="Not yet">
             <button type="submit" class="btn btn-primary"{% if summary.writes == 0 %} disabled{% endif %}>Import {{ summary.writes }} file{% if summary.writes != 1 %}s{% endif %}</button>

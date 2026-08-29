@@ -90,6 +90,16 @@ impl ImportMode {
             Self::Move => "Move",
         }
     }
+
+    /// "hardlinked" / "copied" / "moved", for copy that describes the
+    /// finished action.
+    pub fn past_tense(self) -> &'static str {
+        match self {
+            Self::Hardlink => "hardlinked",
+            Self::Copy => "copied",
+            Self::Move => "moved",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -176,7 +186,12 @@ pub struct SeriesGroup {
     pub search_error: Option<String>,
     pub skipped: bool,
     pub existing: Option<ExistingSeries>,
-    /// How the TMDB mapping shaped this group, for the card.
+    /// Set by the TMDB-mapping and sequel-chain resolvers once one of
+    /// them shaped the group: the other must leave it alone, and a
+    /// hand pick clears it. `mapping_note` is the human-readable
+    /// trail for tests and logs, not control flow.
+    pub resolved_by_id: bool,
+    /// How a resolver shaped this group (diagnostic; not rendered).
     pub mapping_note: Option<String>,
     /// Results of the picker's last live search, so a "Use" click can
     /// promote one into `candidates` without a second lookup.
@@ -477,6 +492,7 @@ pub fn group_files(files: Vec<CandidateFile>) -> (Vec<SeriesGroup>, Vec<Candidat
                 search_error: None,
                 skipped: false,
                 existing: None,
+                resolved_by_id: false,
                 mapping_note: None,
                 search_results: Vec::new(),
             }
@@ -716,6 +732,18 @@ pub async fn resolve_existing_all(db: &SqlitePool, groups: &mut [SeriesGroup]) {
     }
 }
 
+/// One group of a live session, cloned out for an action to work on.
+/// Says which of the two lookups missed.
+fn group_or_err(state: &AppState, session_id: &str, idx: usize) -> Result<SeriesGroup, String> {
+    let session = session::get(&state.import_sessions, session_id)
+        .ok_or_else(|| "Preview session not found".to_string())?;
+    session
+        .groups
+        .get(idx)
+        .cloned()
+        .ok_or_else(|| "Unknown series in this preview".to_string())
+}
+
 /// Undo resolver renumbering on a group's files: a candidate the user
 /// picked by hand overrides whatever the TMDB mapping or the sequel
 /// chain decided, and the parsed numbers are the only ones that still
@@ -726,7 +754,34 @@ fn revert_renumbering(group: &mut SeriesGroup) {
             f.episode = Some(src);
         }
     }
+    group.resolved_by_id = false;
     group.mapping_note = None;
+}
+
+/// Write a re-resolved group back into its slot, keeping the per-file
+/// ticks the slot has *now*. The actions clone a group, await a
+/// provider, and store it; a checkbox toggled in that gap must not be
+/// reverted, and only the ticks may be carried over (carrying the
+/// files wholesale would undo a renumbering revert).
+fn store_group(
+    state: &AppState,
+    session_id: &str,
+    idx: usize,
+    mut group: SeriesGroup,
+) -> Result<(), String> {
+    session::update(&state.import_sessions, session_id, |s| {
+        match s.groups.get_mut(idx) {
+            Some(slot) => {
+                for (f, current) in group.files.iter_mut().zip(slot.files.iter()) {
+                    f.selected = current.selected;
+                }
+                *slot = group;
+                Ok(())
+            }
+            None => Err("Unknown series in this preview".to_string()),
+        }
+    })
+    .unwrap_or_else(|| Err("Preview session not found".to_string()))
 }
 
 /// The picker's live search: rank the provider hits for `query`
@@ -742,11 +797,7 @@ pub async fn live_search(
     if query.is_empty() {
         return Err("Type a title to search for".to_string());
     }
-    let Some(group) =
-        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
-    else {
-        return Err("Preview session not found".to_string());
-    };
+    let group = group_or_err(state, session_id, idx)?;
     let hits = anilist::search_anime(query).await?;
     let input = matching::RankInput {
         title: &group.parsed_title,
@@ -772,11 +823,7 @@ pub async fn pick_by_id(
     idx: usize,
     id: i64,
 ) -> Result<(), String> {
-    let Some(mut group) =
-        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
-    else {
-        return Err("Preview session not found".to_string());
-    };
+    let mut group = group_or_err(state, session_id, idx)?;
     let pick = match group.candidates.iter().position(|e| e.id == id) {
         Some(i) => i,
         None => {
@@ -792,12 +839,7 @@ pub async fn pick_by_id(
     group.low_confidence = false;
     revert_renumbering(&mut group);
     resolve_existing(&state.db, &mut group).await;
-    session::update(&state.import_sessions, session_id, |s| {
-        if let Some(slot) = s.groups.get_mut(idx) {
-            *slot = group;
-        }
-    })
-    .ok_or_else(|| "Preview session not found".to_string())
+    store_group(state, session_id, idx, group)
 }
 
 /// Re-search one group with a user-typed query, then re-resolve the
@@ -813,25 +855,13 @@ pub async fn research_group(
     if query.is_empty() {
         return Err("Type a title to search for".to_string());
     }
-    let Some(mut group) =
-        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
-    else {
-        return Err("Preview session not found".to_string());
-    };
+    let mut group = group_or_err(state, session_id, idx)?;
     group.query = query.to_string();
     group.skipped = false;
     revert_renumbering(&mut group);
     search_and_rank(&mut group, false).await;
     resolve_existing(&state.db, &mut group).await;
-    session::update(&state.import_sessions, session_id, |s| {
-        if let Some(slot) = s.groups.get_mut(idx) {
-            // Keep the user's per-file ticks across a re-search.
-            let files = std::mem::take(&mut slot.files);
-            *slot = group;
-            slot.files = files;
-        }
-    })
-    .ok_or_else(|| "Preview session not found".to_string())
+    store_group(state, session_id, idx, group)
 }
 
 /// Switch a group's pick to another ranked candidate (or `None` for
@@ -842,11 +872,7 @@ pub async fn pick_candidate(
     idx: usize,
     pick: Option<usize>,
 ) -> Result<(), String> {
-    let Some(mut group) =
-        session::get(&state.import_sessions, session_id).and_then(|s| s.groups.get(idx).cloned())
-    else {
-        return Err("Preview session not found".to_string());
-    };
+    let mut group = group_or_err(state, session_id, idx)?;
     if let Some(p) = pick
         && p >= group.candidates.len()
     {
@@ -857,12 +883,7 @@ pub async fn pick_candidate(
     group.low_confidence = false;
     revert_renumbering(&mut group);
     resolve_existing(&state.db, &mut group).await;
-    session::update(&state.import_sessions, session_id, |s| {
-        if let Some(slot) = s.groups.get_mut(idx) {
-            *slot = group;
-        }
-    })
-    .ok_or_else(|| "Preview session not found".to_string())
+    store_group(state, session_id, idx, group)
 }
 
 #[cfg(test)]
@@ -947,6 +968,51 @@ mod tests {
         assert_eq!(groups[0].season, None);
     }
 
+    #[tokio::test]
+    async fn store_group_keeps_current_ticks_and_the_reverted_numbering() {
+        use crate::test_support::{build_test_app_state, in_memory_pool};
+        let state = build_test_app_state(in_memory_pool().await, None);
+        // The slot as the page sees it: file 1 unticked by the user,
+        // renumbered by a resolver.
+        let mut slot_files = vec![
+            cf("Show/01.mkv", Some("Show"), None, Some(1), None),
+            cf("Show/02.mkv", Some("Show"), None, Some(14), None),
+        ];
+        slot_files[1].selected = false;
+        slot_files[1].source_episode = Some(2);
+        let mut s = ImportSession::new(
+            session::mint_id(),
+            PathBuf::from("/src"),
+            ImportMode::Hardlink,
+            false,
+            false,
+        );
+        s.status = SessionStatus::Ready;
+        let (mut groups, _) = group_files(slot_files);
+        groups[0].resolved_by_id = true;
+        s.groups = groups;
+        let sid = s.id.clone();
+        session::insert(&state.import_sessions, s);
+
+        // A re-resolved clone (as research/pick build it): ticks stale
+        // (both true), numbering reverted.
+        let mut clone = session::get(&state.import_sessions, &sid).unwrap().groups[0].clone();
+        clone.files.iter_mut().for_each(|f| f.selected = true);
+        revert_renumbering(&mut clone);
+        store_group(&state, &sid, 0, clone).unwrap();
+
+        let stored = session::get(&state.import_sessions, &sid).unwrap();
+        let g = &stored.groups[0];
+        assert!(!g.files[1].selected, "the slot's tick survives");
+        assert_eq!(g.files[1].episode, Some(2), "renumbering reverted");
+        assert_eq!(g.files[1].source_episode, None);
+        assert!(!g.resolved_by_id);
+        assert!(
+            store_group(&state, &sid, 9, g.clone()).is_err(),
+            "out-of-range index errors"
+        );
+    }
+
     #[test]
     fn alternatives_exclude_the_pick_and_cap() {
         let mk = |id: i64| AnimeEntry {
@@ -978,6 +1044,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            resolved_by_id: false,
             mapping_note: None,
             search_results: Vec::new(),
         };

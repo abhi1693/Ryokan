@@ -336,7 +336,7 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
 /// primary target) and the path-identity check is sufficient for the
 /// catastrophic-data-loss scenario.
 #[cfg(unix)]
-fn files_share_inode(a: &Path, b: &Path) -> bool {
+pub(crate) fn files_share_inode(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(a), std::fs::metadata(b)) {
         (Ok(am), Ok(bm)) => am.dev() == bm.dev() && am.ino() == bm.ino(),
@@ -345,7 +345,7 @@ fn files_share_inode(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn files_share_inode(a: &Path, b: &Path) -> bool {
+pub(crate) fn files_share_inode(a: &Path, b: &Path) -> bool {
     a == b
 }
 
@@ -1798,7 +1798,6 @@ async fn import_torrent(
     }
 }
 
-/// Run one post-processing cycle. Called by the background task every minute.
 /// Series-level sidecars for one series: poster / banner / backdrop
 /// copies from the artwork cache, then `tvshow.nfo` and `season.nfo`
 /// with `<art>` blocks gated on what actually landed. This is the tail
@@ -1885,6 +1884,7 @@ pub async fn write_series_sidecars(state: &AppState, series_id: i64) -> Result<(
     Ok(())
 }
 
+/// Run one post-processing cycle. Called by the background task every minute.
 pub async fn run_once(state: &AppState) {
     let _guard = match POST_PROC_LOCK.try_lock() {
         Ok(g) => g,

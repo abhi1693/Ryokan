@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::ImportSession;
+use super::{ImportSession, SessionStatus};
 
 pub type ImportSessionStore = Arc<Mutex<HashMap<String, ImportSession>>>;
 
@@ -44,12 +44,21 @@ pub fn is_valid_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
+/// A scan or import in flight touches its session only when it
+/// finishes, so age and the cap must never evict it: the page would
+/// say "expired" and the job would report the session gone after
+/// every file landed.
+fn is_running(s: &ImportSession) -> bool {
+    matches!(s.status, SessionStatus::Scanning | SessionStatus::Importing)
+}
+
 fn evict(map: &mut HashMap<String, ImportSession>) {
     let now = Instant::now();
-    map.retain(|_, s| now.duration_since(s.last_touched) < SESSION_TTL);
+    map.retain(|_, s| is_running(s) || now.duration_since(s.last_touched) < SESSION_TTL);
     while map.len() > MAX_SESSIONS {
         let oldest = map
             .iter()
+            .filter(|(_, s)| !is_running(s))
             .min_by_key(|(_, s)| s.last_touched)
             .map(|(k, _)| k.clone());
         match oldest {
@@ -62,7 +71,7 @@ fn evict(map: &mut HashMap<String, ImportSession>) {
 }
 
 pub fn insert(store: &ImportSessionStore, mut session: ImportSession) {
-    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = store.lock().unwrap();
     session.last_touched = Instant::now();
     map.insert(session.id.clone(), session);
     evict(&mut map);
@@ -71,11 +80,19 @@ pub fn insert(store: &ImportSessionStore, mut session: ImportSession) {
 /// Clone out a session (touching it). Sessions are cloned rather than
 /// borrowed so handlers never hold the store lock across an await.
 pub fn get(store: &ImportSessionStore, id: &str) -> Option<ImportSession> {
-    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = store.lock().unwrap();
     evict(&mut map);
     let s = map.get_mut(id)?;
     s.last_touched = Instant::now();
     Some(s.clone())
+}
+
+/// Whether a session exists, without cloning it (a session holding
+/// tens of thousands of files is not something to copy per keystroke).
+pub fn exists(store: &ImportSessionStore, id: &str) -> bool {
+    let mut map = store.lock().unwrap();
+    evict(&mut map);
+    map.contains_key(id)
 }
 
 /// Mutate a session in place under the lock. `f` must not block.
@@ -84,7 +101,7 @@ pub fn update<R>(
     id: &str,
     f: impl FnOnce(&mut ImportSession) -> R,
 ) -> Option<R> {
-    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = store.lock().unwrap();
     let s = map.get_mut(id)?;
     s.last_touched = Instant::now();
     Some(f(s))
@@ -94,7 +111,7 @@ pub fn update<R>(
 /// them so a scan or import left running is reachable again without
 /// its URL.
 pub fn list(store: &ImportSessionStore) -> Vec<ImportSession> {
-    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = store.lock().unwrap();
     evict(&mut map);
     let mut all: Vec<ImportSession> = map.values().cloned().collect();
     all.sort_by_key(|s| std::cmp::Reverse(s.last_touched));
@@ -102,7 +119,7 @@ pub fn list(store: &ImportSessionStore) -> Vec<ImportSession> {
 }
 
 pub fn remove(store: &ImportSessionStore, id: &str) -> bool {
-    let mut map = store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut map = store.lock().unwrap();
     map.remove(id).is_some()
 }
 
@@ -111,14 +128,17 @@ mod tests {
     use super::*;
     use crate::services::manual_import::{ImportMode, SessionStatus};
 
+    /// An idle (Ready) session; eviction spares running ones.
     fn blank(id: &str) -> ImportSession {
-        ImportSession::new(
+        let mut s = ImportSession::new(
             id.to_string(),
             "/tmp/x".into(),
             ImportMode::Hardlink,
             false,
             false,
-        )
+        );
+        s.status = SessionStatus::Ready;
+        s
     }
 
     #[test]
@@ -159,6 +179,31 @@ mod tests {
         }
         let ids: Vec<String> = list(&store).into_iter().map(|s| s.id).collect();
         assert_eq!(ids, vec!["second".to_string()]);
+    }
+
+    #[test]
+    fn running_sessions_survive_the_ttl_and_the_cap() {
+        let store = new_store();
+        let mut old = blank("old-import");
+        old.status = SessionStatus::Importing;
+        insert(&store, old.clone());
+        {
+            let mut map = store.lock().unwrap();
+            let s = map.get_mut("old-import").unwrap();
+            s.last_touched = Instant::now() - SESSION_TTL - Duration::from_secs(1);
+        }
+        assert!(
+            get(&store, "old-import").is_some(),
+            "an import in flight is never aged out"
+        );
+        for i in 0..(MAX_SESSIONS + 3) {
+            insert(&store, blank(&format!("s{i}")));
+        }
+        assert!(
+            exists(&store, "old-import"),
+            "the cap evicts idle sessions, not running ones"
+        );
+        assert!(!exists(&store, "s0"));
     }
 
     #[test]

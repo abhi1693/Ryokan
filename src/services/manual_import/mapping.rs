@@ -149,6 +149,7 @@ pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
         g.pick = pick;
         g.low_confidence = false;
         g.search_error = None;
+        g.resolved_by_id = true;
         g.mapping_note = Some(if split && lo <= hi {
             format!("Season {season}, episodes {lo} to {hi}, through the TMDB mapping")
         } else {
@@ -159,6 +160,7 @@ pub async fn apply_season_mapping(group: SeriesGroup) -> Vec<SeriesGroup> {
     if !unmapped.is_empty() {
         let mut g = group;
         g.files = unmapped;
+        g.resolved_by_id = true;
         g.mapping_note = Some(format!(
             "Outside the TMDB mapping for season {season}; kept as parsed"
         ));
@@ -225,6 +227,7 @@ mod tests {
             search_error: None,
             skipped: false,
             existing: None,
+            resolved_by_id: false,
             mapping_note: None,
             search_results: Vec::new(),
         }
@@ -446,7 +449,7 @@ pub fn route_absolute(
 /// TMDB mapping already shaped, groups with a season, and groups
 /// whose numbers fit the entry come back unchanged.
 pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
-    if group.tmdb_season.is_some() || group.mapping_note.is_some() {
+    if group.tmdb_season.is_some() || group.resolved_by_id {
         return vec![group];
     }
     let Some(pick) = group.picked().cloned() else {
@@ -491,6 +494,7 @@ pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
         g.pick = candidates.iter().position(|c| c.id == entry.id);
         g.low_confidence = false;
         g.search_error = None;
+        g.resolved_by_id = true;
         g.mapping_note = Some(if idx == 0 {
             "Absolute numbering; first entry of the sequel chain".to_string()
         } else {
@@ -501,6 +505,7 @@ pub async fn apply_absolute_numbering(group: SeriesGroup) -> Vec<SeriesGroup> {
     if !leftovers.is_empty() {
         let mut g = group;
         g.files = leftovers;
+        g.resolved_by_id = true;
         g.mapping_note = Some("Beyond the sequel chain; kept as parsed".to_string());
         out.push(g);
     }
@@ -613,6 +618,7 @@ mod absolute_tests {
             search_error: None,
             skipped: false,
             existing: None,
+            resolved_by_id: false,
             mapping_note: None,
             search_results: Vec::new(),
         };
