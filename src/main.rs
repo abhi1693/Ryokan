@@ -318,18 +318,7 @@ async fn run_sanitize_cli() {
 }
 
 fn resolve_live_db_path() -> std::path::PathBuf {
-    // Prefer DATABASE_URL when it's a plain sqlite file URL; otherwise
-    // the canonical default. Query strings (`?mode=rwc`) and the
-    // `sqlite://` prefix are stripped so the path handed to
-    // `std::fs::copy` is usable.
-    if let Ok(url) = std::env::var("DATABASE_URL") {
-        let without_scheme = url.strip_prefix("sqlite://").unwrap_or(&url);
-        let path_part = without_scheme.split('?').next().unwrap_or(without_scheme);
-        if !path_part.is_empty() {
-            return std::path::PathBuf::from(path_part);
-        }
-    }
-    std::path::PathBuf::from("data/ryokan.db")
+    services::backup::live_db_path()
 }
 
 #[tokio::main]
@@ -381,6 +370,52 @@ async fn main() {
     // OS power loss, which matches what Sonarr/Radarr ship). The pragmas
     // below size the page cache and enable mmap'd reads so hot tables stay
     // in memory on subsequent lookups.
+    // Issue #126: a restore staged from System → Backup is applied
+    // here, before the pool opens, by swapping the staged files into
+    // place. The previous database stays beside the restored one as
+    // `ryokan.db.pre-restore-<ts>`. A failure leaves the staged
+    // directory for inspection and boots the current data.
+    let backup_paths = services::backup::BackupPaths::from_env();
+    let restore_applied = match services::backup::apply_pending_restore(&backup_paths) {
+        Ok(applied) => applied,
+        Err(e) => {
+            tracing::error!(
+                "Staged restore was NOT applied: {e}. The staged files stay in {} for inspection; \
+                 cancel the restore from System → Backup or fix the directory and restart.",
+                backup_paths.pending_dir().display()
+            );
+            None
+        }
+    };
+    if let Some(applied) = &restore_applied {
+        tracing::warn!(
+            "Restore applied from a backup made {}: previous database kept at {}{}{}",
+            applied.manifest.timestamp_label(),
+            applied.previous_db.display(),
+            if applied.key_replaced {
+                "; encryption key replaced"
+            } else {
+                ""
+            },
+            if applied.artwork_replaced {
+                "; artwork cache replaced"
+            } else {
+                ""
+            },
+        );
+    }
+
+    if let Some(applied) = &restore_applied {
+        for warning in &applied.warnings {
+            tracing::warn!("Restore: {warning}");
+        }
+    }
+    // Whatever a crash left in the backup / upload work dirs is dead
+    // weight now (a half-written multi-GB upload, a vacuum snapshot).
+    for dir in services::backup::sweep_work_dirs(&backup_paths) {
+        tracing::info!("Cleared stranded backup work dir {}", dir.display());
+    }
+
     let connect_opts = SqliteConnectOptions::from_str(&database_url)
         .expect("Invalid DATABASE_URL")
         .journal_mode(SqliteJournalMode::Wal)
@@ -400,6 +435,30 @@ async fn main() {
     models::migrate(&db)
         .await
         .expect("Failed to run migrations");
+
+    if let Some(applied) = restore_applied {
+        services::logger::info(
+            &db,
+            models::log::LogCategory::System,
+            "Restore applied at startup",
+            &format!(
+                "backup from {} (Ryokan {}); previous database kept at {}",
+                applied.manifest.timestamp_label(),
+                applied.manifest.ryokan_version,
+                applied.previous_db.display()
+            ),
+        )
+        .await;
+        for warning in &applied.warnings {
+            services::logger::warn(
+                &db,
+                models::log::LogCategory::System,
+                "Restore applied with a warning",
+                warning,
+            )
+            .await;
+        }
+    }
 
     // #62 — one-shot genre backfill from existing
     // series_metadata_cache rows so the library filter dropdown
@@ -521,6 +580,7 @@ async fn main() {
         tasks: services::task_registry::TaskRegistry::new(),
         dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         notification_providers: services::notifications::empty_cache(),
+        import_sessions: services::manual_import::session::new_store(),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.
@@ -595,6 +655,45 @@ async fn main() {
         .route(
             "/library/review",
             get(handlers::library::pages::needs_review_page),
+        )
+        .route("/library/recycle", get(handlers::library::recycle::page))
+        // #122 manual import wizard. Form-POST + server render; the
+        // per-group override controls swap a single card via HTMX.
+        .route(
+            "/system/import",
+            get(handlers::system::manual_import::page).post(handlers::system::manual_import::start),
+        )
+        .route(
+            "/system/import/{session_id}/group/{idx}",
+            post(handlers::system::manual_import::group_action),
+        )
+        .route(
+            "/system/import/{session_id}/group/{idx}/candidates",
+            get(handlers::system::manual_import::picker_candidates),
+        )
+        .route(
+            "/system/import/{session_id}/discard",
+            post(handlers::system::manual_import::discard),
+        )
+        .route(
+            "/system/import/{session_id}/confirm",
+            post(handlers::system::manual_import::confirm),
+        )
+        .route(
+            "/system/import/{session_id}/cancel",
+            post(handlers::system::manual_import::cancel),
+        )
+        .route(
+            "/api/library/recycle/empty",
+            post(handlers::library::recycle::empty),
+        )
+        .route(
+            "/api/library/recycle/{entry_id}/restore",
+            post(handlers::library::recycle::restore),
+        )
+        .route(
+            "/api/library/recycle/{entry_id}/purge",
+            post(handlers::library::recycle::purge_entry),
         )
         .route(
             "/series/{anilist_id}",
@@ -787,6 +886,50 @@ async fn main() {
         .route(
             "/settings/general",
             post(handlers::settings::settings_general_submit),
+        )
+        // Issue #124: live preview for the naming templates on the
+        // General tab. JSON in, JSON out, saves nothing.
+        .route(
+            "/api/settings/naming-preview",
+            post(handlers::settings::naming::naming_preview),
+        )
+        // Issue #126: backup / restore. Cookie-auth only (protected
+        // group): a backup carries the encryption key and every stored
+        // password. The upload is a raw gzip body streamed to disk, so
+        // the default 2 MB body limit is lifted for that one route.
+        .route(
+            "/api/backup/download",
+            get(handlers::system::backup::api_backup_download),
+        )
+        .route(
+            "/api/backup/run",
+            post(handlers::system::backup::api_backup_run),
+        )
+        .route(
+            "/api/tasks/backup",
+            post(handlers::system::backup::api_backup_run),
+        )
+        .route(
+            "/system/backup/run",
+            post(handlers::system::backup::backup_run_form),
+        )
+        .route(
+            "/api/backup/files/{name}",
+            get(handlers::system::backup::api_backup_file),
+        )
+        .route(
+            "/api/backup/files/{name}/delete",
+            post(handlers::system::backup::backup_file_delete),
+        )
+        .route(
+            "/api/restore/upload",
+            post(handlers::system::backup::api_restore_upload).layer(
+                axum::extract::DefaultBodyLimit::max(services::backup::MAX_UPLOAD_BYTES as usize),
+            ),
+        )
+        .route(
+            "/api/restore/cancel",
+            post(handlers::system::backup::restore_cancel),
         )
         .route(
             "/settings/quality",
@@ -1576,6 +1719,104 @@ async fn main() {
     }
 
     // Background task: clean up logs and old RSS decisions older than 30 days every hour.
+    // Issue #126: scheduled backups. Hourly tick; a run happens when
+    // the newest scheduled backup in the folder is older than the
+    // configured cadence, so a restart never triggers an extra one and
+    // a missed day is caught up on the next tick. The folder is the
+    // state; nothing about "last backup" is stored in the DB.
+    {
+        let backup_db = db.clone();
+        let task_registry_backup = state.tasks.clone();
+        tokio::spawn(async move {
+            supervise(&task_registry_backup, "backup", move || {
+                let db = backup_db.clone();
+                async move {
+                    let touch = |db: sqlx::SqlitePool, enabled: bool| async move {
+                        let _ = models::scheduled_tasks::touch_definition(
+                            &db,
+                            "backup",
+                            "Backup",
+                            "Daily or weekly (Settings → General)",
+                            enabled,
+                        )
+                        .await;
+                    };
+                    let initial = models::config::get_config(&db)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default();
+                    touch(db.clone(), initial.backup_schedule != "disabled").await;
+                    // Let boot settle before the first check.
+                    tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                    loop {
+                        let cfg = models::config::get_config(&db)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_default();
+                        touch(db.clone(), cfg.backup_schedule != "disabled").await;
+                        if let Some(interval) =
+                            services::backup::schedule_interval(&cfg.backup_schedule)
+                        {
+                            let paths = services::backup::BackupPaths::from_env();
+                            let dir = paths.backup_dir(&cfg.backup_directory);
+                            if services::backup::is_due(&dir, interval) {
+                                let _ = models::scheduled_tasks::mark_started(
+                                    &db,
+                                    "backup",
+                                    "Scheduled backup",
+                                )
+                                .await;
+                                match services::backup::run_to_folder(&db, &paths, &cfg).await {
+                                    Ok(run) => {
+                                        let detail = format!(
+                                            "{} written to {}{}",
+                                            run.file_name,
+                                            run.dir.display(),
+                                            if run.pruned.is_empty() {
+                                                String::new()
+                                            } else {
+                                                format!(", pruned {}", run.pruned.join(", "))
+                                            }
+                                        );
+                                        services::logger::info(
+                                            &db,
+                                            models::log::LogCategory::System,
+                                            "Scheduled backup complete",
+                                            &detail,
+                                        )
+                                        .await;
+                                        let _ = models::scheduled_tasks::mark_finished(
+                                            &db, "backup", "ok", &detail,
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        let msg = e.to_string();
+                                        services::logger::error(
+                                            &db,
+                                            models::log::LogCategory::System,
+                                            "Scheduled backup failed",
+                                            &msg,
+                                        )
+                                        .await;
+                                        let _ = models::scheduled_tasks::mark_finished(
+                                            &db, "backup", "error", &msg,
+                                        )
+                                        .await;
+                                    }
+                                }
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+                    }
+                }
+            })
+            .await;
+        });
+    }
+
     {
         let cleanup_db = db.clone();
         let task_registry_cleanup = state.tasks.clone();
@@ -1700,6 +1941,44 @@ async fn main() {
                         // would linger until the process restarts. Hourly global
                         // sweep keeps the map bounded.
                         handlers::auth::sweep_login_failures();
+                        // Recycle-bin purge (#123). Date buckets older than
+                        // `recycle_bin_age_days` are dropped; 0 disables the
+                        // sweep and an empty path means no bin at all.
+                        if let Ok(Some(cfg)) = models::config::get_config(&cleanup_db).await
+                            && !cfg.recycle_bin_path.trim().is_empty()
+                        {
+                            match services::recycle::purge_old(
+                                &cfg.recycle_bin_path,
+                                cfg.recycle_bin_age_days,
+                            )
+                            .await
+                            {
+                                Ok(report) if report.entries > 0 || report.date_dirs > 0 => {
+                                    services::logger::info(
+                                        &cleanup_db,
+                                        models::log::LogCategory::System,
+                                        &format!(
+                                            "Recycle bin purge removed {} entr{} ({})",
+                                            report.entries,
+                                            if report.entries == 1 { "y" } else { "ies" },
+                                            services::recycle::human_bytes(report.bytes)
+                                        ),
+                                        &format!(
+                                            "age_days={} date_dirs={} bytes={}",
+                                            cfg.recycle_bin_age_days,
+                                            report.date_dirs,
+                                            report.bytes
+                                        ),
+                                    )
+                                    .await;
+                                }
+                                Err(e) => {
+                                    cleanup_errors.push(format!("recycle purge: {}", e));
+                                    tracing::error!("Recycle bin purge failed: {}", e);
+                                }
+                                _ => {}
+                            }
+                        }
                         let status = if cleanup_errors.is_empty() {
                             "ok"
                         } else {

@@ -19,6 +19,7 @@ use serde::Serialize;
 use crate::AppState;
 use crate::models::log::LogCategory;
 use crate::models::{config, episode_tags, grabbed_torrents};
+use crate::services::recycle::{self, RecycleKind, RecycleOutcome};
 use crate::services::{auto_search, logger, media};
 
 use super::pages::build_episodes;
@@ -207,7 +208,7 @@ pub async fn delete_episode_file(
     // trigger event.
     let json_err = |status: axum::http::StatusCode, msg: &str| -> Response {
         if is_htmx {
-            episode_delete_trigger(status, episode_number, false, msg)
+            episode_delete_trigger(status, episode_number, false, msg, None)
         } else {
             let body = Json(serde_json::json!({"ok": false, "message": msg}));
             (status, body).into_response()
@@ -301,19 +302,36 @@ pub async fn delete_episode_file(
             #[cfg(not(unix))]
             let media_inode: Option<u64> = None;
 
-            if let Err(e) = tokio::fs::remove_file(&full_path_canon).await {
-                return json_err(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to delete file: {}", e),
-                );
-            }
-
-            let nfo_path = full_path_canon.with_extension("nfo");
-            if let Ok(nfo_canon) = tokio::fs::canonicalize(&nfo_path).await
-                && nfo_canon.starts_with(&media_root_canon)
+            // Recycle bin (#123): the video plus its companions (`.nfo`,
+            // subtitles, thumbnail) move into the bin together; with no
+            // bin configured `recycle` unlinks them permanently, which is
+            // what this handler did before (minus the companion sweep,
+            // which used to leak subtitles).
+            let recycle_entry_id: Option<String> = match recycle::recycle(
+                &state.db,
+                &cfg.recycle_bin_path,
+                RecycleKind::Episode,
+                Some(tracked.id),
+                &tracked.title,
+                &full_path_canon,
+            )
+            .await
             {
-                let _ = tokio::fs::remove_file(&nfo_canon).await;
-            }
+                Ok(RecycleOutcome::Recycled { entry_id }) => Some(entry_id),
+                Ok(RecycleOutcome::DirectDeleted) => None,
+                Ok(RecycleOutcome::Missing) => {
+                    return json_err(
+                        axum::http::StatusCode::NOT_FOUND,
+                        "Episode file not found on disk",
+                    );
+                }
+                Err(e) => {
+                    return json_err(
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to delete file: {}", e),
+                    );
+                }
+            };
 
             let _ = episode_tags::clear_episode_tag(&state.db, tracked.id, episode_number).await;
             // `clear_episode_tag` only touches `episode_quality_tags`;
@@ -603,16 +621,27 @@ pub async fn delete_episode_file(
             .await;
 
             if is_htmx {
-                let msg = if qbit_removed.is_empty() {
-                    format!("Episode {} file removed.", episode_number)
+                // The toast uses this as its body under a title that already
+                // names the episode, so say what's actionable rather than
+                // repeating the title.
+                let mut msg = if recycle_entry_id.is_some() {
+                    "Restorable from the Recycle Bin until it is purged.".to_string()
                 } else {
-                    format!(
-                        "Episode {} file removed; {} torrent(s) removed from client.",
-                        episode_number,
-                        qbit_removed.len()
-                    )
+                    format!("Episode {} file removed.", episode_number)
                 };
-                episode_delete_trigger(axum::http::StatusCode::OK, episode_number, true, &msg)
+                if !qbit_removed.is_empty() {
+                    msg.push_str(&format!(
+                        " {} torrent(s) removed from client.",
+                        qbit_removed.len()
+                    ));
+                }
+                episode_delete_trigger(
+                    axum::http::StatusCode::OK,
+                    episode_number,
+                    true,
+                    &msg,
+                    recycle_entry_id.as_deref(),
+                )
             } else {
                 (
                     axum::http::StatusCode::OK,
@@ -620,6 +649,7 @@ pub async fn delete_episode_file(
                         "ok": true,
                         "deleted": file.filename,
                         "qbit_removed": qbit_removed,
+                        "recycle_entry_id": recycle_entry_id,
                     })),
                 )
                     .into_response()
@@ -647,11 +677,15 @@ pub async fn delete_episode_file(
 /// non-ASCII; the count is enough for the toast wording. Errors from
 /// upstream services flow through `message`, so the helper sanitizes
 /// it to ASCII as a defensive step.
+/// `recycle_entry_id` is the 8-hex recycle bin entry when the file was
+/// recycled (#123); the page's toast turns it into a one-click Undo. It
+/// is always ASCII, so it can't break the header-safety argument below.
 fn episode_delete_trigger(
     status: axum::http::StatusCode,
     episode_number: i32,
     ok: bool,
     message: &str,
+    recycle_entry_id: Option<&str>,
 ) -> Response {
     let safe_message: String = message
         .chars()
@@ -662,6 +696,7 @@ fn episode_delete_trigger(
             "ok": ok,
             "episode_number": episode_number,
             "message": safe_message,
+            "recycle_entry_id": recycle_entry_id,
         }
     });
     let mut resp = Response::new(axum::body::Body::empty());

@@ -156,9 +156,16 @@ pub(super) async fn build_radarr_movie_from_search(
     let is_in_library = db_series.is_some();
     let internal_id = db_series.map(|s| s.id).unwrap_or(0);
 
-    let folder_name = db_series
-        .map(|s| s.folder_name.clone())
-        .unwrap_or_else(|| media::sanitize_folder_name(title));
+    let folder_name = db_series.map(|s| s.folder_name.clone()).unwrap_or_else(|| {
+        crate::services::naming::series_folder(
+            &cfg.series_folder_format,
+            &cfg.title_language,
+            &crate::services::naming::SeriesNames {
+                title,
+                ..crate::services::naming::SeriesNames::from_entry(r)
+            },
+        )
+    });
 
     let has_file = if is_in_library {
         !media::scan_series_folder(&cfg.media_root, &folder_name)

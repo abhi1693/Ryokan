@@ -128,6 +128,12 @@ struct SystemTemplate {
     /// for a fresh create form. With `?edit_id=N`, this is the loaded
     /// matrix for that provider.
     notification_event_toggles: Vec<notifications::EventToggleView>,
+    /// Recycle bin (#123) refused a delete because the bin isn't writable
+    /// (`recycle::RECYCLE_UNWRITABLE`); renders the top-of-page banner.
+    /// Flag only, no probe: this page shouldn't wake a spun-down disk.
+    recycle_unwritable: bool,
+    /// System → Backup (#126). Only populated when `tab == "backup"`.
+    backup: Option<backup::BackupTabView>,
 }
 
 #[derive(Deserialize)]
@@ -163,6 +169,7 @@ fn normalize_system_tab(tab: Option<String>) -> String {
         Some("review") => "review".to_string(),
         Some("credits") => "credits".to_string(),
         Some("notifications") => "notifications".to_string(),
+        Some("backup") => "backup".to_string(),
         _ => "logs".to_string(),
     }
 }
@@ -371,6 +378,12 @@ pub async fn system_page(
     // got fewer than the limit, this is the last page.
     let (logs, log_older_id) = truncate_to_page(logs, 200, |e| e.id);
     let (rss_recent, rss_older_id) = truncate_to_page(rss_recent, 200, |e| e.id);
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
+    let backup_view = if tab == "backup" {
+        Some(backup::backup_tab_view(&state).await)
+    } else {
+        None
+    };
     let template = SystemTemplate {
         page: "system".to_string(),
         tab,
@@ -378,6 +391,8 @@ pub async fn system_page(
         force_kitsu_fallback,
         auto_grab_on_add,
         allow_non_english,
+        recycle_unwritable,
+        backup: backup_view,
         debug_message: params.message,
         debug_error: params.error,
         logs,
@@ -469,6 +484,7 @@ pub async fn debug_settings_submit(
         }
     };
 
+    let recycle_unwritable = crate::services::recycle::is_unwritable();
     let template = SystemTemplate {
         page: "system".to_string(),
         tab: "debug".to_string(),
@@ -476,6 +492,8 @@ pub async fn debug_settings_submit(
         force_kitsu_fallback: cfg.force_kitsu_fallback,
         auto_grab_on_add: cfg.auto_grab_on_add,
         allow_non_english: cfg.allow_non_english,
+        recycle_unwritable,
+        backup: None,
         debug_message: message,
         debug_error: error,
         logs: Vec::new(),
@@ -1431,6 +1449,8 @@ pub async fn api_system_tasks(State(state): State<AppState>) -> Json<SystemTasks
     Json(SystemTasksResponse { tasks })
 }
 
+pub mod backup;
+pub mod manual_import;
 pub mod notifications;
 
 #[cfg(test)]

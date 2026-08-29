@@ -39,6 +39,24 @@ When to come here:
 - After updating Ryokan, to confirm tasks resumed cleanly on the new image.
 - A specific recurring action (watch-list sync, upgrade search) hasn't happened recently and you want to confirm timing.
 
+## Backup
+
+Download a backup, keep scheduled ones in a folder, and restore from one.
+
+A backup is a `.tar.gz` holding a consistent snapshot of the database (`ryokan.db`), the encryption key (`.ryokan-key`) that protects linked AniList and MyAnimeList tokens, a `manifest.json` with the Ryokan version and schema level, and, when you tick the option, the cached artwork. The snapshot is taken with SQLite's `VACUUM INTO`, so it is complete even while Ryokan is busy; copying `ryokan.db` by hand while Ryokan runs is not, because recent writes live in `ryokan.db-wal` until a checkpoint.
+
+**A backup is a password export.** It contains the key, the encrypted account tokens, every download client password, and the activity log. Keep it where you keep secrets. For sharing with support, tick **Sanitize** instead: passwords, API keys, and tokens are blanked, the log is trimmed to its last 1000 lines, and the key and hostname stay out.
+
+- **Download backup** builds the archive and sends it to the browser.
+- **Save to backup folder** writes one to the folder from Settings → General, the same as a scheduled run, and prunes older ones past the retention count. The folder's contents are listed below the buttons with per-file Download and Delete.
+- **Scheduled backups** (off by default) run daily or weekly from the same folder settings. They show up in [Scheduled Tasks](#scheduled-tasks) as `backup` with a Run now button.
+
+**Restore** is two steps. Upload a backup: Ryokan checks that it is a Ryokan archive from this or an older version, saves a backup of the current state to the folder first (`auto-pre-restore-<time>.tar.gz`, never pruned), and stages the files. Then restart Ryokan. The staged files are swapped in before the database opens, the previous database stays next to the restored one as `ryokan.db.pre-restore-<time>` for a manual rollback, and everyone is signed out. Until the restart, the tab shows the staged backup with a **Cancel restore** button. A backup made by a newer Ryokan is refused. A sanitized backup restores but needs passwords and account links entered again.
+
+The `ryokan.db.pre-restore-<time>` file (and `.ryokan-key.pre-restore-<time>` / `artwork.pre-restore-<time>` when those were replaced) is never cleaned up automatically. Delete it yourself once you are sure the restore is what you wanted. A sanitized download is named `ryokan-backup-<time>-sanitized.tar.gz` so it cannot be mistaken for the key-bearing kind.
+
+Ryokan does not restart itself. In Docker, `docker compose restart ryokan`. Backups land under `/data/backups` by default there, on the same volume as the database, so point the folder at another disk or a mounted share if the goal is surviving that volume.
+
 ## Needs Review
 
 Episodes the source classifier flagged as low-confidence, where the heuristics couldn't confidently decide BD vs. WEB or what release group it came from. Each row gives you the chance to manually accept the classifier's verdict, override it, or re-classify.

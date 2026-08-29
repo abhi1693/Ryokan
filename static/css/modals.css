@@ -143,6 +143,12 @@
     white-space: pre-wrap;
 }
 
+.ryokan-toast-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 8px;
+}
+
 .ryokan-toast-close {
     flex-shrink: 0;
     width: 22px;

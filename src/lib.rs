@@ -53,8 +53,8 @@ use tokio::sync::RwLock;
 use services::{
     custom_formats::CompiledCfCache, download_client::DownloadClient, indexers::Indexer,
     interactive_search_cache::InteractiveSearchCache, jellyfin::JellyfinClient,
-    notifications::NotificationProviders, oauth_state::OAuthStateStore, progress::ProgressRegistry,
-    task_registry::TaskRegistry,
+    manual_import::ImportSessionStore, notifications::NotificationProviders,
+    oauth_state::OAuthStateStore, progress::ProgressRegistry, task_registry::TaskRegistry,
 };
 
 /// PR #107 review fix #4: cached `Vec<Arc<dyn Indexer>>` swapped on
@@ -199,6 +199,13 @@ pub struct AppState {
     /// returns on empty so every hook point is a no-op until the
     /// per-provider issues (#119 webhook, #120 Discord) land.
     pub notification_providers: NotificationProviders,
+    /// #122 — in-memory manual-import preview sessions, keyed by the
+    /// opaque id in `/system/import?session=<id>`. Same
+    /// `Arc<Mutex<HashMap>>` shape as `interactive_search_cache`:
+    /// idle sessions evict on the next access (2h TTL, 8-session cap).
+    /// Holds walk results plus the user's match / file decisions
+    /// between wizard steps; nothing in it is persisted.
+    pub import_sessions: ImportSessionStore,
 }
 
 /// `(probed_at, version-or-error)` keyed by `download_clients.id`.
@@ -482,6 +489,7 @@ mod resolve_grab_client_tests {
             tasks: crate::services::task_registry::TaskRegistry::new(),
             dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             notification_providers: crate::services::notifications::empty_cache(),
+            import_sessions: crate::services::manual_import::session::new_store(),
         }
     }
 

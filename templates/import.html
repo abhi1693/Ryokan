@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block title %} - Import Library{% endblock %}
+
+{% block content %}
+{# Same shell as templates/system.html so the wizard reads as the
+   System sidebar's "Import Library" tab: the sidebar stays put and
+   the entry renders active. The wizard keeps its own route because
+   it has states (scanning / preview / importing / report) and HTMX
+   card swaps that the ?tab= page doesn't. #}
+<div class="tabbed-page">
+<div class="tabbed-page-header">
+    <h2>System</h2>
+</div>
+<div class="tabbed-layout">
+{% include "partials/system/sidebar.html" %}
+<div class="tabbed-content">
+
+{% if step == "start" %}
+<div class="rss-panel">
+<div class="cf-section">
+<h3 class="import-title">Import an existing library</h3>
+
+{% if media_root.is_empty() %}
+<div class="alert alert-warn" role="status">
+    <strong>No media root set.</strong>
+    Imported files are placed under your media root. Set one under <a href="/settings">Settings &rarr; General</a> first.
+</div>
+{% endif %}
+{% if !error.is_empty() %}
+<div class="alert alert-error" role="alert">{{ error }}</div>
+{% endif %}
+
+<form method="post" action="/system/import" class="import-start-form settings-form">
+    <div class="form-group">
+        <label for="import-path">Folder to scan</label>
+        <input type="text" id="import-path" name="path" value="{{ form.path }}" placeholder="/mnt/anime" autocomplete="off" spellcheck="false" required>
+    </div>
+    <div class="form-group">
+        <label for="import-mode">How files reach the media root</label>
+        <select id="import-mode" name="mode">
+            <option value="hardlink"{% if form.mode == "hardlink" %} selected{% endif %}>Hardlink (recommended)</option>
+            <option value="copy"{% if form.mode == "copy" %} selected{% endif %}>Copy</option>
+            <option value="move"{% if form.mode == "move" %} selected{% endif %}>Move</option>
+        </select>
+    </div>
+    <label class="checkbox-row import-checkbox">
+        <input type="checkbox" name="follow_symlinks" value="1"{% if form.follow_symlinks %} checked{% endif %}>
+        <span><strong>Follow symlinks</strong></span>
+    </label>
+    <label class="checkbox-row import-checkbox">
+        <input type="checkbox" name="include_hidden" value="1"{% if form.include_hidden %} checked{% endif %}>
+        <span><strong>Include hidden files and folders</strong></span>
+    </label>
+    <div class="import-start-actions">
+        <button type="submit" class="btn btn-primary"{% if media_root.is_empty() %} disabled{% endif %}>Scan folder</button>
+    </div>
+</form>
+
+{% if !recent.is_empty() %}
+<section class="import-recent">
+    <h3>Recent scans</h3>
+    <ul class="import-recent-list">
+        {% for r in recent %}
+        <li>
+            <a href="/system/import?session={{ r.id }}" class="import-recent-link">
+                <code class="import-recent-root" title="{{ r.root }}">{{ r.root }}</code>
+                {% if r.status != "Ready to review" %}<span class="import-recent-meta">{{ r.status }}</span>{% endif %}
+            </a>
+        </li>
+        {% endfor %}
+    </ul>
+</section>
+{% endif %}
+</div>{# /.cf-section #}
+</div>{# /.rss-panel #}
+
+{% else if step == "scanning" %}
+<h3 class="import-title">Import an existing library</h3>
+<div class="import-scanning" id="import-scanning" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
+    <div class="import-spinner" aria-hidden="true"></div>
+    <div class="import-scanning-text">
+        <strong>Scanning <code>{{ root }}</code></strong>
+        <p class="form-hint">Reading filenames and matching each series against AniList and MAL. Large libraries take a few minutes because the providers allow about thirty lookups a minute. This page updates itself when the preview is ready.</p>
+    </div>
+    <div class="import-scanning-actions">
+        <a href="/system/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/system/import/{{ session_id }}/discard">
+            <button type="submit" class="btn btn-secondary btn-sm">Cancel</button>
+        </form>
+    </div>
+</div>
+
+{% else if step == "importing" %}
+<h3 class="import-title">Import an existing library</h3>
+<div class="import-scanning" id="import-importing" data-import-progress="{{ progress_id }}" data-session="{{ session_id }}">
+    <div class="import-spinner" aria-hidden="true"></div>
+    <div class="import-scanning-text">
+        <strong>Importing from <code>{{ root }}</code></strong>
+        <p class="form-hint">Files are being {{ mode_past }} into the media root, then each series is classified and given its artwork and NFO files. Cancel stops after the file in progress; everything already imported stays. This page updates itself when the import is done.</p>
+    </div>
+    <div class="import-scanning-actions">
+        <a href="/system/import?session={{ session_id }}" class="btn btn-secondary btn-sm">Refresh</a>
+        <form method="post" action="/system/import/{{ session_id }}/cancel">
+            <button type="submit" class="btn btn-danger btn-sm">Cancel import</button>
+        </form>
+    </div>
+</div>
+
+{% else if step == "done" %}
+<h3 class="import-title">Import an existing library</h3>
+<div class="import-summary import-report">
+    <div class="import-summary-main">
+        <span class="import-summary-root" title="{{ root }}"><code>{{ root }}</code></span>
+        <span class="import-summary-line">
+            {% if report.cancelled %}<strong>Import cancelled.</strong> Everything below had already landed.{% else if report.files_failed > 0 %}<strong>Import finished with errors.</strong>{% else %}<strong>Import complete.</strong>{% endif %}
+        </span>
+        <span class="import-summary-counts">
+            <span class="import-count import-count-new"><strong>{{ report.files_written }}</strong> imported</span>
+            <span class="import-count import-count-merge"><strong>{{ report.files_replaced }}</strong> replaced</span>
+            <span class="import-count import-count-nomatch"><strong>{{ report.files_skipped }}</strong> skipped</span>
+            {% if report.files_failed > 0 %}<span class="import-count import-count-error"><strong>{{ report.files_failed }}</strong> failed</span>{% endif %}
+        </span>
+        <span class="import-summary-line">
+            {{ report_size }} across <strong>{{ report.series_created }}</strong> new series and <strong>{{ report.series_merged }}</strong> existing{% if report.series_skipped > 0 %}; {{ report.series_skipped }} series left untouched{% endif %}.
+            New series are monitored for future episodes only, so nothing is grabbed until you say so.
+        </span>
+    </div>
+    <div class="import-summary-actions import-report-actions">
+        <a href="/" class="btn btn-primary">Back to Library</a>
+        <form method="post" action="/system/import/{{ session_id }}/discard">
+            <button type="submit" class="btn btn-secondary">Import another folder</button>
+        </form>
+    </div>
+</div>
+
+{% if !report.groups.is_empty() %}
+<div class="rss-table-wrap">
+    <table class="rss-table import-report-table">
+        <thead>
+            <tr>
+                <th>Folder</th>
+                <th>Series</th>
+                <th>Result</th>
+                <th>Imported</th>
+                <th>Replaced</th>
+                <th>Skipped</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for g in report.groups %}
+            <tr class="{% if !g.errors.is_empty() %}import-report-row-error{% endif %}">
+                <td><span class="import-path" title="{{ g.parsed_title }}">{{ g.parsed_title }}</span></td>
+                <td>{% if g.series_id.is_some() && g.anilist_id != 0 %}<a href="/series/{{ g.anilist_id }}">{{ g.series_title }}</a>{% else %}{{ g.series_title }}{% endif %}{% if !g.folder_name.is_empty() %} <span class="form-hint"><code>{{ g.folder_name }}</code></span>{% endif %}</td>
+                <td class="import-nowrap">{% if g.series_id.is_none() %}<span class="import-status">Untouched</span>{% else if g.created %}<span class="import-status import-status-import">Created</span>{% else %}<span class="import-status import-status-present">Merged</span>{% endif %}</td>
+                <td class="import-nowrap">{{ g.written }}</td>
+                <td class="import-nowrap">{{ g.replaced }}</td>
+                <td class="import-nowrap">{{ g.skipped }}</td>
+            </tr>
+            {% for e in g.errors %}
+            <tr class="import-report-error">
+                <td></td>
+                <td colspan="5"><span class="text-error">{{ e }}</span></td>
+            </tr>
+            {% endfor %}
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+{% else if step == "failed" %}
+<h3 class="import-title">Import an existing library</h3>
+<div class="alert alert-error" role="alert">
+    <strong>The scan of <code>{{ root }}</code> failed.</strong> {{ failed_message }}
+</div>
+<a href="/system/import" class="btn btn-primary">Start over</a>
+
+{% else %}
+<h3 class="import-title">Import an existing library</h3>
+{% include "partials/system/import_summary.html" %}
+
+{% if cross_fs_warning %}
+<div class="alert alert-warn" role="status">
+    <strong>The source folder and your media root are on different filesystems.</strong>
+    Hardlinks cannot cross filesystems, so the import will <strong>copy</strong> instead, using about {{ write_size }} of extra space. Discard and choose Move if you want the source space freed.
+</div>
+{% endif %}
+
+{% if !notice.is_empty() %}
+<div class="alert alert-error" role="alert">{{ notice }}</div>
+{% endif %}
+
+<div id="import-groups">
+{% for g in groups %}
+{% include "partials/system/import_group.html" %}
+{% endfor %}
+</div>
+
+{% if !unmatched.is_empty() %}
+<section class="import-group import-group-nomatch">
+    <header class="import-group-head">
+        <div class="import-group-title">
+            <span class="import-kind-badge import-kind-nomatch">No series name</span>
+            <h3>Files with no series hint</h3>
+            <span class="import-group-meta">{{ unmatched.len() }} file{% if unmatched.len() != 1 %}s{% endif %}</span>
+        </div>
+    </header>
+    <p class="form-hint">Neither the filename nor any folder above it names a series. Rename the file or move it into a folder named after the show, then scan again.</p>
+    <div class="rss-table-wrap">
+        <table class="rss-table import-files">
+            <thead><tr><th>File</th><th>Episode</th><th>Quality</th><th>Size</th></tr></thead>
+            <tbody>
+            {% for f in unmatched %}
+            <tr class="import-file import-file-unmatched">
+                <td><span class="import-path" title="{{ f.rel_path }}">{{ f.rel_path }}</span></td>
+                <td class="import-nowrap">{{ f.episode_label }}</td>
+                <td class="import-nowrap">{{ f.quality_label }}</td>
+                <td class="import-nowrap">{{ f.size }}</td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endif %}
+
+{% include "partials/system/import_confirm.html" %}
+{% endif %}
+
+</div>{# /.tabbed-content #}
+</div>{# /.tabbed-layout #}
+</div>{# /.tabbed-page #}
+{% endblock %}
+
+{% block page_js %}<script src="/static/js/import.js" defer></script>{% endblock %}

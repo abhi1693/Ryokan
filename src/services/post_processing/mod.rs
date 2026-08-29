@@ -8,8 +8,9 @@ use crate::models::{
     config, episode_tags, grabbed_torrents, local_metadata, metadata_cache, series,
 };
 use crate::services::download_client::DownloadClient;
+use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
-use crate::services::{logger, media, nfo};
+use crate::services::{logger, media, naming, nfo};
 
 mod artwork_copy;
 mod state;
@@ -107,6 +108,16 @@ fn resolve_episode(
     })
 }
 
+/// Resolved batch plan from [`validate_batch_episode_map`].
+#[derive(Debug, Default)]
+pub(crate) struct BatchPlan {
+    /// File index → destination slot for every file the loop imports.
+    pub(crate) slots: HashMap<usize, ResolvedEpisode>,
+    /// File index → index of the higher-version sibling that won the
+    /// same slot (issue #204). The loop skips these with an info log.
+    pub(crate) superseded: HashMap<usize, usize>,
+}
+
 /// Validate every wanted video in a batch before the import loop performs
 /// upgrades or file operations. Inputs carry the exact route and series
 /// cumulative offset used by execution, and the resolved plan returned here is
@@ -118,23 +129,35 @@ fn resolve_episode(
 /// to `None` by design, and an excluded file moves nothing, so skipping is
 /// non-destructive. (The import loop re-derives the same verdict for files
 /// absent from the plan and logs a per-file warning with series context.)
-/// Two files resolving to the same destination slot still fail the whole
-/// batch before any mutation — that ambiguity has no safe per-file answer,
-/// and importing either file could destroy the other.
+///
+/// Two files resolving to the same destination slot are compared by release
+/// version (issue #204): `E05` + `E05v2` keeps the v2 and lists the v1 under
+/// `superseded`, since a group re-releasing one episode inside its own pack
+/// is routine. Candidates that tie on version (true duplicates, or a
+/// mis-parse) still fail the whole batch before any mutation — that
+/// ambiguity has no safe per-file answer, and importing either file could
+/// destroy the other.
 pub(crate) fn validate_batch_episode_map(
     files: &[(usize, i64, Option<i32>, i32, String)],
-) -> Result<HashMap<usize, ResolvedEpisode>, String> {
-    let mut destinations: HashMap<(i64, i32), &str> = HashMap::new();
-    let mut plan = HashMap::new();
+) -> Result<BatchPlan, String> {
+    // (series, episode) → candidates in file order. BTreeMap so the
+    // error names a deterministic slot when several collide.
+    struct Candidate<'a> {
+        file_idx: usize,
+        version: u32,
+        name: &'a str,
+    }
+    let mut by_slot: std::collections::BTreeMap<(i64, i32), Vec<Candidate<'_>>> =
+        std::collections::BTreeMap::new();
+    let mut resolved_by_idx: HashMap<usize, ResolvedEpisode> = HashMap::new();
 
     for (file_idx, series_id, route_offset, cumulative_prior_episodes, name) in files {
         let filename = Path::new(name)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or(name);
-        let Some((parsed_season, raw_episode)) =
-            media::parse_episode_number(&filename.to_lowercase())
-        else {
+        let lower = filename.to_lowercase();
+        let Some((parsed_season, raw_episode)) = media::parse_episode_number(&lower) else {
             continue;
         };
         let Ok(resolved) = resolve_episode(
@@ -145,14 +168,37 @@ pub(crate) fn validate_batch_episode_map(
         ) else {
             continue;
         };
+        // No version token reads as v1 so `E05` + `E05v2` compare 1 vs 2.
+        let version = media::parse_release_version(&lower).unwrap_or(1);
+        by_slot
+            .entry((*series_id, resolved.episode))
+            .or_default()
+            .push(Candidate {
+                file_idx: *file_idx,
+                version,
+                name: filename,
+            });
+        resolved_by_idx.insert(*file_idx, resolved);
+    }
 
-        if let Some(previous) = destinations.insert((*series_id, resolved.episode), filename) {
-            return Err(format!(
-                "batch preflight mapped both '{}' and '{}' to series {} episode {}; no files were changed",
-                previous, filename, series_id, resolved.episode
-            ));
+    let mut plan = BatchPlan::default();
+    for ((series_id, episode), mut candidates) in by_slot {
+        if candidates.len() > 1 {
+            // Highest version first; file order breaks ties so the
+            // error below names the same pair on every run.
+            candidates.sort_by(|a, b| b.version.cmp(&a.version).then(a.file_idx.cmp(&b.file_idx)));
+            if candidates[0].version == candidates[1].version {
+                return Err(format!(
+                    "batch preflight mapped both '{}' and '{}' to series {} episode {}; no files were changed",
+                    candidates[0].name, candidates[1].name, series_id, episode
+                ));
+            }
         }
-        plan.insert(*file_idx, resolved);
+        let winner_idx = candidates[0].file_idx;
+        plan.slots.insert(winner_idx, resolved_by_idx[&winner_idx]);
+        for loser in candidates.into_iter().skip(1) {
+            plan.superseded.insert(loser.file_idx, winner_idx);
+        }
     }
 
     Ok(plan)
@@ -312,11 +358,6 @@ pub(crate) fn walk_video_files(root: &Path) -> Vec<crate::services::download_cli
     out
 }
 
-/// Replace filesystem-unsafe characters in a filename component.
-pub(crate) fn sanitize_filename(s: &str) -> String {
-    media::sanitize_folder_name(s)
-}
-
 /// True when `a` and `b` resolve to the same inode (same device + same
 /// inode number). Used by [`do_file_op`] to detect "src and dst already
 /// point at the same bytes" cases — a re-import on top of a previously
@@ -335,7 +376,7 @@ pub(crate) fn sanitize_filename(s: &str) -> String {
 /// primary target) and the path-identity check is sufficient for the
 /// catastrophic-data-loss scenario.
 #[cfg(unix)]
-fn files_share_inode(a: &Path, b: &Path) -> bool {
+pub(crate) fn files_share_inode(a: &Path, b: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(a), std::fs::metadata(b)) {
         (Ok(am), Ok(bm)) => am.dev() == bm.dev() && am.ino() == bm.ino(),
@@ -344,7 +385,7 @@ fn files_share_inode(a: &Path, b: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn files_share_inode(a: &Path, b: &Path) -> bool {
+pub(crate) fn files_share_inode(a: &Path, b: &Path) -> bool {
     a == b
 }
 
@@ -435,6 +476,111 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
     .map_err(|e| std::io::Error::other(format!("join error: {}", e)))?
 }
 
+/// Sibling temp name an upgrade lands at before the swap (issue #202):
+/// `.<basename>.ryokan-new` in the same directory as `dest`, so the
+/// final step is an atomic rename. The leading dot matters: retiring
+/// the old file goes through `recycle::recycle`, whose companion sweep
+/// takes everything prefixed `<stem>.`, and a `<dest>.ryokan-new` name
+/// would be swept away with the file it is about to replace. Not a
+/// video extension, so library scans ignore a leftover from a crash
+/// mid-swap; the next upgrade of the same slot lists it with the old
+/// files and retires it.
+pub(crate) fn staging_path(dest: &Path) -> PathBuf {
+    let mut name = std::ffi::OsString::from(".");
+    name.push(dest.file_name().unwrap_or_default());
+    name.push(".ryokan-new");
+    dest.with_file_name(name)
+}
+
+/// Undo a staged placement after the old file could not be retired
+/// (issue #202). Hardlink / copy modes still have the source, so the
+/// staged file is simply removed. Move mode has already consumed the
+/// source; the staged file is moved back so a retry sees the original
+/// layout, and if even that fails the staged path is named in the log
+/// so the file is recoverable by hand.
+async fn unstage_upgrade(db: &sqlx::SqlitePool, mode: &str, landing: &Path, src: &Path) {
+    let outcome = if mode == "move" {
+        do_file_op("move", landing, src).await
+    } else {
+        tokio::fs::remove_file(landing).await
+    };
+    if let Err(e) = outcome {
+        logger::error(
+            db,
+            LogCategory::PostProcess,
+            &format!(
+                "Could not undo the staged upgrade file {}",
+                landing.display()
+            ),
+            &e.to_string(),
+        )
+        .await;
+    }
+}
+
+/// Build the naming context for one episode (#124). Quality and group
+/// come from the grab-time `episode_quality_tags` row when present
+/// (manual overrides included), otherwise from a filename-only pass
+/// over the source name; both are the same pre-download signals the
+/// grab itself was scored on.
+fn episode_name_context(
+    ctx: &SeriesImportCtx,
+    ep_num: i32,
+    ep_title: &str,
+    source_name: &str,
+    ext: &str,
+) -> naming::NameContext {
+    let tag = ctx.existing_tags.get(&ep_num);
+    let (resolution, source_label, group) = match tag {
+        Some(t) if !t.source.is_empty() || !t.resolution.is_empty() => (
+            if t.resolution.eq_ignore_ascii_case("unknown") {
+                String::new()
+            } else {
+                t.resolution.clone()
+            },
+            naming::quality_source_label(&t.source, t.is_remux, &t.web_kind),
+            t.release_group.clone(),
+        ),
+        _ => {
+            let c = source::classify_release_sync(source_name, None);
+            let resolution = match c.resolution {
+                crate::services::source::Resolution::Unknown => String::new(),
+                r => r.as_str().to_string(),
+            };
+            let group = tag
+                .map(|t| t.release_group.clone())
+                .filter(|g| !g.is_empty())
+                .or_else(|| {
+                    crate::services::source_filename::classify_filename(source_name).release_group
+                })
+                .unwrap_or_default();
+            (
+                resolution,
+                naming::quality_source_label(c.source.as_str(), c.is_remux, c.web_kind.as_str()),
+                group,
+            )
+        }
+    };
+    let group = if group.is_empty() {
+        crate::services::source_filename::classify_filename(source_name)
+            .release_group
+            .unwrap_or_default()
+    } else {
+        group
+    };
+    naming::NameContext {
+        series_title: ctx.series_title.clone(),
+        series_year: ctx.series.season_year,
+        season_number: 1,
+        episode_number: ep_num,
+        episode_title: ep_title.to_string(),
+        quality_resolution: resolution,
+        quality_source: source_label,
+        release_group: group,
+        ext: ext.to_string(),
+    }
+}
+
 struct SeriesImportCtx {
     series: series::Series,
     folder_name: String,
@@ -472,15 +618,20 @@ async fn load_series_import_ctx(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("series {} not found", series_id))?;
 
-    // Auto-generate folder_name from the best title if it was never set.
+    // Auto-generate folder_name from the series-folder template (#124)
+    // if it was never set.
     let folder_name = if series.folder_name.is_empty() {
-        let generated = media::sanitize_folder_name(&nfo::best_title(&series));
-        if generated.is_empty() {
+        if nfo::best_title(&series).trim().is_empty() {
             return Err(format!(
                 "series '{}' has no usable title for folder name",
                 series.title
             ));
         }
+        let generated = naming::series_folder(
+            &cfg.series_folder_format,
+            &cfg.title_language,
+            &naming::SeriesNames::from_series(&series),
+        );
         // Persist it so future imports skip this path.
         let _ = series::update_folder(&state.db, series.id, &generated).await;
         generated
@@ -496,7 +647,12 @@ async fn load_series_import_ctx(
     let series_title = nfo::title_for_preference(&series, &cfg.title_language);
     let season_dir = Path::new(&cfg.media_root)
         .join(&folder_name)
-        .join(format!("Season {:02}", 1_i32));
+        .join(naming::season_folder(
+            &cfg.season_folder_format,
+            &cfg.title_language,
+            &naming::SeriesNames::from_series(&series),
+            1,
+        ));
 
     {
         let season_dir = season_dir.clone();
@@ -867,7 +1023,7 @@ async fn import_torrent(
         }
         validate_batch_episode_map(&batch_files)?
     } else {
-        HashMap::new()
+        BatchPlan::default()
     };
 
     // Lazily-loaded per-series context cache. The single-series case
@@ -1051,7 +1207,30 @@ async fn import_torrent(
         // here, landing in the warn-and-continue arms below. Singles use
         // the same resolver, retaining the legacy first-episode fallback
         // only when exactly one video exists.
-        let resolved = if let Some(resolved) = batch_episode_plan.get(file_idx) {
+        // Issue #204: a lower-version sibling of the file that won the
+        // same slot in the batch preflight. Nothing to import; the
+        // higher version lands instead.
+        if let Some(winner) = batch_episode_plan.superseded.get(file_idx) {
+            let winner_name = video_files
+                .iter()
+                .find(|(idx, _)| idx == winner)
+                .and_then(|(_, f)| Path::new(&f.name).file_name())
+                .and_then(|n| n.to_str())
+                .unwrap_or("a higher version");
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Skipping '{}': superseded by '{}' in the same batch",
+                    filename_only, winner_name
+                ),
+                &format!("series={}", ctx.series.title),
+            )
+            .await;
+            continue;
+        }
+
+        let resolved = if let Some(resolved) = batch_episode_plan.slots.get(file_idx) {
             *resolved
         } else {
             let parsed = media::parse_episode_number(&filename_only.to_lowercase());
@@ -1142,38 +1321,42 @@ async fn import_torrent(
             .unwrap_or("mkv");
 
         let season = 1_i32;
-        let dest_stem = if ep_title.is_empty() {
-            format!(
-                "{} - S{:02}E{:02}",
-                sanitize_filename(&ctx.series_title),
-                season,
-                ep_num
-            )
-        } else {
-            format!(
-                "{} - S{:02}E{:02} - {}",
-                sanitize_filename(&ctx.series_title),
-                season,
-                ep_num,
-                sanitize_filename(&ep_title)
-            )
-        };
 
-        let dest_video = ctx.season_dir.join(format!("{}.{}", dest_stem, ext));
-        let dest_nfo = ctx.season_dir.join(format!("{}.nfo", dest_stem));
+        // Destination name from the episode-file template (#124). The
+        // quality and group tokens read the grab-time tag row when there
+        // is one (it may carry a manual override), else a filename-only
+        // classification of the source; the post-download reclassify
+        // below still runs on the landed file, it just doesn't rename.
+        let name_ctx = episode_name_context(ctx, ep_num, &ep_title, filename_only, ext);
+        let episode_name = naming::episode_file(&cfg.episode_file_format, &name_ctx);
+        if episode_name.truncated {
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Shortened the file name for S{:02}E{:02} of '{}' to fit the filesystem limit",
+                    season, ep_num, ctx.series.title
+                ),
+                &episode_name.file_name,
+            )
+            .await;
+        }
+        let dest_video = ctx.season_dir.join(&episode_name.file_name);
+        let dest_nfo = ctx.season_dir.join(format!("{}.nfo", episode_name.stem));
 
-        // Check for existing files with the same SxxExx tag (any extension).
-        // Matching by episode tag instead of full stem handles cases where the
-        // episode title changed in AniList between the original grab and the
-        // upgrade (e.g. a translated title was added later).
-        let ep_tag = format!("S{:02}E{:02}", season, ep_num);
+        // Existing files for this episode slot (any extension). Matched
+        // by parsing each name back through `parse_episode_number`
+        // rather than by a fixed `SxxExx` substring, so the check works
+        // for every template the validator accepts (it requires the
+        // sample name to parse back) and still catches files named under
+        // an earlier template or an episode title that changed between
+        // grabs.
         // Walk the season directory off the runtime — a big season pack on
         // an NFS mount can make the sync read_dir/stat calls block for
         // hundreds of ms. The filter logic is cheap CPU, so we also move
         // it into the spawned task.
         let existing_for_ep: Vec<PathBuf> = {
             let season_dir = ctx.season_dir.clone();
-            let ep_tag = ep_tag.clone();
             tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
                 std::fs::read_dir(&season_dir)
                     .into_iter()
@@ -1181,14 +1364,15 @@ async fn import_torrent(
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
                     .filter(|p| {
-                        p.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.contains(&ep_tag))
-                            .unwrap_or(false)
-                            && p.extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e != "nfo")
-                                .unwrap_or(false)
+                        let is_nfo = p
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("nfo"));
+                        !is_nfo
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .and_then(|n| media::parse_episode_number(&n.to_lowercase()))
+                                .is_some_and(|(s, e)| e == ep_num && s.is_none_or(|s| s == season))
                     })
                     .collect()
             })
@@ -1196,7 +1380,27 @@ async fn import_torrent(
             .unwrap_or_default()
         };
 
-        if !existing_for_ep.is_empty() {
+        // Issue #202: on an upgrade, land the new file beside the
+        // destination FIRST and only then retire the old one. The
+        // previous order (recycle old, delete old torrent, then place)
+        // left the user with no old file and no old torrent data when
+        // the placement failed (cross-fs copy interrupted, disk full,
+        // permissions), and with no recycle bin configured that loss
+        // was permanent. Staging at `.<basename>.ryokan-new` makes the
+        // failure mode "nothing changed": hardlink mode pays nothing
+        // extra, copy / move pay the same cost they always did, just
+        // before the old file is touched. The swap itself is a
+        // same-directory rename, and the old torrent leaves the client
+        // only after the swap.
+        let is_upgrade = !existing_for_ep.is_empty();
+        let landing = if is_upgrade {
+            staging_path(&dest_video)
+        } else {
+            dest_video.clone()
+        };
+        let placed = do_file_op(&cfg.post_processing_mode, &src, &landing).await;
+
+        if placed.is_ok() && is_upgrade {
             // Check if this is an upgrade replacing a previously imported file.
             // If an older imported grab exists for this episode, this is an
             // upgrade — remove the old file and old torrent, then import the new one.
@@ -1252,11 +1456,26 @@ async fn import_torrent(
                 .await;
             }
 
-            // Remove old file(s) and their NFOs to make way for the upgrade.
-            // unlinks are wrapped in tokio::fs so a slow filesystem doesn't
-            // stall the runtime during the upgrade path.
+            // Retire the old file(s) to make way for the upgrade. Recycle
+            // bin (#123): each old video moves into the bin with its
+            // companions (the old NFO's stem may differ from the new
+            // dest_stem when the episode title changed between grabs, so
+            // the companion sweep keyed on the old stem is what catches
+            // it); with no bin configured this is the permanent unlink
+            // the upgrade path always did.
+            let mut retire_failed = false;
             for old_file in &existing_for_ep {
-                if let Err(e) = tokio::fs::remove_file(old_file).await {
+                if let Err(e) = recycle::recycle(
+                    &state.db,
+                    &cfg.recycle_bin_path,
+                    RecycleKind::Episode,
+                    Some(target_series_id),
+                    &ctx.series.title,
+                    old_file,
+                )
+                .await
+                {
+                    retire_failed = true;
                     logger::error(
                         &state.db,
                         LogCategory::PostProcess,
@@ -1264,16 +1483,74 @@ async fn import_torrent(
                             "Failed to remove old file for upgrade: {}",
                             old_file.display()
                         ),
-                        &e.to_string(),
+                        &e,
                     )
                     .await;
                 }
-                // Remove corresponding NFO (old stem may differ from new dest_stem
-                // if the episode title changed between grabs).
-                if let Some(stem) = old_file.file_stem().and_then(|s| s.to_str()) {
-                    let _ =
-                        tokio::fs::remove_file(ctx.season_dir.join(format!("{}.nfo", stem))).await;
-                }
+            }
+            // A refused recycle (bin configured but not writable) must not
+            // turn into an overwrite: the swap below would replace the
+            // file the bin was supposed to keep. Undo the staging, skip
+            // this episode; the grab stays partially imported and the log
+            // names the reason.
+            if retire_failed {
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Upgrade for S{:02}E{:02} of '{}' skipped: the old file could not be recycled",
+                        season, ep_num, ctx.series.title
+                    ),
+                    &grab.torrent_name,
+                )
+                .await;
+                unstage_upgrade(&state.db, &cfg.post_processing_mode, &landing, &src).await;
+                // Issue #118: a stalled upgrade is an import failure the
+                // user wants to hear about, same as a failed placement.
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    "the old file could not be recycled, so the upgrade was skipped",
+                )
+                .await;
+                failed_episodes.push(ep_num);
+                continue;
+            }
+
+            // Swap the staged file into place. Same directory, so this
+            // is a rename; the old files are retired, so the
+            // destination is free. A failure here is exotic (the
+            // directory changed under us) and leaves the new file at
+            // the staged path, named in the log.
+            if let Err(e) = tokio::fs::rename(&landing, &dest_video).await {
+                logger::error(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!(
+                        "Upgrade for S{:02}E{:02} of '{}' stalled: the new file is staged at {} but could not be renamed into place",
+                        season,
+                        ep_num,
+                        ctx.series.title,
+                        landing.display()
+                    ),
+                    &e.to_string(),
+                )
+                .await;
+                crate::services::notifications::emit_import_failed(
+                    state,
+                    target_series_id,
+                    Some(ep_num),
+                    &src.display().to_string(),
+                    &format!(
+                        "the new file is staged at {} but could not be renamed into place: {e}",
+                        landing.display()
+                    ),
+                )
+                .await;
+                failed_episodes.push(ep_num);
+                continue;
             }
 
             logger::info(
@@ -1364,7 +1641,7 @@ async fn import_torrent(
                 episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
         }
 
-        match do_file_op(&cfg.post_processing_mode, &src, &dest_video).await {
+        match placed {
             Ok(()) => {
                 let _ = nfo::write_episode_nfo(
                     &dest_nfo,
@@ -1602,6 +1879,17 @@ async fn import_torrent(
                     &e.to_string(),
                 )
                 .await;
+                // A copy that died part-way (disk full, the hardlink
+                // fallback's `fs::copy`) leaves a partial file at the
+                // landing path: the hidden `.ryokan-new` on an upgrade,
+                // the destination itself on a first import. Neither is
+                // a finished file; drop it so the slot reads as empty on
+                // the next pass. Best effort: the same-inode guard means
+                // a landing that is the source's own link never gets
+                // here with `Err`.
+                if landing.is_file() && !files_share_inode(&src, &landing) {
+                    let _ = tokio::fs::remove_file(&landing).await;
+                }
                 failed_episodes.push(ep_num);
             }
         }
@@ -1767,6 +2055,92 @@ async fn import_torrent(
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
     }
+}
+
+/// Series-level sidecars for one series: poster / banner / backdrop
+/// copies from the artwork cache, then `tvshow.nfo` and `season.nfo`
+/// with `<art>` blocks gated on what actually landed. This is the tail
+/// of the per-series import loop above, exposed on its own so the
+/// manual-import job (#122) can finish a series it just filled the
+/// same way a post-processed grab would. Best-effort throughout: a
+/// missing cached detail still writes the minimal series-row NFO.
+pub async fn write_series_sidecars(state: &AppState, series_id: i64) -> Result<(), String> {
+    let cfg = config::get_config(&state.db)
+        .await
+        .map_err(|e| format!("config read failed: {e}"))?
+        .ok_or_else(|| "config row missing".to_string())?;
+    if cfg.media_root.trim().is_empty() {
+        return Err("media root is not set".to_string());
+    }
+    let series_row = series::get_by_id(&state.db, series_id)
+        .await
+        .map_err(|e| format!("series lookup failed: {e}"))?
+        .ok_or_else(|| format!("series {series_id} not found"))?;
+    if series_row.folder_name.is_empty() {
+        return Err(format!("series {series_id} has no folder name"));
+    }
+    let cached_detail = metadata_cache::get_by_series_id(&state.db, series_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|c| c.detail);
+
+    let series_root = Path::new(cfg.media_root.trim()).join(&series_row.folder_name);
+    let season_dir = series_root.join(format!("Season {:02}", 1_i32));
+    {
+        let season_dir = season_dir.clone();
+        tokio::task::spawn_blocking(move || std::fs::create_dir_all(&season_dir))
+            .await
+            .map_err(|e| format!("create season dir join: {e}"))?
+            .map_err(|e| format!("create season dir: {e}"))?;
+    }
+
+    let poster_dest = series_root.join("poster.jpg");
+    let season_poster_dest = season_dir.join("folder.jpg");
+    let banner_dest = series_root.join("banner.jpg");
+    let backdrop_dest = series_root.join("backdrop.jpg");
+    let cover_source = cached_detail.as_ref().map(|d| d.cover_url.as_str());
+    let banner_source = cached_detail.as_ref().map(|d| d.banner_url.as_str());
+
+    let poster_outcome = copy_series_and_season_poster(
+        &state.db,
+        series_id,
+        cover_source,
+        &poster_dest,
+        &season_poster_dest,
+    )
+    .await;
+    let banner_outcome = copy_series_banner_and_backdrop(
+        &state.db,
+        series_id,
+        banner_source,
+        &banner_dest,
+        &backdrop_dest,
+    )
+    .await;
+
+    nfo::write_series_nfo(
+        &series_root.join("tvshow.nfo"),
+        &series_row,
+        cached_detail.as_ref(),
+        &cfg.title_language,
+        poster_outcome.series_root,
+        banner_outcome.series_banner,
+        banner_outcome.series_backdrop,
+    )
+    .await
+    .map_err(|e| format!("tvshow.nfo: {e}"))?;
+    nfo::write_season_nfo(
+        &season_dir.join("season.nfo"),
+        1,
+        &series_row,
+        cached_detail.as_ref(),
+        &cfg.title_language,
+        poster_outcome.season_folder,
+    )
+    .await
+    .map_err(|e| format!("season.nfo: {e}"))?;
+    Ok(())
 }
 
 /// Run one post-processing cycle. Called by the background task every minute.

@@ -719,14 +719,18 @@
             {% endif %}
             <ul class="remove-series-consequences">
                 {% if on_disk_count > 0 %}
-                <li>The series folder and its <strong>{{ on_disk_count }} episode file{% if on_disk_count != 1 %}s{% endif %}</strong>{% if !size_display.is_empty() %} (<strong>{{ size_display }}</strong>){% endif %} will be deleted from disk.</li>
+                <li>The series folder and its <strong>{{ on_disk_count }} episode file{% if on_disk_count != 1 %}s{% endif %}</strong>{% if !size_display.is_empty() %} (<strong>{{ size_display }}</strong>){% endif %} {% if recycle_enabled %}will move to the recycle bin{% else %}will be deleted from disk{% endif %}.</li>
                 {% else %}
-                <li>The series folder will be deleted from disk.</li>
+                <li>The series folder {% if recycle_enabled %}will move to the recycle bin{% else %}will be deleted from disk{% endif %}.</li>
                 {% endif %}
                 <li>Every torrent for this series will be removed from <strong>the download client</strong>.</li>
                 <li>Imported episodes and the <strong>Jellyfin</strong> folder will be gone.</li>
             </ul>
+            {% if recycle_enabled %}
+            <p class="remove-series-final-warning">Files can be restored from the <a href="/library/recycle">Recycle Bin</a> page until they are purged. The library entry itself is removed.</p>
+            {% else %}
             <p class="remove-series-final-warning">This cannot be undone.</p>
+            {% endif %}
         </div>
         <div class="modal-footer remove-series-footer">
             <button class="btn btn-secondary" type="button" id="remove-series-cancel">Cancel</button>
@@ -736,6 +740,7 @@
 </div>
 
 <div id="series-data" hidden
+    data-recycle-enabled="{% if recycle_enabled %}true{% else %}false{% endif %}"
     data-id="{{ route_id }}"
     data-title-romaji="{{ detail.title_romaji }}"
     data-title-english="{{ detail.title_english }}"

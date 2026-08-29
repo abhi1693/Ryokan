@@ -515,7 +515,7 @@ function confirmBulkMonitor() {
 //
 // Reused across all bulk actions; the `verb` argument is the user-
 // facing summary noun ("Monitor mode updated" / "Series deleted" / etc.).
-function renderBulkOutcome(outcome, verb) {
+function renderBulkOutcome(outcome, verb, action) {
     var ok = (outcome.succeeded || []).length;
     var bad = (outcome.failed || []).length;
     // Close any open bulk modal FIRST — the early-return below on
@@ -537,7 +537,7 @@ function renderBulkOutcome(outcome, verb) {
 
     if (bad === 0) {
         // All succeeded: toast + exit mode (which clears selection).
-        window.ryokanToast({ kind: 'success', title: verb, body: ok + ' succeeded', log: false, duration: 3000 });
+        window.ryokanToast({ kind: 'success', title: verb, body: ok + ' succeeded', log: false, duration: action ? 6000 : 3000, action: action });
         exitBulkSelectMode();
     } else if (ok === 0) {
         // All failed: keep mode open + selection intact so the user
@@ -701,7 +701,14 @@ function confirmBulkDelete() {
             var card = document.getElementById('series-' + id);
             if (card) card.remove();
         });
-        renderBulkOutcome(outcome, 'Removed from library');
+        // Recycle bin (#123): when files went to the bin, give the toast
+        // a way there.
+        var modal = document.getElementById('bulk-delete-modal');
+        var recycleOn = !!(modal && modal.dataset.recycleEnabled === 'true');
+        var action = (deleteFiles && recycleOn)
+            ? { label: 'View recycle bin', onClick: function () { window.location.href = '/library/recycle'; } }
+            : undefined;
+        renderBulkOutcome(outcome, 'Removed from library', action);
     })
     .catch(function (e) {
         if (confirmBtn) {

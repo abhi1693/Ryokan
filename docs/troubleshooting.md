@@ -88,3 +88,7 @@ Ryokan's migrations are idempotent by design (each `ALTER TABLE … ADD COLUMN` 
 ---
 
 *Last updated: 2026-05-07.*
+
+## I deleted an episode or series by accident
+
+If a recycle bin path is configured under Settings > General, nothing is gone yet: open the Library page and click **Recycle Bin**. Each deleted episode (with its NFO, subtitles, and thumbnail) or series folder is listed by the day it was deleted with a **Restore** button that puts it back exactly where it came from. Restoring a series folder brings the files back but not the library entry. Re-add the series from Search afterwards and Ryokan will pick the files up on disk. Entries purge automatically after the configured number of days (14 by default), so restore before then. If the path was empty at the time of the delete, the files were removed permanently. If the path was set but not writable, the delete was refused and the file is still where it was.
