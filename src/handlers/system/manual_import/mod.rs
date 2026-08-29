@@ -356,19 +356,26 @@ fn picker_rows(group: &manual_import::SeriesGroup, pref: &str) -> Vec<CandidateV
 struct RenderContext {
     media_root: String,
     title_pref: String,
+    series_folder_format: String,
+    season_folder_format: String,
     owned_folders: HashSet<String>,
     disk_folders: HashSet<String>,
 }
 
 async fn render_context(state: &AppState) -> RenderContext {
-    let cfg = config::get_config(&state.db).await.ok().flatten();
-    let media_root = cfg
-        .as_ref()
-        .map(|c| c.media_root.trim().to_string())
+    let cfg = config::get_config(&state.db)
+        .await
+        .ok()
+        .flatten()
         .unwrap_or_default();
-    let title_pref = cfg
-        .map(|c| c.title_language)
-        .unwrap_or_else(|| "english".to_string());
+    let media_root = cfg.media_root.trim().to_string();
+    let title_pref = if cfg.title_language.is_empty() {
+        "english".to_string()
+    } else {
+        cfg.title_language
+    };
+    let series_folder_format = cfg.series_folder_format;
+    let season_folder_format = cfg.season_folder_format;
     let owned_folders: HashSet<String> = series::get_all(&state.db)
         .await
         .unwrap_or_default()
@@ -381,6 +388,8 @@ async fn render_context(state: &AppState) -> RenderContext {
     RenderContext {
         media_root,
         title_pref,
+        series_folder_format,
+        season_folder_format,
         owned_folders,
         disk_folders,
     }
@@ -393,6 +402,8 @@ impl RenderContext {
             owned_folders: &self.owned_folders,
             disk_folders: &self.disk_folders,
             title_pref: &self.title_pref,
+            series_folder_format: &self.series_folder_format,
+            season_folder_format: &self.season_folder_format,
         }
     }
 }

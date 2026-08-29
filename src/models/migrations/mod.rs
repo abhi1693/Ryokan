@@ -2748,6 +2748,46 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
         .await
         .ok();
 
+    // Naming templates (#124). Defaults are the pre-#124 hardcoded
+    // layout, so existing installs see no change. Built with format!
+    // so the column default can never drift from the constant.
+    for (column, default) in [
+        (
+            "series_folder_format",
+            crate::services::naming::DEFAULT_SERIES_FOLDER_FORMAT,
+        ),
+        (
+            "season_folder_format",
+            crate::services::naming::DEFAULT_SEASON_FOLDER_FORMAT,
+        ),
+        (
+            "episode_file_format",
+            crate::services::naming::DEFAULT_EPISODE_FILE_FORMAT,
+        ),
+    ] {
+        // A default containing an apostrophe would otherwise break
+        // the statement, and `.ok()` would hide that until every
+        // `get_config` SELECT failed on the missing column.
+        let default = default.replace('\'', "''");
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "ALTER TABLE config ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'"
+        )))
+        .execute(db)
+        .await
+        .ok();
+    }
+
+    // Scheduled backups (#126). Disabled by default: users with their
+    // own backup pipeline for the data dir shouldn't get a second copy.
+    for sql in [
+        "ALTER TABLE config ADD COLUMN backup_schedule TEXT NOT NULL DEFAULT 'disabled'",
+        "ALTER TABLE config ADD COLUMN backup_directory TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE config ADD COLUMN backup_retention_count INTEGER NOT NULL DEFAULT 7",
+        "ALTER TABLE config ADD COLUMN backup_include_artwork INTEGER NOT NULL DEFAULT 0",
+    ] {
+        sqlx::query(sql).execute(db).await.ok();
+    }
+
     Ok(())
 }
 

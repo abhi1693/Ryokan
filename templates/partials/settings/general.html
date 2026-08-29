@@ -50,6 +50,70 @@
             </div>
         </fieldset>
 
+        <fieldset id="naming-settings">
+            <legend>File naming</legend>
+            {% for f in naming.fields %}
+            <div class="form-group naming-field">
+                <label for="{{ f.input_name }}">{{ f.label }}</label>
+                <div class="naming-input-row">
+                    <input type="text" name="{{ f.input_name }}" id="{{ f.input_name }}" value="{{ f.value }}" data-naming-default="{{ f.default }}" spellcheck="false" autocomplete="off">
+                    <button type="button" class="btn btn-secondary naming-reset" data-naming-reset="{{ f.input_name }}">Reset</button>
+                </div>
+                <div class="naming-preview{% if f.error.is_some() %} naming-preview-error{% endif %}" data-naming-preview="{{ f.input_name }}">{% if let Some(e) = f.error %}{{ e }}{% else %}{{ f.preview }}{% endif %}</div>
+                <span class="form-hint">{{ f.hint }}</span>
+            </div>
+            {% endfor %}
+            <div class="form-group">
+                <label>Sample</label>
+                <div class="naming-path" data-naming-path>{{ naming.path_preview }}</div>
+                {% if let Some(w) = naming.path_warning %}
+                <span class="form-hint naming-warning" data-naming-warning>{{ w }}</span>
+                {% else %}
+                <span class="form-hint naming-warning" data-naming-warning hidden></span>
+                {% endif %}
+            </div>
+            <details class="naming-tokens">
+                <summary>Tokens</summary>
+                <table class="naming-token-table">
+                    <tbody>
+                    {% for t in naming.tokens %}
+                        <tr><td><code>{{ t.token }}</code></td><td>{{ t.what }}</td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </details>
+        </fieldset>
+
+        <fieldset>
+            <legend>Backups</legend>
+            <div class="form-group">
+                <label for="backup_schedule">Scheduled backups</label>
+                <select name="backup_schedule" id="backup_schedule">
+                    <option value="disabled" {% if config.backup_schedule == "disabled" %}selected{% endif %}>Off</option>
+                    <option value="daily" {% if config.backup_schedule == "daily" %}selected{% endif %}>Daily</option>
+                    <option value="weekly" {% if config.backup_schedule == "weekly" %}selected{% endif %}>Weekly</option>
+                </select>
+                <span class="form-hint">Writes a backup of the database and encryption key on that cadence. Download one at any time from <a href="/system?tab=backup">System → Backup</a>, which is also where restores happen.</span>
+            </div>
+            <div class="form-group">
+                <label for="backup_directory">Backup folder</label>
+                <input type="text" name="backup_directory" id="backup_directory" value="{{ config.backup_directory }}" placeholder="/data/backups">
+                <span class="form-hint">Empty keeps backups in a <code>backups</code> folder next to the database. The value is the path inside Ryokan's container. A folder on another disk or a mounted share is the point of a backup.</span>
+            </div>
+            <div class="form-group">
+                <label for="backup_retention_count">Backups to keep</label>
+                <input type="number" min="1" max="365" name="backup_retention_count" id="backup_retention_count" value="{{ config.backup_retention_count }}">
+                <span class="form-hint">Older scheduled backups are deleted after each new one. Backups taken automatically before a restore are never deleted by this.</span>
+            </div>
+            <div class="form-group">
+                <label class="checkbox-row">
+                    <input type="checkbox" name="backup_include_artwork" id="backup_include_artwork" {% if config.backup_include_artwork %}checked{% endif %}>
+                    <span>Include cached artwork in scheduled backups</span>
+                </label>
+                <span class="form-hint">Artwork is downloaded again from the metadata providers when missing, so this only saves time after a restore at the cost of a much larger file.</span>
+            </div>
+        </fieldset>
+
         <fieldset>
             <legend>Recycle Bin</legend>
             <div class="form-group">

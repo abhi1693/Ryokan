@@ -296,6 +296,13 @@ anitomy = "0.2"
 # recursion loses all four.
 walkdir = "2"
 
+# Backup / restore (#126). `tar` + `flate2` (miniz_oxide backend, pure
+# Rust) build and read the `.tar.gz` backups; `nix` gives a safe
+# `statvfs` for the free-disk-space precheck before a backup runs.
+tar = "0.4"
+flate2 = "1"
+nix = { version = "0.30", features = ["fs"] }
+
 # fantoccini: WebDriver client for browser-driven e2e tests of HTMX
 # UI flows. `optional = true` + the `browser-e2e` feature gate means
 # the dep only enters the build graph when explicitly opted in —

@@ -605,3 +605,116 @@ async fn live_batch_import_waits_for_incomplete_wanted_video() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// ── Naming templates (issue #124) ───────────────────────────────────
+
+#[tokio::test]
+async fn live_import_names_files_from_the_templates() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("naming");
+
+    let name = "[SubsPlease] Show - 05 (1080p WEB-DL) [ABCD1234].mkv";
+    std::fs::write(downloads.join(name), b"bytes").expect("write source");
+
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    sqlx::query(
+        "UPDATE config SET season_folder_format = 'S{season.number:00}', \
+         episode_file_format = '[{group}] {series.title} - {episode.number:00} [{quality.full}]{ext}' \
+         WHERE id = 1",
+    )
+    .execute(&db)
+    .await
+    .expect("set templates");
+    let series_id = seed_series(&db, 9009, "Show").await;
+    let grab_id =
+        grabbed_torrents::record_grab(&db, "livehash-naming", name, series_id, &[5], false)
+            .await
+            .unwrap()
+            .unwrap();
+
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("livehash-naming", &downloads),
+        vec![complete_file(name)],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client));
+
+    post_processing::run_once(&state).await;
+
+    let season_dir = media.join("Show").join("S01");
+    assert!(season_dir.is_dir(), "season folder follows its template");
+    assert_eq!(
+        collect_files(&media, "mkv"),
+        vec!["[SubsPlease] Show - 05 [1080p WEB-DL].mkv".to_string()],
+        "group and quality tokens read the filename when no tag row exists"
+    );
+    assert!(
+        season_dir
+            .join("[SubsPlease] Show - 05 [1080p WEB-DL].nfo")
+            .is_file(),
+        "the NFO shares the rendered stem"
+    );
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn live_upgrade_finds_the_old_file_named_under_another_template() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("naming-upgrade");
+
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    let series_id = seed_series(&db, 9010, "Show").await;
+    // The library holds E05 under an older, dash-style template. The
+    // default template now names it `Show - S01E05.mkv`; the existing
+    // file must still be recognized as the slot's occupant.
+    let season_dir = media.join("Show").join("Season 01");
+    std::fs::create_dir_all(&season_dir).expect("season dir");
+    let old = season_dir.join("[Old] Show - 05 [720p].mkv");
+    std::fs::write(&old, b"old bytes").expect("old file");
+    seed_grabbed_torrent(
+        &db,
+        series_id,
+        "oldhash-naming",
+        "[Old] Show - 05 [720p]",
+        &[5],
+    )
+    .await;
+    sqlx::query("UPDATE grabbed_torrents SET state = 'imported' WHERE hash = 'oldhash-naming'")
+        .execute(&db)
+        .await
+        .unwrap();
+
+    std::fs::write(downloads.join("Show - 05v2 (1080p).mkv"), b"new bytes").expect("source");
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "livehash-naming-upgrade",
+        "Show - 05v2 (1080p)",
+        series_id,
+        &[5],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("livehash-naming-upgrade", &downloads),
+        vec![complete_file("Show - 05v2 (1080p).mkv")],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client.clone()));
+
+    post_processing::run_once(&state).await;
+
+    assert_eq!(
+        collect_files(&media, "mkv"),
+        vec!["Show - S01E05.mkv".to_string()],
+        "the old file is retired and the new one lands under the current template"
+    );
+    assert!(!old.exists());
+    assert_eq!(client.deleted.load(Ordering::SeqCst), 1);
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+
+    let _ = std::fs::remove_dir_all(&root);
+}

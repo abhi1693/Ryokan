@@ -69,7 +69,26 @@ Day-to-day knobs.
 - **Media Root Path**: where Ryokan imports completed downloads. The value is the path *inside* Ryokan's container. With the default compose, `/media/anime` maps to `/srv/media/anime` on the host.
 - **RSS Sync Interval (minutes)**: how often the background RSS poller runs. Default 15 minutes; minimum 1, maximum 60.
 - **File operation mode**: `hardlink` (default; keeps the torrent seeding by sharing the same inode between the download folder and the library), `copy`, or `move`. Hardlink automatically falls back to copy when the source and destination are on different filesystems (where hardlinks aren't possible).
-- **Preferred Title Language**: `romaji` / `english` / `native`. This is display-only. Scoring and search match across all three regardless of which one's preferred.
+- **Preferred Title Language**: `romaji` / `english` / `native`. Display-only for scoring and search, which match across all three regardless. It also picks the title the `{series.title}` naming token renders.
+- **File naming**: three templates decide where an import lands. **Series folder** (default `{series.title}`) applies once, when a series is added. Series already in your library keep their folder, so changing it never renames anything. **Season folder** (default `Season {season.number:00}`) and **Episode file** (default `{series.title} - S{season.number:00}E{episode.number:00} - {episode.title}{ext}`) apply to every import. Files already in the library keep their names. Each field shows a sample as you type, the combined path shows underneath, and **Reset** puts the default back. A token with no value (a show AniList has no episode titles for, a release with no group) drops out together with its brackets or separator, so `[{quality.full}]` never leaves an empty `[]` behind. The episode template must end with `{ext}` and include `{episode.number}`, and Ryokan checks that it can read the episode number back out of the sample name, because library scans and upgrades depend on that. Characters that are not allowed in file names (`/ \ : * ? " < > |`) become `_`. A name that would exceed the filesystem limit is shortened at the series title so the episode number and extension always survive. On Windows a warning appears when the sample path passes 260 characters.
+
+    | Token | Renders |
+    |---|---|
+    | `{series.title}` | Series title in your preferred title language |
+    | `{series.year}` | Premiere year, empty when unknown |
+    | `{season.number}` | Season number (always 1 today). `{season.number:00}` pads to `01` |
+    | `{episode.number}` | Episode number. `{episode.number:00}` pads to `01`, `{episode.number:000}` to `001` |
+    | `{episode.title}` | Episode title from metadata, empty when unknown |
+    | `{quality.full}` | Resolution and source together, like `1080p WEB-DL` or `1080p BluRay Remux` |
+    | `{quality.resolution}` | `1080p`, `720p`, ... |
+    | `{quality.source}` | `BluRay`, `BluRay Remux`, `WEB-DL`, `WEBRip`, `DVD`, `HDTV` |
+    | `{group}` | Release group, empty when unknown |
+    | `{ext}` | The file extension with its dot. The episode file template must end with it |
+
+    Quality and group come from the release Ryokan grabbed (the same signals it scored), so a manual quality override on an episode is honored. Renaming files already in the library to a new template is not part of this release.
+- **Scheduled backups**: off by default. Daily or weekly, Ryokan writes a backup of the database and encryption key (plus cached artwork if ticked) to the backup folder and keeps the newest N. Manual backups, the folder's contents, and restores live on [System → Backup](system.md#backup). Leave it off if you already back up the whole data folder some other way, but note that a plain file copy of `ryokan.db` taken while Ryokan runs can miss recent writes; the built-in backup does not.
+- **Backup folder**: empty keeps backups in a `backups` folder next to the database (`/data/backups` in Docker). The value is the path inside Ryokan's container. A folder on another disk or a mounted share is the point.
+- **Backups to keep**: older scheduled backups are deleted after each new one. Backups taken automatically before a restore are never pruned.
 - **Recycle bin path**: empty by default, which means deletes are permanent. Set it to a directory (inside the container, like the media root) and deleting an episode, removing a series with its files, or replacing a file during an upgrade moves the files there instead. Each entry keeps the video plus its `.nfo`, subtitles, and thumbnail, and the Library page's Recycle Bin view can restore or permanently delete it. Keep it on the same filesystem as the media root so the move is an instant rename that preserves seeding hardlinks. On a different filesystem Ryokan copies, verifies the size, then deletes. If the path is set but Ryokan cannot write to it, deletes are refused until you fix it or clear the path. Restore puts the files back and re-tags the episode, but a torrent that was removed from the download client at delete time is not re-added, and files that crossed filesystems come back with a new modification time. Clearing the path leaves anything already recycled where it is.
 - **Purge after (days)**: how long recycled items survive before the hourly cleanup task deletes them for good. Default 14. `0` keeps everything until you empty the bin manually.
 

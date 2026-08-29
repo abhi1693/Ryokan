@@ -722,6 +722,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None, // submit→false, seed=true
                 recycle_bin_path: "/submit/recycle/".to_string(), // seed=/seed/recycle; trailing slash trimmed
                 recycle_bin_age_days: 45,                         // seed=7
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -937,6 +944,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -973,6 +987,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1012,6 +1033,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1061,6 +1089,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1092,6 +1127,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1513,6 +1555,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         );
         let quality = settings_quality_submit(
@@ -1570,6 +1619,13 @@ mod non_htmx_path {
                 manual_search_auto_add: None,
                 recycle_bin_path: String::new(),
                 recycle_bin_age_days: 30,
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+                backup_schedule: String::new(),
+                backup_directory: String::new(),
+                backup_retention_count: 7,
+                backup_include_artwork: None,
             }),
         )
         .await
@@ -1578,6 +1634,220 @@ mod non_htmx_path {
         assert!(
             body.contains("No config row found"),
             "expected friendly first-run error in response body"
+        );
+    }
+}
+
+/// Issue #124: naming templates on the General tab.
+mod naming_templates {
+    use super::super::*;
+    use crate::services::naming::{
+        DEFAULT_EPISODE_FILE_FORMAT, DEFAULT_SEASON_FOLDER_FORMAT, DEFAULT_SERIES_FOLDER_FORMAT,
+    };
+    use crate::test_support::{build_test_app_state, in_memory_pool};
+    use axum::body::to_bytes;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use axum_htmx::HxRequest;
+
+    async fn body_string(resp: axum::response::Response) -> String {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.expect("body");
+        String::from_utf8(bytes.to_vec()).expect("utf8 body")
+    }
+
+    async fn seed_config(db: &sqlx::SqlitePool) {
+        config::save_config(db, &config::Config::default())
+            .await
+            .expect("seed config");
+    }
+
+    fn form(series: &str, season: &str, episode: &str) -> GeneralForm {
+        GeneralForm {
+            media_root: "/media".to_string(),
+            title_language: "english".to_string(),
+            rss_enabled: None,
+            rss_interval_minutes: 15,
+            disable_nyaa_rss: None,
+            post_processing_enabled: Some(String::new()),
+            post_processing_mode: "hardlink".to_string(),
+            search_on_monitoring_change: None,
+            manual_search_auto_add: None,
+            recycle_bin_path: String::new(),
+            recycle_bin_age_days: 14,
+            series_folder_format: series.to_string(),
+            season_folder_format: season.to_string(),
+            episode_file_format: episode.to_string(),
+            backup_schedule: String::new(),
+            backup_directory: String::new(),
+            backup_retention_count: 7,
+            backup_include_artwork: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_templates_round_trip_and_render_previews() {
+        let db = in_memory_pool().await;
+        seed_config(&db).await;
+        let state = build_test_app_state(db.clone(), None);
+        let resp = settings_general_submit(
+            State(state),
+            HxRequest(true),
+            axum::Form(form(
+                "{series.title} ({series.year})",
+                "S{season.number:00}",
+                "[{group}] {series.title} - {episode.number:00} [{quality.full}]{ext}",
+            )),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = body_string(resp).await;
+        assert!(body.contains("Settings saved."), "{body}");
+        assert!(
+            body.contains("[SubsPlease] Sousou no Frieren - 07 [1080p WEB-DL].mkv"),
+            "the saved form re-renders the sample under the episode field: {body}"
+        );
+        assert!(
+            body.contains("Sousou no Frieren (2023)/S01/[SubsPlease]"),
+            "{body}"
+        );
+        let saved = config::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(saved.series_folder_format, "{series.title} ({series.year})");
+        assert_eq!(saved.season_folder_format, "S{season.number:00}");
+        assert_eq!(
+            saved.episode_file_format,
+            "[{group}] {series.title} - {episode.number:00} [{quality.full}]{ext}"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_template_fields_store_the_defaults() {
+        let db = in_memory_pool().await;
+        seed_config(&db).await;
+        let state = build_test_app_state(db.clone(), None);
+        let _ = settings_general_submit(
+            State(state),
+            HxRequest(true),
+            axum::Form(form("", "  ", "")),
+        )
+        .await
+        .into_response();
+        let saved = config::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(saved.series_folder_format, DEFAULT_SERIES_FOLDER_FORMAT);
+        assert_eq!(saved.season_folder_format, DEFAULT_SEASON_FOLDER_FORMAT);
+        assert_eq!(saved.episode_file_format, DEFAULT_EPISODE_FILE_FORMAT);
+    }
+
+    #[tokio::test]
+    async fn invalid_template_is_rejected_without_saving_anything() {
+        let db = in_memory_pool().await;
+        seed_config(&db).await;
+        let state = build_test_app_state(db.clone(), None);
+        let mut f = form(
+            "{series.title}",
+            "Season {season.number:00}",
+            "{series.title} - {episode.number:00}",
+        );
+        f.media_root = "/changed".to_string();
+        let resp = settings_general_submit(State(state), HxRequest(true), axum::Form(f))
+            .await
+            .into_response();
+        let body = body_string(resp).await;
+        assert!(body.contains("must end with {ext}"), "{body}");
+        assert!(
+            body.contains("value=\"{series.title} - {episode.number:00}\""),
+            "the rejected input stays in the field for editing: {body}"
+        );
+        let saved = config::get_config(&db).await.unwrap().unwrap();
+        assert_eq!(
+            saved.media_root, "",
+            "nothing on the tab is saved when a template is rejected"
+        );
+        assert_eq!(saved.episode_file_format, DEFAULT_EPISODE_FILE_FORMAT);
+    }
+
+    #[tokio::test]
+    async fn preview_endpoint_reports_each_field_and_the_sample_path() {
+        let db = in_memory_pool().await;
+        seed_config(&db).await;
+        sqlx::query("UPDATE config SET media_root = '/srv/media/anime' WHERE id = 1")
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        let out = naming::naming_preview(
+            State(state.clone()),
+            axum::Json(naming::NamingPreviewRequest {
+                series_folder_format: "{series.title} ({series.year})".to_string(),
+                season_folder_format: String::new(),
+                episode_file_format: "{series.title} {episode.number}{ext}".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["fields"]["series_folder_format"]["ok"], true);
+        assert_eq!(
+            out["fields"]["series_folder_format"]["preview"],
+            "Sousou no Frieren (2023)"
+        );
+        assert_eq!(
+            out["fields"]["season_folder_format"]["preview"],
+            "Season 01"
+        );
+        assert_eq!(out["fields"]["episode_file_format"]["ok"], false);
+        assert!(
+            out["fields"]["episode_file_format"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("cannot read the episode number back")
+        );
+        assert_eq!(out["path"], "", "no combined path while a field is invalid");
+
+        let out = naming::naming_preview(
+            State(state),
+            axum::Json(naming::NamingPreviewRequest {
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(
+            out["path"],
+            "Sousou no Frieren/Season 01/Sousou no Frieren - S01E07 - Like a Fairy Tale.mkv"
+        );
+        assert!(out["warning"].is_null());
+    }
+
+    #[tokio::test]
+    async fn preview_warns_past_the_windows_path_limit() {
+        let db = in_memory_pool().await;
+        seed_config(&db).await;
+        let long_root = format!("/{}", "m".repeat(230));
+        sqlx::query("UPDATE config SET media_root = ? WHERE id = 1")
+            .bind(&long_root)
+            .execute(&db)
+            .await
+            .unwrap();
+        let state = build_test_app_state(db.clone(), None);
+        let out = naming::naming_preview(
+            State(state),
+            axum::Json(naming::NamingPreviewRequest {
+                series_folder_format: String::new(),
+                season_folder_format: String::new(),
+                episode_file_format: String::new(),
+            }),
+        )
+        .await
+        .0;
+        assert!(
+            out["warning"]
+                .as_str()
+                .unwrap()
+                .contains("Windows limits paths to 260"),
+            "{out}"
         );
     }
 }

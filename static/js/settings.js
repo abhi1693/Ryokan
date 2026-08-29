@@ -1093,6 +1093,100 @@ if (typeof window.ryokanRegisterPageInit === 'function') {
     bindSettingsDirtyGuard();
 }
 
+// ── File naming live preview (issue #124) ────────────────────────
+//
+// Every keystroke in one of the three template inputs (debounced)
+// posts all three to /api/settings/naming-preview and paints the
+// server's verdict under each field plus the combined sample path.
+// The server renders the same way it will at import time, so there
+// is no JS resolver to drift. Reset puts the default template back
+// and fires `input` so the dirty guard and the preview both notice.
+var bindNamingPreview = function () {
+    const box = document.getElementById('naming-settings');
+    if (!box || box.dataset.ryokanNamingBound === '1') return;
+    box.dataset.ryokanNamingBound = '1';
+    const inputs = Array.from(box.querySelectorAll('input[data-naming-default]'));
+    let timer = null;
+    // Responses can arrive out of order under the debounce; only the
+    // newest request is allowed to paint.
+    let seq = 0;
+    const payload = () => {
+        const p = {};
+        inputs.forEach((i) => { p[i.name] = i.value; });
+        return p;
+    };
+    const paint = (data) => {
+        inputs.forEach((input) => {
+            const out = box.querySelector('[data-naming-preview="' + input.name + '"]');
+            const f = data.fields && data.fields[input.name];
+            if (!out || !f) return;
+            out.textContent = f.ok ? f.preview : (f.error || '');
+            out.classList.toggle('naming-preview-error', !f.ok);
+        });
+        const path = box.querySelector('[data-naming-path]');
+        if (path) path.textContent = data.path || '';
+        const warn = box.querySelector('[data-naming-warning]');
+        if (warn) {
+            warn.textContent = data.warning || '';
+            warn.hidden = !data.warning;
+        }
+    };
+    const refresh = async () => {
+        const mine = ++seq;
+        try {
+            const r = await fetch('/api/settings/naming-preview', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                credentials: 'same-origin',
+                body: JSON.stringify(payload()),
+            });
+            if (!r.ok) return;
+            const data = await r.json();
+            if (mine !== seq) return;
+            paint(data);
+        } catch (e) {
+            // Leave the last server-rendered preview in place.
+        }
+    };
+    const schedule = () => {
+        clearTimeout(timer);
+        timer = setTimeout(refresh, 250);
+    };
+    inputs.forEach((i) => i.addEventListener('input', schedule));
+    box.querySelectorAll('[data-naming-reset]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+            const input = box.querySelector('input[name="' + btn.getAttribute('data-naming-reset') + '"]');
+            if (!input) return;
+            input.value = input.dataset.namingDefault || '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        });
+    });
+};
+
+if (typeof window.ryokanRegisterPageInit === 'function') {
+    window.ryokanRegisterPageInit('settings-naming-preview', {
+        check: function () { return !!document.getElementById('naming-settings'); },
+        mount: bindNamingPreview,
+        unmount: function () {},
+    });
+} else {
+    bindNamingPreview();
+}
+
+// The General form saves through an outerHTML swap of
+// #settings-general-region, which replaces the fieldset and every
+// listener bound to it, and the page lifecycle deliberately no-ops a
+// re-render of the same page. Rebind from the swap event instead; the
+// fresh fieldset has no bound flag, so this is a first bind, not a
+// double one. Registered once per process, like the other body-level
+// afterSwap handlers in this file.
+if (!window.__ryokanNamingPreviewSwapListener) {
+    window.__ryokanNamingPreviewSwapListener = true;
+    document.body.addEventListener('htmx:afterSwap', function () {
+        bindNamingPreview();
+    });
+}
+
 // ── External Accounts (AL / MAL, issue #62) ──────────────────────
 //
 // Three interactions on the Settings → Integrations → External

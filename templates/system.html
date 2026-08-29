@@ -35,10 +35,12 @@
 {% if let Some(msg) = debug_message %}
     {% if tab == "debug" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Debug action complete">{{ msg }}</div>{% endif %}
     {% if tab == "notifications" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Notification provider">{{ msg }}</div>{% endif %}
+    {% if tab == "backup" %}<div class="alert alert-success" data-ryokan-toast="success" data-ryokan-toast-title="Backup">{{ msg }}</div>{% endif %}
 {% endif %}
 {% if let Some(err) = debug_error %}
     {% if tab == "debug" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Debug action failed">{{ err }}</div>{% endif %}
     {% if tab == "notifications" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Notification provider error">{{ err }}</div>{% endif %}
+    {% if tab == "backup" %}<div class="alert alert-error" data-ryokan-toast="error" data-ryokan-toast-title="Backup">{{ err }}</div>{% endif %}
 {% endif %}
 
 {% if tab == "logs" %}
@@ -71,14 +73,16 @@
         </label>
         {# Download presets — each link triggers a server-rendered TSV
            dump. Anchor tags (not buttons) so the browser handles the
-           Content-Disposition: attachment header natively without JS. #}
+           Content-Disposition: attachment header natively without JS,
+           provided the anchors opt out of the body-wide hx-boost: a boosted
+           click would AJAX the file and swap its bytes into the page. #}
         <div class="log-download-menu">
             <button class="btn btn-ghost btn-sm" type="button" onclick="document.getElementById('log-download-options').classList.toggle('open')" title="Download logs">Download ▾</button>
             <div class="log-download-options" id="log-download-options">
-                <a class="log-download-option" href="/api/logs/export?range=today">Today</a>
-                <a class="log-download-option" href="/api/logs/export?range=7d">Last 7 days</a>
-                <a class="log-download-option" href="/api/logs/export?range=30d">Last 30 days</a>
-                <a class="log-download-option" href="/api/logs/export?range=all">All</a>
+                <a class="log-download-option" hx-boost="false" href="/api/logs/export?range=today">Today</a>
+                <a class="log-download-option" hx-boost="false" href="/api/logs/export?range=7d">Last 7 days</a>
+                <a class="log-download-option" hx-boost="false" href="/api/logs/export?range=30d">Last 30 days</a>
+                <a class="log-download-option" hx-boost="false" href="/api/logs/export?range=all">All</a>
             </div>
         </div>
         <button class="btn btn-ghost btn-sm" onclick="clearLogs()" title="Clear all logs">Clear</button>
@@ -385,6 +389,8 @@
 </div>
 {% else if tab == "notifications" %}
 {%~ include "partials/system/notifications.html" ~%}
+{% else if tab == "backup" %}
+{%~ include "partials/system/backup.html" ~%}
 {% else if tab == "debug" %}
 <div class="debug-panel">
     {# The form wraps just the two checkbox cards. Maintenance and RSS

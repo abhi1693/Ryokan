@@ -49,7 +49,7 @@ A folder with **no season and absolute numbering** (`Jujutsu Kaisen - 55.mkv`) g
 
 Both resolvers only run on the automatic pass. A candidate you pick, or a title you type into **Search again**, is taken as given.
 
-The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' `Season 01` folder. The card's season chip says which season the group is.
+The episode column never shows a season: each AniList season is its own series in Ryokan with its own E1, E2, ... numbering, and its files land in that series' season folder (`Season 01` unless you changed the season folder template). The card's season chip says which season the group is.
 
 ### The file table
 
@@ -65,7 +65,7 @@ Each row shows the file, its episode, the quality Ryokan reads from the filename
 - **Already on disk**: a different file already sits at the destination name and Ryokan has no tag for it (a file dropped in by hand, or a folder scanned twice); it is left alone rather than overwritten, since an overwrite would skip the recycle bin.
 - **Duplicate name**: another file in the same series lands on the same destination name; only the first is written.
 
-Files land at `<media root>/<series folder>/Season 01/<original filename>`. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name is generated from the AniList title (the destination column shows it), and if a folder of that name already exists under the media root without a series owning it, the import uses a suffixed name (`Show (2)`) instead. Titles everywhere in the wizard, the progress messages, and the report follow your **Settings → General → Title language**.
+Files land at `<media root>/<series folder>/<season folder>/<original filename>`. Filenames are kept as they are; renaming into Ryokan's own naming scheme is a separate feature. For a new series the folder name comes from the series folder template in Settings → General → File naming, rendered from the AniList title (the destination column shows it), and if a folder of that name already exists under the media root without a series owning it, the import uses a suffixed name (`Show (2)`) instead. Titles everywhere in the wizard, the progress messages, and the report follow your **Settings → General → Title language**.
 
 ### Badges worth a look
 
@@ -92,7 +92,7 @@ The bar at the bottom of the preview says how many files would be written and in
 For each series with something to write, in order:
 
 1. A **new series** is created from the AniList match, exactly as **Add series** would create it, and its metadata (description, episode titles, artwork) is fetched. New series are monitored for **future episodes only**, so an import never kicks off a wave of downloads for the episodes you do not have. Change the monitoring mode on the series page whenever you like. A series that is **already in your library** keeps its monitoring and folder as they are.
-2. Each file lands at `<media root>/<series folder>/Season 01/<original filename>` by hardlink, copy, or move, whichever you picked. Hardlinks that cannot cross a filesystem fall back to a copy. Where the preview said **Replace**, the old file (with its NFO, subtitles, and thumbnail) goes to the recycle bin first when one is configured, otherwise it is deleted; if the bin is configured but not writable, that file is skipped rather than overwritten.
+2. Each file lands at `<media root>/<series folder>/<season folder>/<original filename>` by hardlink, copy, or move, whichever you picked. Hardlinks that cannot cross a filesystem fall back to a copy. Where the preview said **Replace**, the old file (with its NFO, subtitles, and thumbnail) goes to the recycle bin first when one is configured, otherwise it is deleted; if the bin is configured but not writable, that file is skipped rather than overwritten.
 3. The series folder is classified the same way the library scan classifies files that appear on disk, so each episode gets its quality tag and grab history; then `tvshow.nfo`, `season.nfo`, per-episode NFOs, and the poster / banner / backdrop copies are written.
 
 **Cancel import** stops after the file in progress. Everything already imported stays imported; the report tells you how far it got.

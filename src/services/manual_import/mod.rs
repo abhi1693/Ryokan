@@ -155,7 +155,15 @@ pub struct ExistingTag {
 pub struct ExistingSeries {
     pub id: i64,
     pub anilist_id: i64,
+    /// Display title in the preferred language.
     pub title: String,
+    /// The stored title variants and premiere year, so the preview's
+    /// season folder renders from the same `SeriesNames` the import
+    /// builds from the row (#124).
+    pub title_romaji: String,
+    pub title_english: String,
+    pub title_native: String,
+    pub season_year: Option<i32>,
     pub folder_name: String,
     pub tags: HashMap<i32, ExistingTag>,
 }
@@ -674,6 +682,10 @@ async fn existing_from_row(db: &SqlitePool, row: series::Series) -> ExistingSeri
         .collect();
     ExistingSeries {
         id: row.id,
+        title_romaji: row.title_romaji.clone(),
+        title_english: row.title_english.clone(),
+        title_native: row.title_native.clone(),
+        season_year: row.season_year,
         anilist_id: row.anilist_id,
         title,
         folder_name: row.folder_name,

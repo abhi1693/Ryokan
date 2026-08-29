@@ -126,14 +126,21 @@ pub(super) async fn lookup_by_external_id(
         .and_then(|d| d.season_year)
         .unwrap_or(0);
 
+    // The folder a fresh add would create, from the series-folder
+    // template (#124), so Seerr shows the same path Ryokan uses.
+    let folder = crate::services::naming::series_folder(
+        &cfg.series_folder_format,
+        &cfg.title_language,
+        &crate::services::naming::SeriesNames {
+            title: &show_title,
+            year: show_detail.as_ref().and_then(|d| d.season_year),
+            ..Default::default()
+        },
+    );
     let path = if cfg.media_root.is_empty() {
-        format!("/media/{}", media::sanitize_folder_name(&show_title))
+        format!("/media/{folder}")
     } else {
-        format!(
-            "{}/{}",
-            cfg.media_root,
-            media::sanitize_folder_name(&show_title)
-        )
+        format!("{}/{folder}", cfg.media_root)
     };
 
     let result = SonarrSeries {
@@ -223,9 +230,16 @@ pub(super) async fn build_sonarr_series_from_search(
     let is_in_library = db_series.is_some();
     let internal_id = db_series.map(|s| s.id).unwrap_or(0);
 
-    let folder_name = db_series
-        .map(|s| s.folder_name.clone())
-        .unwrap_or_else(|| media::sanitize_folder_name(title));
+    let folder_name = db_series.map(|s| s.folder_name.clone()).unwrap_or_else(|| {
+        crate::services::naming::series_folder(
+            &cfg.series_folder_format,
+            &cfg.title_language,
+            &crate::services::naming::SeriesNames {
+                title,
+                ..crate::services::naming::SeriesNames::from_entry(r)
+            },
+        )
+    });
 
     let disk_files = if is_in_library {
         media::scan_series_folder(&cfg.media_root, &folder_name).await

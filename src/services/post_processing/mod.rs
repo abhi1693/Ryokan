@@ -10,7 +10,7 @@ use crate::models::{
 use crate::services::download_client::DownloadClient;
 use crate::services::recycle::{self, RecycleKind};
 use crate::services::source::{self, SeriesContext};
-use crate::services::{logger, media, nfo};
+use crate::services::{logger, media, naming, nfo};
 
 mod artwork_copy;
 mod state;
@@ -358,11 +358,6 @@ pub(crate) fn walk_video_files(root: &Path) -> Vec<crate::services::download_cli
     out
 }
 
-/// Replace filesystem-unsafe characters in a filename component.
-pub(crate) fn sanitize_filename(s: &str) -> String {
-    media::sanitize_folder_name(s)
-}
-
 /// True when `a` and `b` resolve to the same inode (same device + same
 /// inode number). Used by [`do_file_op`] to detect "src and dst already
 /// point at the same bytes" cases — a re-import on top of a previously
@@ -523,6 +518,69 @@ async fn unstage_upgrade(db: &sqlx::SqlitePool, mode: &str, landing: &Path, src:
     }
 }
 
+/// Build the naming context for one episode (#124). Quality and group
+/// come from the grab-time `episode_quality_tags` row when present
+/// (manual overrides included), otherwise from a filename-only pass
+/// over the source name; both are the same pre-download signals the
+/// grab itself was scored on.
+fn episode_name_context(
+    ctx: &SeriesImportCtx,
+    ep_num: i32,
+    ep_title: &str,
+    source_name: &str,
+    ext: &str,
+) -> naming::NameContext {
+    let tag = ctx.existing_tags.get(&ep_num);
+    let (resolution, source_label, group) = match tag {
+        Some(t) if !t.source.is_empty() || !t.resolution.is_empty() => (
+            if t.resolution.eq_ignore_ascii_case("unknown") {
+                String::new()
+            } else {
+                t.resolution.clone()
+            },
+            naming::quality_source_label(&t.source, t.is_remux, &t.web_kind),
+            t.release_group.clone(),
+        ),
+        _ => {
+            let c = source::classify_release_sync(source_name, None);
+            let resolution = match c.resolution {
+                crate::services::source::Resolution::Unknown => String::new(),
+                r => r.as_str().to_string(),
+            };
+            let group = tag
+                .map(|t| t.release_group.clone())
+                .filter(|g| !g.is_empty())
+                .or_else(|| {
+                    crate::services::source_filename::classify_filename(source_name).release_group
+                })
+                .unwrap_or_default();
+            (
+                resolution,
+                naming::quality_source_label(c.source.as_str(), c.is_remux, c.web_kind.as_str()),
+                group,
+            )
+        }
+    };
+    let group = if group.is_empty() {
+        crate::services::source_filename::classify_filename(source_name)
+            .release_group
+            .unwrap_or_default()
+    } else {
+        group
+    };
+    naming::NameContext {
+        series_title: ctx.series_title.clone(),
+        series_year: ctx.series.season_year,
+        season_number: 1,
+        episode_number: ep_num,
+        episode_title: ep_title.to_string(),
+        quality_resolution: resolution,
+        quality_source: source_label,
+        release_group: group,
+        ext: ext.to_string(),
+    }
+}
+
 struct SeriesImportCtx {
     series: series::Series,
     folder_name: String,
@@ -560,15 +618,20 @@ async fn load_series_import_ctx(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("series {} not found", series_id))?;
 
-    // Auto-generate folder_name from the best title if it was never set.
+    // Auto-generate folder_name from the series-folder template (#124)
+    // if it was never set.
     let folder_name = if series.folder_name.is_empty() {
-        let generated = media::sanitize_folder_name(&nfo::best_title(&series));
-        if generated.is_empty() {
+        if nfo::best_title(&series).trim().is_empty() {
             return Err(format!(
                 "series '{}' has no usable title for folder name",
                 series.title
             ));
         }
+        let generated = naming::series_folder(
+            &cfg.series_folder_format,
+            &cfg.title_language,
+            &naming::SeriesNames::from_series(&series),
+        );
         // Persist it so future imports skip this path.
         let _ = series::update_folder(&state.db, series.id, &generated).await;
         generated
@@ -584,7 +647,12 @@ async fn load_series_import_ctx(
     let series_title = nfo::title_for_preference(&series, &cfg.title_language);
     let season_dir = Path::new(&cfg.media_root)
         .join(&folder_name)
-        .join(format!("Season {:02}", 1_i32));
+        .join(naming::season_folder(
+            &cfg.season_folder_format,
+            &cfg.title_language,
+            &naming::SeriesNames::from_series(&series),
+            1,
+        ));
 
     {
         let season_dir = season_dir.clone();
@@ -1253,38 +1321,42 @@ async fn import_torrent(
             .unwrap_or("mkv");
 
         let season = 1_i32;
-        let dest_stem = if ep_title.is_empty() {
-            format!(
-                "{} - S{:02}E{:02}",
-                sanitize_filename(&ctx.series_title),
-                season,
-                ep_num
-            )
-        } else {
-            format!(
-                "{} - S{:02}E{:02} - {}",
-                sanitize_filename(&ctx.series_title),
-                season,
-                ep_num,
-                sanitize_filename(&ep_title)
-            )
-        };
 
-        let dest_video = ctx.season_dir.join(format!("{}.{}", dest_stem, ext));
-        let dest_nfo = ctx.season_dir.join(format!("{}.nfo", dest_stem));
+        // Destination name from the episode-file template (#124). The
+        // quality and group tokens read the grab-time tag row when there
+        // is one (it may carry a manual override), else a filename-only
+        // classification of the source; the post-download reclassify
+        // below still runs on the landed file, it just doesn't rename.
+        let name_ctx = episode_name_context(ctx, ep_num, &ep_title, filename_only, ext);
+        let episode_name = naming::episode_file(&cfg.episode_file_format, &name_ctx);
+        if episode_name.truncated {
+            logger::info(
+                &state.db,
+                LogCategory::PostProcess,
+                &format!(
+                    "Shortened the file name for S{:02}E{:02} of '{}' to fit the filesystem limit",
+                    season, ep_num, ctx.series.title
+                ),
+                &episode_name.file_name,
+            )
+            .await;
+        }
+        let dest_video = ctx.season_dir.join(&episode_name.file_name);
+        let dest_nfo = ctx.season_dir.join(format!("{}.nfo", episode_name.stem));
 
-        // Check for existing files with the same SxxExx tag (any extension).
-        // Matching by episode tag instead of full stem handles cases where the
-        // episode title changed in AniList between the original grab and the
-        // upgrade (e.g. a translated title was added later).
-        let ep_tag = format!("S{:02}E{:02}", season, ep_num);
+        // Existing files for this episode slot (any extension). Matched
+        // by parsing each name back through `parse_episode_number`
+        // rather than by a fixed `SxxExx` substring, so the check works
+        // for every template the validator accepts (it requires the
+        // sample name to parse back) and still catches files named under
+        // an earlier template or an episode title that changed between
+        // grabs.
         // Walk the season directory off the runtime — a big season pack on
         // an NFS mount can make the sync read_dir/stat calls block for
         // hundreds of ms. The filter logic is cheap CPU, so we also move
         // it into the spawned task.
         let existing_for_ep: Vec<PathBuf> = {
             let season_dir = ctx.season_dir.clone();
-            let ep_tag = ep_tag.clone();
             tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
                 std::fs::read_dir(&season_dir)
                     .into_iter()
@@ -1292,14 +1364,15 @@ async fn import_torrent(
                     .filter_map(|e| e.ok())
                     .map(|e| e.path())
                     .filter(|p| {
-                        p.file_stem()
-                            .and_then(|s| s.to_str())
-                            .map(|s| s.contains(&ep_tag))
-                            .unwrap_or(false)
-                            && p.extension()
-                                .and_then(|e| e.to_str())
-                                .map(|e| e != "nfo")
-                                .unwrap_or(false)
+                        let is_nfo = p
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case("nfo"));
+                        !is_nfo
+                            && p.file_name()
+                                .and_then(|n| n.to_str())
+                                .and_then(|n| media::parse_episode_number(&n.to_lowercase()))
+                                .is_some_and(|(s, e)| e == ep_num && s.is_none_or(|s| s == season))
                     })
                     .collect()
             })

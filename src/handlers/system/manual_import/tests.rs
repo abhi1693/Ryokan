@@ -576,6 +576,10 @@ mod router_tests {
                 id: series_id,
                 anilist_id: 100,
                 title: "Show On Disk".into(),
+                title_romaji: String::new(),
+                title_english: String::new(),
+                title_native: String::new(),
+                season_year: None,
                 folder_name: "Show On Disk".into(),
                 tags,
             });
