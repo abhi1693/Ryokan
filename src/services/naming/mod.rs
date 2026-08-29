@@ -695,9 +695,9 @@ pub fn validate(kind: TemplateKind, template: &str) -> Result<(), String> {
         }
     }
     if kind == TemplateKind::EpisodeFile {
-        let ends_with_ext = ext_positions.len() == 1
-            && ext_positions[0] == pieces.len() - 1
-            && template.ends_with("{ext}");
+        // Last piece, exactly once. The piece check already covers a
+        // padded `{ ext }`, which parses to the same token.
+        let ends_with_ext = ext_positions.len() == 1 && ext_positions[0] == pieces.len() - 1;
         if !ends_with_ext {
             return Err(
                 "The episode file template must end with {ext}, and use it only once.".to_string(),

@@ -1107,6 +1107,9 @@ var bindNamingPreview = function () {
     box.dataset.ryokanNamingBound = '1';
     const inputs = Array.from(box.querySelectorAll('input[data-naming-default]'));
     let timer = null;
+    // Responses can arrive out of order under the debounce; only the
+    // newest request is allowed to paint.
+    let seq = 0;
     const payload = () => {
         const p = {};
         inputs.forEach((i) => { p[i.name] = i.value; });
@@ -1129,6 +1132,7 @@ var bindNamingPreview = function () {
         }
     };
     const refresh = async () => {
+        const mine = ++seq;
         try {
             const r = await fetch('/api/settings/naming-preview', {
                 method: 'POST',
@@ -1137,7 +1141,9 @@ var bindNamingPreview = function () {
                 body: JSON.stringify(payload()),
             });
             if (!r.ok) return;
-            paint(await r.json());
+            const data = await r.json();
+            if (mine !== seq) return;
+            paint(data);
         } catch (e) {
             // Leave the last server-rendered preview in place.
         }
@@ -1165,6 +1171,20 @@ if (typeof window.ryokanRegisterPageInit === 'function') {
     });
 } else {
     bindNamingPreview();
+}
+
+// The General form saves through an outerHTML swap of
+// #settings-general-region, which replaces the fieldset and every
+// listener bound to it, and the page lifecycle deliberately no-ops a
+// re-render of the same page. Rebind from the swap event instead; the
+// fresh fieldset has no bound flag, so this is a first bind, not a
+// double one. Registered once per process, like the other body-level
+// afterSwap handlers in this file.
+if (!window.__ryokanNamingPreviewSwapListener) {
+    window.__ryokanNamingPreviewSwapListener = true;
+    document.body.addEventListener('htmx:afterSwap', function () {
+        bindNamingPreview();
+    });
 }
 
 // ── External Accounts (AL / MAL, issue #62) ──────────────────────

@@ -1887,10 +1887,11 @@ pub(crate) fn naming_path_preview(media_root: &str, parts: &[String]) -> (String
     }
     let rel = parts.join("/");
     let root = media_root.trim().trim_end_matches('/');
+    // Characters, not bytes: the limit is about what Windows counts.
     let full_len = if root.is_empty() {
-        rel.len()
+        rel.chars().count()
     } else {
-        root.len() + 1 + rel.len()
+        root.chars().count() + 1 + rel.chars().count()
     };
     let warning = (full_len > naming_service::WINDOWS_MAX_PATH).then(|| {
         format!(

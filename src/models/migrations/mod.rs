@@ -2765,6 +2765,10 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             crate::services::naming::DEFAULT_EPISODE_FILE_FORMAT,
         ),
     ] {
+        // A default containing an apostrophe would otherwise break
+        // the statement, and `.ok()` would hide that until every
+        // `get_config` SELECT failed on the missing column.
+        let default = default.replace('\'', "''");
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "ALTER TABLE config ADD COLUMN {column} TEXT NOT NULL DEFAULT '{default}'"
         )))

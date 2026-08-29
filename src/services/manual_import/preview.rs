@@ -209,7 +209,10 @@ pub fn season_folder_name(group: &SeriesGroup, ctx: &ProjectionContext<'_>) -> S
     let names = match (&group.existing, group.picked()) {
         (Some(existing), _) => naming::SeriesNames {
             title: &existing.title,
-            ..Default::default()
+            romaji: &existing.title_romaji,
+            english: &existing.title_english,
+            native: &existing.title_native,
+            year: existing.season_year,
         },
         (None, Some(entry)) => naming::SeriesNames::from_entry(entry),
         (None, None) => naming::SeriesNames::default(),
@@ -617,6 +620,10 @@ mod tests {
             id: 7,
             anilist_id: 1,
             title: "Show".into(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            season_year: None,
             folder_name: "Show Folder".into(),
             tags,
         });
@@ -690,6 +697,10 @@ mod tests {
             id: 7,
             anilist_id: 1,
             title: "Show".into(),
+            title_romaji: String::new(),
+            title_english: String::new(),
+            title_native: String::new(),
+            season_year: None,
             folder_name: "Show Folder".into(),
             tags: HashMap::new(),
         });
