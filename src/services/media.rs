@@ -1,3 +1,4 @@
+use anitomy::{Anitomy, ElementCategory};
 use regex_lite::Regex;
 use serde::Serialize;
 use std::path::Path;
@@ -63,6 +64,37 @@ static RE_OVA_EP: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[\s._\-])ova\s*(\d{1,3})(?:v\d)?(?:\s|\.|\[|\(|$)")
         .expect("RE_OVA_EP compiles")
 });
+static RE_HALF_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
+    // Half-episode / recap marker glued to the episode token in the
+    // dash position (`- 07_5`, `- 07.5`, Erai-raws' recap convention)
+    // or to an SxxExx tag (`S01E07.5`). Issue #203: these are
+    // non-episodic under the Season-1 model and must not land in the
+    // E07 slot. Matched on the raw (pre-underscore-normalization)
+    // string because the `_5` form is exactly what normalization
+    // would turn into a plain ` - 07 5 ` that RE_DASH_EP accepts.
+    // Anchored on the dash / SxxExx position so a title like
+    // `2.5 Jigen no Ririsa - 03` is untouched.
+    Regex::new(r"(?:[\s_]-[\s_]|s\d{1,2}e)(\d{1,4})[._]5(?:[\s._\[\(]|$)")
+        .expect("RE_HALF_EPISODE compiles")
+});
+static RE_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    // Release version: glued to the episode digits (`05v2`, `S02E10v2`,
+    // `023v2`) or a standalone token (`(v2)`, `[v2]`, `.V2.`, ` v2 `).
+    // The left edge is a digit or a delimiter so codec / audio tokens
+    // like `AV1` never read as a version.
+    Regex::new(r"(?:\d|^|[\s._\-\(\[])v(\d{1,2})(?:[\s._\-\)\]]|$)").expect("RE_VERSION compiles")
+});
+
+/// anitomy `AnimeType` values that mark a file as a non-episodic extra
+/// (issue #203): promotional videos, creditless openings / endings,
+/// previews. Deliberately NOT `OAD` / `OVA` / `Special` / `SP` /
+/// `Movie`: those are frequently wanted content and, with no special
+/// slot in the Season-1 model yet, stay with the collision check.
+/// anitomy has no `CM` / `Menu` / `Trailer` keywords today; they are
+/// listed so the gate picks them up if a later anitomy adds them.
+const NON_EPISODIC_ANIME_TYPES: &[&str] = &[
+    "pv", "cm", "ncop", "nced", "op", "ed", "opening", "ending", "preview", "menu", "trailer",
+];
 
 /// Non-episodic subtitle markers that can sit where a real subtitle
 /// would in a `<title> NN - <subtitle>` filename. When the captured
@@ -70,9 +102,14 @@ static RE_OVA_EP: LazyLock<Regex> = LazyLock::new(|| {
 /// season/title number (e.g. `Chihayafuru 2 - OVA - Waga Miyo…`),
 /// not an episode, and the parser must bail rather than import the
 /// file under a mis-numbered slot.
+///
+/// `sp` / `oad` (issue #203): `86 Eighty-Six Part 2 - SP` otherwise
+/// falls back to the `Part 2` number and lands the special in the E02
+/// slot. The word-boundary check keeps `sp` from matching `special`'s
+/// prefix (that one has its own entry) or a glued `sp1`.
 fn starts_with_non_episode_marker(rest: &str) -> bool {
     let trimmed = rest.trim_start();
-    const MARKERS: &[&str] = &["ova", "special", "specials"];
+    const MARKERS: &[&str] = &["ova", "oad", "sp", "special", "specials"];
     for tok in MARKERS {
         if let Some(after) = trimmed.strip_prefix(tok) {
             // Word boundary: next char must not be another letter or
@@ -310,9 +347,22 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
 ///
 /// Returns `None` for files explicitly tagged as creditless openings or
 /// endings (`NCOP`/`NCED`), for files where a captured bare-number is
-/// followed by a non-episodic marker like `OVA`/`Special`, and for
-/// single-OVA entries with no trailing digit.
+/// followed by a non-episodic marker like `OVA`/`Special`, for
+/// single-OVA entries with no trailing digit, for half-episode / recap
+/// files (`- 07_5`), and for files anitomy types as a PV / creditless
+/// OP-ED / preview (issue #203; see [`is_non_episodic_extra`]).
 pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
+    let parsed = parse_episode_number_inner(lower)?;
+    // The anitomy gate runs last and only when a number was found, so
+    // the (comparatively) expensive tokenizer pass is skipped for the
+    // NC / bare-marker shapes the regex branches already reject.
+    if is_non_episodic_extra(lower) {
+        return None;
+    }
+    Some(parsed)
+}
+
+fn parse_episode_number_inner(lower: &str) -> Option<(Option<i32>, i32)> {
     // Non-episodic content guard. Creditless openings/endings carry a
     // small integer suffix (`NCOP 1`, `NCED 1`, or even glued
     // `NCED01a` from LOGH-style packs) that the bare-number
@@ -321,6 +371,13 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     // with a token-boundary regex so incidental substring hits like
     // `synced`, `convinced`, `announced` don't false-positive.
     if RE_NCOP_NCED.is_match(lower) {
+        return None;
+    }
+
+    // Half-episode / recap guard (issue #203). Checked on the raw
+    // string, before underscore normalization would turn `07_5` into
+    // a plain `07 5` that RE_DASH_EP accepts as episode 7.
+    if RE_HALF_EPISODE.is_match(lower) {
         return None;
     }
 
@@ -414,6 +471,76 @@ pub fn parse_episode_number(lower: &str) -> Option<(Option<i32>, i32)> {
     }
 
     None
+}
+
+/// anitomy `AnimeType` gate (issue #203). True when anitomy types the
+/// name as one of [`NON_EPISODIC_ANIME_TYPES`] and the keyword sits in
+/// the episode position: after the first ` - ` separator, or anywhere
+/// past the title's first word when the name has no separator.
+///
+/// anitomy contributes only the type here; its `EpisodeNumber` is never
+/// consulted because its codec handling is weaker than the homegrown
+/// branches (`H.265` parses as episode 265 there; see PR #198).
+///
+/// The position check is the one guard anitomy needs. It keeps the
+/// keyword inside `AnimeTitle` in every case (`ed edd n eddy`,
+/// `runway de waratte - character pv`), so a keyword that *leads* the
+/// title (`Ed Edd n Eddy - 01`, `OP Rewrite - 03`) is typed as ED / OP
+/// exactly like a real extra. What separates them is where the keyword
+/// sits: extras carry it after the dash (`- Character PV 1`,
+/// `- Creditless Ending 2`) or in a dash-less name (`Creditless Opening
+/// 1`), title words sit before it. Subtitle words are safe either way:
+/// anitomy reads `- 05 - Opening Night` as an episode title, not a type.
+fn is_non_episodic_extra(lower: &str) -> bool {
+    // anitomy rejects NUL bytes; nothing real carries them.
+    if lower.contains('\0') {
+        return false;
+    }
+    let mut ani = Anitomy::new();
+    let elements = match ani.parse(lower) {
+        Ok(e) => e,
+        Err(e) => e,
+    };
+    let title_start = elements
+        .get(ElementCategory::AnimeTitle)
+        .and_then(|t| lower.find(&t.to_ascii_lowercase()))
+        .unwrap_or(0);
+    // Earliest byte offset a keyword may start at to count: right after
+    // the first ` - ` / `_-_` separator, else past the title's first
+    // character (so a title-leading keyword never qualifies).
+    let min_at = lower
+        .find(" - ")
+        .or_else(|| lower.find("_-_"))
+        .map(|i| i + 3)
+        .unwrap_or(title_start + 1);
+    elements
+        .get_all(ElementCategory::AnimeType)
+        .into_iter()
+        .map(|t| t.to_ascii_lowercase())
+        .any(|t| NON_EPISODIC_ANIME_TYPES.contains(&t.as_str()) && keyword_from(lower, &t, min_at))
+}
+
+/// True when `keyword` occurs as a whole word in `haystack` starting at
+/// byte offset `min_at` or later.
+fn keyword_from(haystack: &str, keyword: &str, min_at: usize) -> bool {
+    let bytes = haystack.as_bytes();
+    haystack.match_indices(keyword).any(|(at, _)| {
+        let before_ok = at == 0 || !bytes[at - 1].is_ascii_alphanumeric();
+        let end = at + keyword.len();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        before_ok && after_ok && at >= min_at
+    })
+}
+
+/// Release version carried by a filename (`05v2` → 2, `[v2]` → 2,
+/// `S02E10v2` → 2, `.V2.` → 2). `None` when no version token is
+/// present; callers treat that as v1. Issue #204 uses it to prefer the
+/// highest version when a batch ships `E05` and `E05v2`.
+pub fn parse_release_version(lower: &str) -> Option<u32> {
+    RE_VERSION
+        .captures(lower)
+        .and_then(|c| c.get(1))
+        .and_then(|m| m.as_str().parse().ok())
 }
 
 /// Extract quality/resolution from filename.
@@ -1002,5 +1129,155 @@ mod tests {
             parse_quality("show.s01e01.web.1080p.group.mkv"),
             "WEB-1080p"
         );
+    }
+
+    // ── Non-episodic extras (issue #203) ─────────────────────────────
+
+    #[test]
+    fn pv_numbered_after_dash_is_not_an_episode() {
+        // Corpus: Moozzi2's Runway de Waratte pack ships `Character PV
+        // 1-4` and `PV 1-2` next to E01-E04; they used to land in the
+        // episode slots and fail the whole batch closed.
+        assert_eq!(
+            parse("[npz-Moozzi2] Runway De Waratte - Character PV 1 (US BD, 1080p) [E392C1D3].mkv"),
+            None
+        );
+        assert_eq!(
+            parse("[npz-Moozzi2] Runway De Waratte - PV 2 (US BD, 1080p) [ED14DDFE].mkv"),
+            None
+        );
+        // The real episodes of the same pack keep parsing.
+        assert_eq!(
+            parse("[npz-Moozzi2] Runway De Waratte - 01 (US BD, sub-only, 1080p) [C30B6E41].mkv"),
+            Some((None, 1))
+        );
+    }
+
+    #[test]
+    fn creditless_opening_ending_and_preview_are_not_episodes() {
+        assert_eq!(parse("[Anime Time] Creditless Opening 1.mkv"), None);
+        assert_eq!(
+            parse("[Group] Show - Creditless Ending 2 [1080p].mkv"),
+            None
+        );
+        assert_eq!(parse("[Group] Show - Web Preview 01 [1080p].mkv"), None);
+    }
+
+    #[test]
+    fn title_leading_type_keyword_does_not_gate_a_real_episode() {
+        // anitomy types the leading `Ed` / `OP` as ED / OP. The keyword
+        // sits before the title, so the gate must stay out of it.
+        assert_eq!(parse("Ed Edd n Eddy - 01.mkv"), Some((None, 1)));
+        assert_eq!(
+            parse("[Group] OP Rewrite - 03 [1080p].mkv"),
+            Some((None, 3))
+        );
+        assert_eq!(
+            parse("[HGS-Renc]_Ed_Edd_n_Eddy_-_01_[BD1080].mkv"),
+            Some((None, 1))
+        );
+        // A dash-less PV still gates: the keyword is past the title's
+        // first word.
+        assert_eq!(parse("[Group] Show PV 1 [1080p].mkv"), None);
+    }
+
+    #[test]
+    fn subtitle_words_that_look_like_type_keywords_do_not_gate() {
+        assert_eq!(
+            parse("[Group] Show - 05 - Opening Night [1080p].mkv"),
+            Some((None, 5))
+        );
+        assert_eq!(
+            parse("[Group] Show - 12 - The ED of the World [1080p].mkv"),
+            Some((None, 12))
+        );
+        assert_eq!(
+            parse("[Group] Show - 05 - Preview of Coming Attractions [1080p].mkv"),
+            Some((None, 5))
+        );
+        assert_eq!(
+            parse("[Group] Kaguya-sama - 03 - Opening Ceremony [1080p].mkv"),
+            Some((None, 3))
+        );
+    }
+
+    #[test]
+    fn wanted_special_types_are_left_to_the_collision_check() {
+        // OAD / Special carry wanted content; the gate must not eat them.
+        assert_eq!(
+            parse("[Anime Time] Attack on Titan OAD - 01.mkv"),
+            Some((None, 1))
+        );
+        assert_eq!(
+            parse("[Group] Show - 12 (Special) [1080p].mkv"),
+            Some((None, 12))
+        );
+    }
+
+    #[test]
+    fn bare_sp_marker_in_episode_position_suppresses_part_number() {
+        // Corpus: Erai-raws' `Part 2 - SP` used to fall back to the
+        // `Part 2` number and collide with E02.
+        assert_eq!(
+            parse("[Erai-raws] 86 Eighty-Six Part 2 - SP [480p][Multiple Subtitle][FDBE49E5].mkv"),
+            None
+        );
+        assert_eq!(parse("[Group] Show Season 2 - OAD [1080p].mkv"), None);
+        // A numbered sibling of the same pack still resolves.
+        assert_eq!(
+            parse("[Erai-raws] 86 Eighty-Six Part 2 - 02 [480p][Multiple Subtitle][2E7DEB0E].mkv"),
+            Some((None, 2))
+        );
+    }
+
+    #[test]
+    fn half_episode_recap_suffix_is_not_an_episode() {
+        assert_eq!(
+            parse(
+                "[Erai-raws] 86 Eighty-Six Part 2 - 07_5 [480p][Multiple Subtitle][3CC7C577].mkv"
+            ),
+            None
+        );
+        assert_eq!(parse("[Group] Show - 10.5 [1080p].mkv"), None);
+        assert_eq!(parse("Show.S01E07.5.1080p.mkv"), None);
+        assert_eq!(parse("[HGS-Renc]_Show_-_07_5_[BD1080].mkv"), None);
+    }
+
+    #[test]
+    fn half_episode_guard_leaves_decimal_titles_and_audio_tokens_alone() {
+        assert_eq!(
+            parse("[SubsPlease] 2.5 Jigen no Ririsa - 03 (1080p) [ABCD1234].mkv"),
+            Some((None, 3))
+        );
+        assert_eq!(
+            parse("[SubsPlease] 2.5-jigen no Ririsa - 03 (1080p) [ABCD1234].mkv"),
+            Some((None, 3))
+        );
+        // `5.1` audio after an SxxExx tag is not a half-episode.
+        assert_eq!(parse("Show.S01E07.DDP5.1.1080p.mkv"), Some((Some(1), 7)));
+    }
+
+    // ── Release version (issue #204) ─────────────────────────────────
+
+    #[test]
+    fn release_version_shapes() {
+        use super::parse_release_version as v;
+        assert_eq!(v("show - 05v2 [1080p].mkv"), Some(2));
+        assert_eq!(v("show - 05 (v2) [1080p].mkv"), Some(2));
+        assert_eq!(v("show - 05 [v3].mkv"), Some(3));
+        assert_eq!(v("[som] dragon.ball.001.v2.dvd.480p.mkv"), Some(2));
+        assert_eq!(v("show.s02e10v2.1080p.mkv"), Some(2));
+        assert_eq!(
+            v("[group] hunter x hunter (2011) - 148v2 [1080p].mkv"),
+            Some(2)
+        );
+        assert_eq!(v("show - 05 [1080p].mkv"), None);
+        // Codec / audio tokens never read as a version.
+        assert_eq!(
+            v("[anime land] kimetsu no yaiba movie (bdrip 1080p av1 eac3).mkv"),
+            None
+        );
+        assert_eq!(v("show - 05 [1080p][hevc].mkv"), None);
+        assert_eq!(v("show - 05 [1080p][ddp5.1].mkv"), None);
     }
 }
