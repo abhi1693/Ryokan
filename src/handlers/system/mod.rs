@@ -1439,6 +1439,7 @@ pub async fn api_system_tasks(State(state): State<AppState>) -> Json<SystemTasks
     Json(SystemTasksResponse { tasks })
 }
 
+pub mod manual_import;
 pub mod notifications;
 
 #[cfg(test)]

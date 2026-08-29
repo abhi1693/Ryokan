@@ -24,6 +24,7 @@ pub mod grab_sweep;
 pub mod interactive_search_cache;
 pub mod library_link;
 pub mod logger;
+pub mod manual_import;
 pub mod progress;
 pub mod quality;
 pub mod relative_time;

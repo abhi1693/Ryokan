@@ -2627,6 +2627,7 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "utoipa-swagger-ui",
+ "walkdir",
  "wiremock",
 ]
 

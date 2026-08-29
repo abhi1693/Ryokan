@@ -74,6 +74,7 @@ nav:
     - Configuration: configuration.md
     - Configuration (cont.): system.md
     - Calendar: calendar.md
+    - Importing an existing library: manual-import.md
     - Download clients: download-clients.md
     - External accounts: external-accounts.md
   - Troubleshooting: troubleshooting.md

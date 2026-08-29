@@ -521,6 +521,7 @@ async fn main() {
         tasks: services::task_registry::TaskRegistry::new(),
         dc_status_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         notification_providers: services::notifications::empty_cache(),
+        import_sessions: services::manual_import::session::new_store(),
     };
 
     // Initialize the multi-client pool from `download_clients` rows.
@@ -597,6 +598,32 @@ async fn main() {
             get(handlers::library::pages::needs_review_page),
         )
         .route("/library/recycle", get(handlers::library::recycle::page))
+        // #122 manual import wizard. Form-POST + server render; the
+        // per-group override controls swap a single card via HTMX.
+        .route(
+            "/system/import",
+            get(handlers::system::manual_import::page).post(handlers::system::manual_import::start),
+        )
+        .route(
+            "/system/import/{session_id}/group/{idx}",
+            post(handlers::system::manual_import::group_action),
+        )
+        .route(
+            "/system/import/{session_id}/group/{idx}/candidates",
+            get(handlers::system::manual_import::picker_candidates),
+        )
+        .route(
+            "/system/import/{session_id}/discard",
+            post(handlers::system::manual_import::discard),
+        )
+        .route(
+            "/system/import/{session_id}/confirm",
+            post(handlers::system::manual_import::confirm),
+        )
+        .route(
+            "/system/import/{session_id}/cancel",
+            post(handlers::system::manual_import::cancel),
+        )
         .route(
             "/api/library/recycle/empty",
             post(handlers::library::recycle::empty),
