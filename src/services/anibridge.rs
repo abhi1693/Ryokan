@@ -178,6 +178,33 @@ struct MappingCache {
     /// entry would land under the negated-MAL-id sentinel and become
     /// invisible to SeaDex / AL-keyed scoring.
     mal_to_anilist: HashMap<i64, i64>,
+    /// Episode-level TMDB season ↔ AniList spans (#122 manual import).
+    /// Composed at load time from the per-entry range maps the ID
+    /// tables above ignore.
+    tmdb_episode_spans: HashMap<(i64, i32), Vec<EpisodeSpan>>,
+}
+
+/// One contiguous run of a TMDB season's episodes and where they live
+/// on AniList: TMDB `s<season>` episodes `tmdb_start..=tmdb_end` are
+/// AniList entry `anilist_id` episodes `anilist_start..` (same length).
+/// A TMDB season that AniList lists as two entries (split cours) has
+/// two spans; an AniList entry that TMDB splits across seasons appears
+/// under each season with the matching `anilist_start` offset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EpisodeSpan {
+    pub tmdb_start: i32,
+    pub tmdb_end: i32,
+    pub anilist_id: i64,
+    pub anilist_start: i32,
+}
+
+impl EpisodeSpan {
+    /// AniList episode for TMDB episode `ep`, when this span covers it.
+    pub fn anilist_episode(&self, ep: i32) -> Option<i32> {
+        (self.tmdb_start..=self.tmdb_end)
+            .contains(&ep)
+            .then(|| self.anilist_start + (ep - self.tmdb_start))
+    }
 }
 
 /// Ensure the mappings are loaded, downloading if necessary.
@@ -355,6 +382,29 @@ pub async fn lookup_tmdb_seasons(tmdb_id: i64) -> Vec<(i32, AnimeIds)> {
     lookup_show_seasons(&c.data.tmdb_to_anime, tmdb_id)
 }
 
+/// Episode spans for one TMDB season, ordered by `tmdb_start`. Empty
+/// when the show or season isn't in the mappings.
+pub async fn tmdb_episode_spans(tmdb_id: i64, season: i32) -> Vec<EpisodeSpan> {
+    let cache = CACHE.read().await;
+    let c = match cache.as_ref() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    c.data
+        .tmdb_episode_spans
+        .get(&(tmdb_id, season))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// `(anilist_id, anilist_episode)` for TMDB episode `ep` of a season,
+/// given that season's spans. `None` when no span covers it.
+pub fn map_tmdb_episode(spans: &[EpisodeSpan], ep: i32) -> Option<(i64, i32)> {
+    spans
+        .iter()
+        .find_map(|s| s.anilist_episode(ep).map(|al_ep| (s.anilist_id, al_ep)))
+}
+
 fn lookup_show_seasons(
     map: &HashMap<(i64, i32), Vec<AnimeIds>>,
     show_id: i64,
@@ -420,6 +470,7 @@ pub async fn seed_mal_to_anilist_for_tests(pairs: &[(i64, i64)]) {
         anilist_to_tmdb: HashMap::new(),
         mal_to_tmdb: HashMap::new(),
         mal_to_anilist,
+        tmdb_episode_spans: HashMap::new(),
     };
     let mut w = CACHE.write().await;
     *w = Some(CacheState { data });
@@ -491,6 +542,50 @@ pub async fn seed_external_mappings_for_tests(
         anilist_to_tmdb,
         mal_to_tmdb,
         mal_to_anilist: HashMap::new(),
+        tmdb_episode_spans: HashMap::new(),
+    };
+    let mut w = CACHE.write().await;
+    *w = Some(CacheState { data });
+}
+
+/// Test seeding for the episode-span table (#122). Each tuple is
+/// `(tmdb_id, season, tmdb_start, tmdb_end, anilist_id, anilist_start)`;
+/// the ID tables are filled in alongside so `lookup_tmdb_by_anilist`
+/// and `lookup_by_tmdb` agree with the spans.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn seed_tmdb_episode_spans_for_tests(spans: &[(i64, i32, i32, i32, i64, i32)]) {
+    let mut tmdb_to_anime: HashMap<(i64, i32), Vec<AnimeIds>> = HashMap::new();
+    let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
+    let mut tmdb_episode_spans: HashMap<(i64, i32), Vec<EpisodeSpan>> = HashMap::new();
+    for &(tmdb_id, season, tmdb_start, tmdb_end, anilist_id, anilist_start) in spans {
+        let ids = tmdb_to_anime.entry((tmdb_id, season)).or_default();
+        if !ids.iter().any(|e| e.anilist_id == Some(anilist_id)) {
+            ids.push(AnimeIds {
+                anilist_id: Some(anilist_id),
+                mal_id: None,
+            });
+        }
+        anilist_to_tmdb.insert(anilist_id, tmdb_id);
+        tmdb_episode_spans
+            .entry((tmdb_id, season))
+            .or_default()
+            .push(EpisodeSpan {
+                tmdb_start,
+                tmdb_end,
+                anilist_id,
+                anilist_start,
+            });
+    }
+    for v in tmdb_episode_spans.values_mut() {
+        v.sort_by_key(|s| s.tmdb_start);
+    }
+    let data = MappingCache {
+        tmdb_to_anime,
+        tvdb_to_anime: HashMap::new(),
+        anilist_to_tmdb,
+        mal_to_tmdb: HashMap::new(),
+        mal_to_anilist: HashMap::new(),
+        tmdb_episode_spans,
     };
     let mut w = CACHE.write().await;
     *w = Some(CacheState { data });
@@ -713,6 +808,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
     let mut anilist_to_tmdb: HashMap<i64, i64> = HashMap::new();
     let mut mal_to_tmdb: HashMap<i64, i64> = HashMap::new();
     let mut mal_to_anilist: HashMap<i64, i64> = HashMap::new();
+    let mut tmdb_episode_spans: HashMap<(i64, i32), Vec<EpisodeSpan>> = HashMap::new();
 
     let obj = match data.as_object() {
         Some(o) => o,
@@ -723,6 +819,7 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
                 anilist_to_tmdb,
                 mal_to_tmdb,
                 mal_to_anilist,
+                tmdb_episode_spans,
             };
         }
     };
@@ -732,6 +829,13 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
             Some(o) => o,
             None => continue,
         };
+
+        for (season, (tmdb, span)) in compose_episode_spans(source_key, target_obj) {
+            tmdb_episode_spans
+                .entry((tmdb, season))
+                .or_default()
+                .push(span);
+        }
 
         // Collect all IDs mentioned across source key + target keys.
         let all_keys: Vec<&str> = std::iter::once(source_key.as_str())
@@ -822,13 +926,117 @@ fn build_cache(data: &serde_json::Value) -> MappingCache {
         }
     }
 
+    for v in tmdb_episode_spans.values_mut() {
+        v.sort_by_key(|s| (s.tmdb_start, s.anilist_id));
+        v.dedup();
+    }
+
     MappingCache {
         tmdb_to_anime,
         tvdb_to_anime,
         anilist_to_tmdb,
         mal_to_tmdb,
         mal_to_anilist,
+        tmdb_episode_spans,
     }
+}
+
+/// `"62-77"` → `(62, 77)`; `"5"` → `(5, 5)`. `None` for anything else
+/// (the mappings use plain ranges only).
+fn parse_episode_range(s: &str) -> Option<(i32, i32)> {
+    let s = s.trim();
+    let (a, b) = match s.split_once('-') {
+        Some((a, b)) => (a.trim().parse::<i32>().ok()?, b.trim().parse::<i32>().ok()?),
+        None => {
+            let n = s.parse::<i32>().ok()?;
+            (n, n)
+        }
+    };
+    (a >= 1 && b >= a).then_some((a, b))
+}
+
+/// Range pairs `(pivot_start, pivot_end, target_start)` for one target
+/// key's `{ "<pivot range>": "<target range>" }` object, in the source
+/// key's numbering. Mismatched lengths clamp to the shorter side.
+fn range_pairs(value: &serde_json::Value) -> Vec<(i32, i32, i32)> {
+    let Some(obj) = value.as_object() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (pivot, target) in obj {
+        let Some((p1, p2)) = parse_episode_range(pivot) else {
+            continue;
+        };
+        let Some((t1, t2)) = target.as_str().and_then(parse_episode_range) else {
+            continue;
+        };
+        let len = (p2 - p1).min(t2 - t1);
+        out.push((p1, p1 + len, t1));
+    }
+    out
+}
+
+/// Episode spans one mappings entry contributes, as
+/// `(tmdb_season, (tmdb_id, span))`. The source key's numbering is the
+/// pivot: an `anidb:` (or `mal:`) entry maps pivot→anilist and
+/// pivot→tmdb separately and the two compose over their overlap; an
+/// `anilist:` entry's pivot IS the AniList numbering; a `tmdb_show:`
+/// entry's pivot is that season's TMDB numbering.
+fn compose_episode_spans(
+    source_key: &str,
+    targets: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<(i32, (i64, EpisodeSpan))> {
+    // Identity pivots are unbounded on their own side; the other
+    // side's declared ranges bound the overlap.
+    const OPEN: i32 = i32::MAX / 2;
+    // pivot → anilist: (pivot_start, pivot_end, anilist_id, anilist_start)
+    let mut to_anilist: Vec<(i32, i32, i64, i32)> = Vec::new();
+    // pivot → tmdb: (pivot_start, pivot_end, tmdb_id, season, tmdb_start)
+    let mut to_tmdb: Vec<(i32, i32, i64, i32, i32)> = Vec::new();
+
+    if let Some(al) = parse_provider_id(source_key, "anilist") {
+        to_anilist.push((1, OPEN, al, 1));
+    }
+    if let Some((tmdb, season)) = parse_show_id(source_key, "tmdb_show") {
+        to_tmdb.push((1, OPEN, tmdb, season, 1));
+    }
+    for (key, value) in targets {
+        if let Some(al) = parse_provider_id(key, "anilist") {
+            for (p1, p2, t1) in range_pairs(value) {
+                to_anilist.push((p1, p2, al, t1));
+            }
+        } else if let Some((tmdb, season)) = parse_show_id(key, "tmdb_show") {
+            for (p1, p2, t1) in range_pairs(value) {
+                to_tmdb.push((p1, p2, tmdb, season, t1));
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for &(a1, a2, al, al_start) in &to_anilist {
+        for &(b1, b2, tmdb, season, tmdb_start) in &to_tmdb {
+            let lo = a1.max(b1);
+            let hi = a2.min(b2);
+            if lo > hi || hi - lo > 10_000 {
+                // Two open pivots (no ranges on either side) carry no
+                // episode information; skip rather than invent one.
+                continue;
+            }
+            out.push((
+                season,
+                (
+                    tmdb,
+                    EpisodeSpan {
+                        tmdb_start: tmdb_start + (lo - b1),
+                        tmdb_end: tmdb_start + (hi - b1),
+                        anilist_id: al,
+                        anilist_start: al_start + (lo - a1),
+                    },
+                ),
+            ));
+        }
+    }
+    out
 }
 
 /// Parse "tmdb_show:12345:s1" or "tvdb_show:262954:s6" → Some((12345, 1)) / Some((262954, 6))
@@ -1551,5 +1759,138 @@ mod tests {
             err.contains("503") || err.contains("HTTP"),
             "error must surface the HTTP status: got {err:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod episode_span_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn spans(cache: &MappingCache, tmdb: i64, season: i32) -> Vec<EpisodeSpan> {
+        cache
+            .tmdb_episode_spans
+            .get(&(tmdb, season))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn anidb_keyed_entry_composes_offset_seasons() {
+        // The real shape of anidb:69 (a 91-episode AniList entry that
+        // TMDB splits into seasons): tmdb s2 e1-16 are AniList e62-77.
+        let data = json!({
+            "anidb:69:R": {
+                "anilist:69": {"1-91": "1-91"},
+                "tmdb_show:37854:s1": {"1-61": "1-61"},
+                "tmdb_show:37854:s2": {"62-77": "1-16"},
+                "tmdb_show:37854:s3": {"78-91": "1-14"}
+            }
+        });
+        let cache = build_cache(&data);
+        let s2 = spans(&cache, 37854, 2);
+        assert_eq!(
+            s2,
+            vec![EpisodeSpan {
+                tmdb_start: 1,
+                tmdb_end: 16,
+                anilist_id: 69,
+                anilist_start: 62
+            }]
+        );
+        assert_eq!(map_tmdb_episode(&s2, 5), Some((69, 66)));
+        assert_eq!(map_tmdb_episode(&s2, 17), None, "past the season's end");
+        let s3 = spans(&cache, 37854, 3);
+        assert_eq!(map_tmdb_episode(&s3, 1), Some((69, 78)));
+        assert_eq!(
+            map_tmdb_episode(&spans(&cache, 37854, 1), 61),
+            Some((69, 61))
+        );
+    }
+
+    #[test]
+    fn split_cour_season_yields_two_spans_in_order() {
+        // One TMDB season, two AniList entries (Part 1 / Part 2).
+        let data = json!({
+            "anidb:100:R": {
+                "anilist:1001": {"1-12": "1-12"},
+                "tmdb_show:500:s3": {"1-12": "1-12"}
+            },
+            "anidb:101:R": {
+                "anilist:1002": {"1-12": "1-12"},
+                "tmdb_show:500:s3": {"1-12": "13-24"}
+            }
+        });
+        let cache = build_cache(&data);
+        let s3 = spans(&cache, 500, 3);
+        assert_eq!(s3.len(), 2);
+        assert_eq!(
+            (s3[0].tmdb_start, s3[0].tmdb_end, s3[0].anilist_id),
+            (1, 12, 1001)
+        );
+        assert_eq!(
+            (s3[1].tmdb_start, s3[1].tmdb_end, s3[1].anilist_id),
+            (13, 24, 1002)
+        );
+        assert_eq!(map_tmdb_episode(&s3, 18), Some((1002, 6)));
+        assert_eq!(map_tmdb_episode(&s3, 12), Some((1001, 12)));
+    }
+
+    #[test]
+    fn anilist_and_tmdb_keyed_entries_use_their_own_numbering_as_pivot() {
+        let data = json!({
+            "anilist:14719": {
+                "tmdb_show:45790:s1": {"1-13": "1-13"},
+                "tmdb_show:45790:s2": {"14-26": "1-13"}
+            },
+            "tmdb_show:777:s4": {
+                "anilist:4242": {"1-10": "3-12"}
+            }
+        });
+        let cache = build_cache(&data);
+        assert_eq!(
+            map_tmdb_episode(&spans(&cache, 45790, 2), 3),
+            Some((14719, 16))
+        );
+        assert_eq!(map_tmdb_episode(&spans(&cache, 777, 4), 1), Some((4242, 3)));
+        assert_eq!(
+            map_tmdb_episode(&spans(&cache, 777, 4), 10),
+            Some((4242, 12))
+        );
+        assert!(spans(&cache, 777, 5).is_empty());
+    }
+
+    #[test]
+    fn single_episode_and_malformed_ranges() {
+        assert_eq!(parse_episode_range("5"), Some((5, 5)));
+        assert_eq!(parse_episode_range("62-77"), Some((62, 77)));
+        assert_eq!(parse_episode_range("0"), None);
+        assert_eq!(parse_episode_range("7-3"), None);
+        assert_eq!(parse_episode_range("x"), None);
+        let data = json!({
+            "anidb:11:R": {
+                "anilist:821": {"1": "1"},
+                "tmdb_show:40424:s0": {"1": "3"},
+                "tmdb_show:40424:s9": "not an object"
+            }
+        });
+        let cache = build_cache(&data);
+        assert_eq!(
+            map_tmdb_episode(&spans(&cache, 40424, 0), 3),
+            Some((821, 1))
+        );
+        assert!(spans(&cache, 40424, 9).is_empty());
+    }
+
+    #[tokio::test]
+    async fn seeded_spans_are_served_by_the_async_lookup() {
+        seed_tmdb_episode_spans_for_tests(&[(9, 2, 1, 12, 55, 13), (9, 2, 13, 24, 56, 1)]).await;
+        let s = tmdb_episode_spans(9, 2).await;
+        assert_eq!(s.len(), 2);
+        assert_eq!(map_tmdb_episode(&s, 5), Some((55, 17)));
+        assert_eq!(map_tmdb_episode(&s, 20), Some((56, 8)));
+        assert_eq!(lookup_tmdb_by_anilist(56).await, Some(9));
+        assert!(tmdb_episode_spans(9, 3).await.is_empty());
+        clear_cache_for_tests().await;
     }
 }

@@ -10,6 +10,7 @@ pub mod crud;
 pub mod episodes;
 pub mod pages;
 pub mod reconcile;
+pub mod recycle;
 pub mod search;
 
 /// Per-card completeness summary for the library grid's status bar.
@@ -88,6 +89,14 @@ struct IndexTemplate {
     /// MAL `CURRENTLY_AIRING`). Renders as "· N airing" next to the
     /// total; hidden at zero.
     airing_count: usize,
+    /// Recycle bin configured (#123): switches the bulk-delete modal's
+    /// "cannot be undone" copy to "moves to the recycle bin".
+    recycle_enabled: bool,
+    /// Entries currently in the bin (cached a minute). The toolbar's
+    /// bin control renders only when this is non-zero, with the count as
+    /// a badge, so the control exists exactly when there is something to
+    /// get back.
+    recycle_count: u64,
 }
 
 #[derive(Template)]
@@ -137,6 +146,10 @@ struct SeriesTemplate {
     /// path already serves the cached row regardless of staleness;
     /// this flag just makes the situation visible to the user.
     metadata_is_stale: bool,
+    /// Recycle bin configured (#123): the remove-series modal and the
+    /// per-episode delete confirm say "moves to the recycle bin"
+    /// instead of "cannot be undone."
+    recycle_enabled: bool,
     /// Raw `monitor_mode` (`all` / `future` / `missing` / `existing` /
     /// `none`). Distinct from `monitor_mode_select_value` which encodes
     /// the dropdown's display state (the latter says `"sync"` when the

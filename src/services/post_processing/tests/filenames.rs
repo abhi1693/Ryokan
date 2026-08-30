@@ -6,9 +6,8 @@
 
 use rstest::rstest;
 
-use crate::services::post_processing::{
-    is_video_file, sanitize_filename, validate_relative_path_fragment,
-};
+use crate::services::media::sanitize_folder_name;
+use crate::services::post_processing::{is_video_file, validate_relative_path_fragment};
 
 // ─── is_video_file extension table ────────────────────────────────
 
@@ -64,7 +63,7 @@ fn path_components_do_not_leak_into_extension_match() {
 
 #[test]
 fn sanitize_filename_preserves_plain_ascii() {
-    assert_eq!(sanitize_filename("Show Name - 01"), "Show Name - 01");
+    assert_eq!(sanitize_folder_name("Show Name - 01"), "Show Name - 01");
 }
 
 #[test]
@@ -72,14 +71,14 @@ fn sanitize_filename_is_idempotent() {
     // Running twice should produce the same output — sanitize
     // should never introduce characters that would get sanitized
     // on a second pass.
-    let once = sanitize_filename("Show / 01 : Title");
-    let twice = sanitize_filename(&once);
+    let once = sanitize_folder_name("Show / 01 : Title");
+    let twice = sanitize_folder_name(&once);
     assert_eq!(once, twice);
 }
 
 #[test]
 fn sanitize_filename_returns_empty_for_empty_input() {
-    assert_eq!(sanitize_filename(""), "");
+    assert_eq!(sanitize_folder_name(""), "");
 }
 
 #[test]
@@ -88,7 +87,7 @@ fn sanitize_filename_strips_filesystem_reserved_chars() {
     // appear in the output — Jellyfin / SMB / ext4 all choke on
     // different subsets and the safest policy is to replace them.
     let dirty = "Show: Name / 01 <test> |pipe| ?query";
-    let clean = sanitize_filename(dirty);
+    let clean = sanitize_folder_name(dirty);
     for bad in &[':', '/', '\\', '<', '>', '|', '?', '"', '*'] {
         assert!(
             !clean.contains(*bad),

@@ -131,9 +131,16 @@ function syncDeleteFileButton(epNum) {
             'hx-post',
             `/api/series/${SD.id}/delete-file/${epNum}`,
         );
+        const recycleOn = SD.recycleEnabled === 'true';
         deleteBtn.setAttribute(
             'data-ryokan-confirm-body',
-            `Delete the file for Episode ${epNum} from disk? This cannot be undone.`,
+            recycleOn
+                ? `Move the file for Episode ${epNum} to the recycle bin? You can restore it from the Recycle Bin page until it is purged.`
+                : `Delete the file for Episode ${epNum} from disk? This cannot be undone.`,
+        );
+        deleteBtn.setAttribute(
+            'data-ryokan-confirm-yes',
+            recycleOn ? 'Move to recycle bin' : 'Delete',
         );
         if (window.htmx && typeof window.htmx.process === 'function') {
             window.htmx.process(deleteBtn);

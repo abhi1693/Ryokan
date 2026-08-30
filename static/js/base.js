@@ -283,6 +283,47 @@
         bodyEl.textContent = opts.body || '';
         if (!opts.body) bodyEl.style.display = 'none';
         content.appendChild(bodyEl);
+        // Optional action buttons (`opts.action` or `opts.actions: [...]`),
+        // e.g. "Undo" after a recycle-bin delete. The click handler gets a
+        // small handle so it can repaint or dismiss the toast; the button
+        // removes itself on first click so it can't fire twice.
+        const actionList = Array.isArray(opts.actions) ? opts.actions : (opts.action ? [opts.action] : []);
+        if (actionList.length) {
+            const actionsEl = document.createElement('div');
+            actionsEl.className = 'ryokan-toast-actions';
+            actionList.forEach(function (a) {
+                if (!a || !a.label) return;
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = 'btn btn-sm ' + (a.primary ? 'btn-primary' : 'btn-secondary');
+                b.textContent = a.label;
+                b.addEventListener('click', function () {
+                    b.remove();
+                    if (!actionsEl.children.length) actionsEl.remove();
+                    if (typeof a.onClick !== 'function') return;
+                    a.onClick({
+                        dismiss: function () { dismiss(toast); },
+                        update: function (patch) {
+                            patch = patch || {};
+                            if (patch.kind && ['info', 'success', 'warn', 'error'].indexOf(patch.kind) >= 0) {
+                                toast.classList.remove('ryokan-toast-info', 'ryokan-toast-success', 'ryokan-toast-warn', 'ryokan-toast-error');
+                                toast.classList.add('ryokan-toast-' + patch.kind);
+                            }
+                            if (patch.title != null) {
+                                titleEl.textContent = patch.title;
+                                titleEl.style.display = patch.title ? '' : 'none';
+                            }
+                            if (patch.body != null) {
+                                bodyEl.textContent = patch.body;
+                                bodyEl.style.display = patch.body ? '' : 'none';
+                            }
+                        }
+                    });
+                });
+                actionsEl.appendChild(b);
+            });
+            content.appendChild(actionsEl);
+        }
         toast.appendChild(content);
 
         const close = document.createElement('button');

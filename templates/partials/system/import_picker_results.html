@@ -1,0 +1,35 @@
+{# The import picker's result list (#122). Included inside the group
+   card with `g` = the GroupCard (its ranked candidates), and returned
+   on its own by `picker_candidates` for the search-as-you-type swap
+   with `g` = a PickerCtx carrying the same fields. Rows reuse the Add
+   Series modal's result styling. #}
+{% if !g.picker_error.is_empty() %}
+<p class="loading-text">{{ g.picker_error }}</p>
+{% else if g.picker_rows.is_empty() %}
+<p class="loading-text">No results{% if !g.query.is_empty() %} for &ldquo;{{ g.query }}&rdquo;{% endif %}.</p>
+{% else %}
+{% for r in g.picker_rows %}
+<div class="anilist-result import-picker-row{% if r.is_current %} import-picker-current{% endif %}">
+    {% if !r.cover_url.is_empty() %}<img src="{{ r.cover_url }}" alt="" class="anilist-cover" loading="lazy">{% else %}<div class="anilist-cover import-cover-empty" aria-hidden="true"></div>{% endif %}
+    <div class="anilist-info">
+        <p class="anilist-title">{% if !r.external_href.is_empty() %}<a href="{{ r.external_href }}" target="_blank" rel="noopener" class="anilist-title-link" title="Open on {{ r.source_label }}">{{ r.title }}</a>{% else %}{{ r.title }}{% endif %}</p>
+        {% if !r.subtitle.is_empty() %}<p class="anilist-subtitle">{{ r.subtitle }}</p>{% endif %}
+        <div class="anilist-meta">
+            <span class="tag tag-res">{{ r.format }}</span>
+            {% if !r.year.is_empty() %}<span class="tag tag-res">{{ r.year }}</span>{% endif %}
+            <span class="tag tag-res">{{ r.episodes }}</span>
+            <span>{{ r.source_label }}</span>
+        </div>
+    </div>
+    {% if r.is_current %}
+    <button type="button" class="btn btn-primary btn-sm btn-add" disabled aria-current="true">Current</button>
+    {% else %}
+    <form method="post" action="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-post="/system/import/{{ session_id }}/group/{{ g.idx }}" hx-target="#import-group-{{ g.idx }}" hx-swap="outerHTML" class="import-inline-form">
+        <input type="hidden" name="action" value="pick_id">
+        <input type="hidden" name="id" value="{{ r.id }}">
+        <button type="submit" class="btn btn-primary btn-sm btn-add">Use</button>
+    </form>
+    {% endif %}
+</div>
+{% endfor %}
+{% endif %}

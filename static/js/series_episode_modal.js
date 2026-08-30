@@ -284,11 +284,45 @@ if (!window.__ryokanSeriesListeners) {
             updateEpisodeRow(epNum, 'deleted');
             refreshEpisodeRows({ force: true });
         }
+        // Recycle bin (#123): when the file went to the bin the payload
+        // carries the entry id, and the toast gets an Undo that restores
+        // it in place. Longer duration so there's time to change your mind.
+        const entryId = detail.recycle_entry_id;
         window.ryokanToast({
             kind: 'success',
             category: 'library',
-            title: epNum ? `Episode ${epNum} deleted` : 'Episode deleted',
+            title: epNum
+                ? (entryId ? `Episode ${epNum} moved to the recycle bin` : `Episode ${epNum} deleted`)
+                : 'Episode deleted',
             body: detail.message || 'File removed from disk.',
+            duration: entryId ? 10000 : 4000,
+            action: entryId ? {
+                label: 'Undo',
+                onClick: function (handle) {
+                    fetch('/api/library/recycle/' + encodeURIComponent(entryId) + '/restore', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                    })
+                        .then(function (r) {
+                            return r.json().catch(function () { return { ok: false, message: 'HTTP ' + r.status }; });
+                        })
+                        .then(function (res) {
+                            if (res && res.ok) {
+                                handle.update({
+                                    kind: 'success',
+                                    title: epNum ? `Episode ${epNum} restored` : 'Restored',
+                                    body: res.message || 'The file is back where it was.',
+                                });
+                                if (epNum) refreshEpisodeRows({ force: true });
+                            } else {
+                                handle.update({ kind: 'error', title: 'Restore failed', body: (res && res.message) || 'Unknown error' });
+                            }
+                        })
+                        .catch(function (e) {
+                            handle.update({ kind: 'error', title: 'Restore failed', body: (e && e.message) || 'Network error' });
+                        });
+                },
+            } : undefined,
         });
     });
 }

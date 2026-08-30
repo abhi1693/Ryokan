@@ -96,6 +96,15 @@
                 </svg>
                 <span class="bulk-select-toggle-label">Select</span>
             </button>
+            {% if recycle_count > 0 %}
+            {# Recycle bin (#123): a quiet icon control, same footprint as
+               the sort-direction toggle, shown only while the bin holds
+               something to get back. The badge is the count. #}
+            <a href="/library/recycle" class="library-sort-dir library-recycle-link" title="Recycle Bin: {{ recycle_count }} item{% if recycle_count != 1 %}s{% endif %}" aria-label="Recycle bin, {{ recycle_count }} item{% if recycle_count != 1 %}s{% endif %}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+                <span class="library-recycle-count" aria-hidden="true">{{ recycle_count }}</span>
+            </a>
+            {% endif %}
         </div>
     </div>
 </div>
@@ -238,10 +247,10 @@
 
 {# Bulk delete confirmation modal. Distinct from the per-row
    data-ryokan-confirm-* pattern because we collect a delete-files
-   checkbox alongside the confirmation. Recycle bin (#123) hasn't
-   shipped yet, so file removal is a permanent unlink — confirmation
-   copy emphasises "cannot be undone." #}
-<div class="modal-backdrop" id="bulk-delete-modal" style="display:none" onclick="closeBulkDeleteModal(event)">
+   checkbox alongside the confirmation. With a recycle bin configured
+   (#123) the folders move there; otherwise it's a permanent unlink and
+   the copy says "cannot be undone." #}
+<div class="modal-backdrop" id="bulk-delete-modal" style="display:none" data-recycle-enabled="{% if recycle_enabled %}true{% else %}false{% endif %}" onclick="closeBulkDeleteModal(event)">
     <div class="modal" onclick="event.stopPropagation()" style="max-width: 520px">
         <div class="modal-header">
             <h3>Remove from library</h3>
@@ -254,8 +263,8 @@
             <label class="checkbox-row" style="display:flex; align-items:flex-start; gap:10px; padding:10px 12px; border:1px solid var(--border); border-radius: var(--radius); background: var(--bg-elevated);">
                 <input type="checkbox" id="bulk-delete-files-toggle" style="margin-top: 3px;">
                 <span>
-                    <strong style="display:block; color: var(--text-bright); font-size: 14px;">Also delete files from disk</strong>
-                    <span class="form-hint" style="display:block; margin-top: 2px;">Permanently remove the on-disk media folders and tell every download client to drop the active torrents. <strong style="color: var(--red);">Cannot be undone.</strong></span>
+                    <strong style="display:block; color: var(--text-bright); font-size: 14px;">{% if recycle_enabled %}Also move files to the recycle bin{% else %}Also delete files from disk{% endif %}</strong>
+                    <span class="form-hint" style="display:block; margin-top: 2px;">{% if recycle_enabled %}Move each series folder to the recycle bin (restorable from the <a href="/library/recycle">Recycle Bin</a> page until it is purged) and tell every download client to drop the active torrents.{% else %}Permanently remove the on-disk media folders and tell every download client to drop the active torrents. <strong style="color: var(--red);">Cannot be undone.</strong>{% endif %}</span>
                 </span>
             </label>
         </div>

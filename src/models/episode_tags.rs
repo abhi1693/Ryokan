@@ -787,7 +787,7 @@ pub async fn mark_grab_history_replaced(
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE episode_grab_history
-         SET state = 'replaced', updated_at = CURRENT_TIMESTAMP
+         SET state = 'replaced'
          WHERE id = (
              SELECT id FROM episode_grab_history
              WHERE series_id = ? AND episode_number = ? AND state = 'completed'
@@ -1336,5 +1336,54 @@ mod tests {
         // The legacy field name must not re-appear as a shadow alias —
         // there is only one wire key.
         assert!(v.get("qbit_content_path").is_none());
+    }
+}
+
+#[cfg(test)]
+mod grab_history_state_tests {
+    use super::*;
+    use crate::services::source;
+    use crate::test_support::{in_memory_pool, seed_series};
+
+    async fn states(db: &SqlitePool, series_id: i64) -> Vec<String> {
+        sqlx::query_scalar(
+            "SELECT state FROM episode_grab_history WHERE series_id = ? AND episode_number = 1 ORDER BY id",
+        )
+        .bind(series_id)
+        .fetch_all(db)
+        .await
+        .unwrap()
+    }
+
+    /// Regression: `episode_grab_history` has no `updated_at` column,
+    /// and the UPDATE used to set it, so the flip failed with "no such
+    /// column" and every caller's `let _ =` swallowed it. The upgrade
+    /// path's "replaced" chain never showed in the episode modal.
+    #[tokio::test]
+    async fn mark_grab_history_replaced_flips_the_completed_row() {
+        let db = in_memory_pool().await;
+        let sid = seed_series(&db, 1, "Show").await;
+        let c = source::classify_release_sync("Show - 01 [WEB 720p].mkv", None);
+        record_grab(&db, sid, 1, &c, "Show - 01 [WEB 720p].mkv", "", 1, false)
+            .await
+            .unwrap();
+        mark_grab_history_completed(&db, sid, 1, "Show - 01 [WEB 720p].mkv", 1)
+            .await
+            .unwrap();
+        assert_eq!(states(&db, sid).await, vec!["completed"]);
+
+        mark_grab_history_replaced(&db, sid, 1)
+            .await
+            .expect("the UPDATE must not error");
+        assert_eq!(states(&db, sid).await, vec!["replaced"]);
+
+        // A second grab lands, completes, and leaves the old row alone.
+        record_grab(&db, sid, 1, &c, "Show - 01 [BD 1080p].mkv", "", 1, false)
+            .await
+            .unwrap();
+        mark_grab_history_completed(&db, sid, 1, "Show - 01 [BD 1080p].mkv", 1)
+            .await
+            .unwrap();
+        assert_eq!(states(&db, sid).await, vec!["replaced", "completed"]);
     }
 }

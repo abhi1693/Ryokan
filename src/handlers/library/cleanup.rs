@@ -15,6 +15,7 @@
 
 use crate::AppState;
 use crate::models::grabbed_torrents;
+use crate::services::recycle::{self, RecycleKind, RecycleOutcome};
 
 /// Outcome of a single series's filesystem + torrent cleanup pass. Each
 /// field tracks one substage so callers can compose their own UX:
@@ -35,7 +36,8 @@ pub struct SeriesCleanupReport {
     /// error>"`. Empty when every grab was handled cleanly.
     pub torrent_failures: Vec<String>,
     /// One of `"skipped"` (delete_files=false or empty media_root /
-    /// folder_name), `"removed"`, `"missing"` (canonicalize-NotFound;
+    /// folder_name), `"recycled"` (moved into the recycle bin, #123),
+    /// `"removed"`, `"missing"` (canonicalize-NotFound;
     /// folder already gone), `"refused"` (canonicalized series dir
     /// resolves outside media_root — traversal guard tripped), or
     /// `"error"` (canonicalize / remove_dir_all error).
@@ -60,7 +62,10 @@ impl SeriesCleanupReport {
     /// this — its JSON response always reports the full breakdown.
     pub fn is_clean(&self) -> bool {
         self.torrent_failures.is_empty()
-            && matches!(self.folder_status, "removed" | "missing" | "skipped")
+            && matches!(
+                self.folder_status,
+                "recycled" | "removed" | "missing" | "skipped"
+            )
     }
 
     /// One-line summary for the bulk failure-modal copy. Only called
@@ -109,7 +114,10 @@ impl SeriesCleanupReport {
 ///    forgot.
 /// 3. Canonicalize `media_root`, canonicalize `media_root/<folder_name>`,
 ///    assert the resolved series dir starts with the resolved media
-///    root, and only then `remove_dir_all`. The `starts_with` guard is
+///    root, and only then hand it to `services::recycle::recycle`
+///    (move into the recycle bin; `remove_dir_all` only when no bin is
+///    configured, since an unwritable bin refuses the delete). The
+///    `starts_with` guard is
 ///    the security-critical step — without it a corrupted `folder_name`
 ///    (`"../escape"`) lets the user wipe arbitrary directories.
 ///    Pinned by the `refuses_traversal_when_resolved_path_escapes_media_root`
@@ -130,7 +138,9 @@ pub async fn cleanup_series_files(
     state: &AppState,
     series_id: i64,
     folder_name: &str,
+    series_title: &str,
     media_root: Option<&str>,
+    recycle_bin_path: &str,
 ) -> Result<SeriesCleanupReport, String> {
     let mut report = SeriesCleanupReport {
         torrents_removed: 0,
@@ -205,9 +215,31 @@ pub async fn cleanup_series_files(
         match tokio::fs::canonicalize(root).await {
             Ok(media_root_canon) => match tokio::fs::canonicalize(&series_dir).await {
                 Ok(series_canon) if series_canon.starts_with(&media_root_canon) => {
-                    match tokio::fs::remove_dir_all(&series_canon).await {
-                        Ok(()) => {
+                    // Recycle bin (#123): the folder moves into the bin
+                    // when one is configured; with no bin `recycle` does
+                    // the permanent `remove_dir_all` this branch used to
+                    // call directly, and an unwritable bin refuses (Err).
+                    match recycle::recycle(
+                        &state.db,
+                        recycle_bin_path,
+                        RecycleKind::SeriesFolder,
+                        Some(series_id),
+                        series_title,
+                        &series_canon,
+                    )
+                    .await
+                    {
+                        Ok(RecycleOutcome::Recycled { entry_id }) => {
+                            report.folder_status = "recycled";
+                            report.folder_detail =
+                                format!("{} (recycle entry {})", series_canon.display(), entry_id);
+                        }
+                        Ok(RecycleOutcome::DirectDeleted) => {
                             report.folder_status = "removed";
+                            report.folder_detail = series_canon.display().to_string();
+                        }
+                        Ok(RecycleOutcome::Missing) => {
+                            report.folder_status = "missing";
                             report.folder_detail = series_canon.display().to_string();
                         }
                         Err(err) => {

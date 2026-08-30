@@ -1,0 +1,178 @@
+/* Recycle Bin page (/library/recycle). Tables reuse the shared
+   .rss-table styling; this file covers the page chrome and pins the
+   column layout so every date group lines up. */
+
+.recycle-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.recycle-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px 18px;
+    margin: 0 0 14px;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-elevated);
+}
+
+.recycle-summary-main {
+    flex: 1 1 320px;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.recycle-summary-path {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.recycle-summary-path code {
+    font-size: 12px;
+}
+
+.recycle-summary > .btn {
+    flex: 0 0 auto;
+    margin-left: auto;
+}
+
+.recycle-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 10px;
+    margin: 0 0 18px;
+}
+
+.recycle-filters .form-group {
+    flex: 0 1 auto;
+    margin: 0;
+}
+
+.recycle-filters select {
+    width: auto;
+    min-width: 220px;
+    max-width: 340px;
+}
+
+/* One table per date bucket (the separated look), normal auto layout so
+   the actions column is exactly its two buttons plus the cell's 12px
+   padding. Every non-path column has a pinned width wider than its
+   content, and the path column absorbs the remainder, so each group's
+   table computes identical column positions. The min-width makes narrow
+   viewports scroll the wrap instead of crushing columns. */
+.recycle-table {
+    table-layout: auto;
+    width: 100%;
+    min-width: 860px;
+}
+
+/* Auto layout ignores <col> widths once the path cell claims 100%, but
+   it honors `min-width` on the cells as a floor even against the
+   percentage column, and the column only grows past it if a single word
+   can't fit. Wrapping stays
+   allowed in these columns for exactly that reason: a fixed width plus
+   nowrap would let a long value push the column wider in one group and
+   break the alignment with the others. */
+.recycle-table th:nth-child(1),
+.recycle-table td:nth-child(1) {
+    min-width: 170px;
+}
+
+.recycle-table th:nth-child(2),
+.recycle-table td:nth-child(2) {
+    min-width: 150px;
+}
+
+.recycle-table th:nth-child(4),
+.recycle-table td:nth-child(4) {
+    min-width: 90px;
+}
+
+.recycle-table th:nth-child(5),
+.recycle-table td:nth-child(5) {
+    min-width: 110px;
+}
+
+.recycle-table th:nth-child(6),
+.recycle-table td:nth-child(6) {
+    min-width: 100px;
+}
+
+/* The path column is the flexible one: `max-width: 0` plus `width: 100%`
+   makes auto layout hand it whatever the other columns leave, and the
+   inner span ellipsizes inside that. */
+.recycle-table td:nth-child(3),
+.recycle-table th:nth-child(3) {
+    max-width: 0;
+    width: 100%;
+}
+
+.recycle-group h3 {
+    margin: 18px 0 8px;
+    font-size: 15px;
+}
+
+.recycle-path {
+    display: block;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+    font-size: 12px;
+}
+
+.recycle-series {
+    font-weight: 600;
+    color: var(--text-bright);
+    overflow-wrap: anywhere;
+}
+
+/* Numeric cells prefer one line but may wrap rather than widen their
+   column (see the width pins above). */
+.recycle-nowrap {
+    white-space: normal;
+}
+
+/* Auto layout sizes this column to the buttons; the cell's own 12px
+   padding is the gap to the table edge, the same inset the text on the
+   left gets. */
+.recycle-table td.recycle-actions,
+.recycle-table th:last-child {
+    white-space: nowrap;
+}
+
+/* Auto layout would otherwise squeeze the wrappable columns to their
+   narrowest and hand the space to the path; these floors keep titles on
+   one or two lines. */
+
+
+/* Filters apply on change; the submit button is a no-JS / keyboard
+   fallback, hidden when scripting is available. */
+.recycle-filter-apply {
+    display: none;
+}
+@media (scripting: none) {
+    .recycle-filter-apply {
+        display: inline-flex;
+    }
+}
+
+.recycle-actions .btn + .btn {
+    margin-left: 6px;
+}
+
+.recycle-table tr.recycle-busy {
+    opacity: 0.55;
+}
