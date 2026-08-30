@@ -456,13 +456,62 @@ enum ImportReuse {
     Adopted,
 }
 
+const IMPORT_VERIFY_BUFFER_SIZE: usize = 1024 * 1024;
+const DEFAULT_IMPORT_VERIFY_CONCURRENCY: usize = 1;
+const MAX_IMPORT_VERIFY_CONCURRENCY: usize = 8;
+const IMPORT_VERIFY_CONCURRENCY_ENV: &str = "RYOKAN_POST_PROCESSING_VERIFY_CONCURRENCY";
+
+static IMPORT_VERIFY_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
+    parse_import_verify_concurrency(std::env::var(IMPORT_VERIFY_CONCURRENCY_ENV).ok().as_deref())
+});
+
+fn parse_import_verify_concurrency(raw: Option<&str>) -> usize {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_IMPORT_VERIFY_CONCURRENCY)
+        .clamp(
+            DEFAULT_IMPORT_VERIFY_CONCURRENCY,
+            MAX_IMPORT_VERIFY_CONCURRENCY,
+        )
+}
+
+fn compare_file_range(src: &Path, dest: &Path, start: u64, len: u64) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut src_file = std::fs::File::open(src)?;
+    let mut dest_file = std::fs::File::open(dest)?;
+    src_file.seek(SeekFrom::Start(start))?;
+    dest_file.seek(SeekFrom::Start(start))?;
+
+    let mut src_file = std::io::BufReader::with_capacity(IMPORT_VERIFY_BUFFER_SIZE, src_file);
+    let mut dest_file = std::io::BufReader::with_capacity(IMPORT_VERIFY_BUFFER_SIZE, dest_file);
+    let mut src_buf = vec![0_u8; IMPORT_VERIFY_BUFFER_SIZE];
+    let mut dest_buf = vec![0_u8; IMPORT_VERIFY_BUFFER_SIZE];
+    let mut remaining = len;
+
+    while remaining > 0 {
+        let read_len = remaining.min(IMPORT_VERIFY_BUFFER_SIZE as u64) as usize;
+        src_file.read_exact(&mut src_buf[..read_len])?;
+        dest_file.read_exact(&mut dest_buf[..read_len])?;
+        if src_buf[..read_len] != dest_buf[..read_len] {
+            return Ok(false);
+        }
+        remaining -= read_len as u64;
+    }
+
+    Ok(true)
+}
+
 /// Byte-compare two regular files without loading either one into memory.
 /// This is the conservative bridge for grabs that were already mid-import
 /// when per-file receipts were introduced: a same-size destination is not
-/// enough evidence to skip an upgrade, but identical bytes are.
-fn files_have_same_contents(src: &Path, dest: &Path) -> std::io::Result<bool> {
-    use std::io::Read;
-
+/// enough evidence to skip an upgrade, but identical bytes are. Independent
+/// file ranges can be checked by a bounded number of read-only workers; all
+/// import, upgrade, receipt, and library mutations remain serialized.
+fn files_have_same_contents_with_workers(
+    src: &Path,
+    dest: &Path,
+    workers: usize,
+) -> std::io::Result<bool> {
     let src_meta = std::fs::metadata(src)?;
     let dest_meta = std::fs::metadata(dest)?;
     if !src_meta.is_file() || !dest_meta.is_file() || src_meta.len() != dest_meta.len() {
@@ -472,22 +521,57 @@ fn files_have_same_contents(src: &Path, dest: &Path) -> std::io::Result<bool> {
         return Ok(true);
     }
 
-    const BUFFER_SIZE: usize = 1024 * 1024;
-    let mut src_file = std::io::BufReader::with_capacity(BUFFER_SIZE, std::fs::File::open(src)?);
-    let mut dest_file = std::io::BufReader::with_capacity(BUFFER_SIZE, std::fs::File::open(dest)?);
-    let mut src_buf = vec![0_u8; BUFFER_SIZE];
-    let mut dest_buf = vec![0_u8; BUFFER_SIZE];
-
-    loop {
-        let src_read = src_file.read(&mut src_buf)?;
-        let dest_read = dest_file.read(&mut dest_buf)?;
-        if src_read != dest_read || src_buf[..src_read] != dest_buf[..dest_read] {
-            return Ok(false);
-        }
-        if src_read == 0 {
-            return Ok(true);
-        }
+    let file_size = src_meta.len();
+    if file_size == 0 {
+        return Ok(true);
     }
+    let workers = workers.clamp(
+        DEFAULT_IMPORT_VERIFY_CONCURRENCY,
+        MAX_IMPORT_VERIFY_CONCURRENCY,
+    );
+    let range_size = file_size.div_ceil(workers as u64);
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            let start = worker as u64 * range_size;
+            if start >= file_size {
+                break;
+            }
+            let len = range_size.min(file_size - start);
+            handles.push(scope.spawn(move || compare_file_range(src, dest, start, len)));
+        }
+
+        let mut same = true;
+        let mut first_error = None;
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(range_matches)) => same &= range_matches,
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(_) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(std::io::Error::other("import verification worker panicked"));
+                    }
+                }
+            }
+        }
+
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(same)
+        }
+    })
+}
+
+#[cfg(test)]
+fn files_have_same_contents(src: &Path, dest: &Path) -> std::io::Result<bool> {
+    files_have_same_contents_with_workers(src, dest, *IMPORT_VERIFY_CONCURRENCY)
 }
 
 /// Return a verified restart checkpoint for this source file, or adopt an
@@ -533,14 +617,25 @@ async fn reusable_import(
 
     let compare_src = src.to_path_buf();
     let compare_dest = dest.to_path_buf();
-    let same =
-        tokio::task::spawn_blocking(move || files_have_same_contents(&compare_src, &compare_dest))
-            .await
-            .map_err(|e| format!("compare completed import: {e}"))?
-            .unwrap_or(false);
+    let verify_workers = *IMPORT_VERIFY_CONCURRENCY;
+    let compare_started = std::time::Instant::now();
+    let same = tokio::task::spawn_blocking(move || {
+        files_have_same_contents_with_workers(&compare_src, &compare_dest, verify_workers)
+    })
+    .await
+    .map_err(|e| format!("compare completed import: {e}"))?
+    .unwrap_or(false);
     if !same {
         return Ok(None);
     }
+
+    tracing::info!(
+        target: "ryokan::post_processing",
+        workers = verify_workers,
+        elapsed_ms = compare_started.elapsed().as_millis(),
+        source = source_path,
+        "verified existing import destination"
+    );
 
     let file_size = tokio::fs::metadata(dest)
         .await

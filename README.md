@@ -16,6 +16,11 @@ episode import plan.
 The published container includes `ffprobe` so post-download stream metadata
 and measured resolution participate in classification without extra setup.
 
+Interrupted imports can adopt an identical destination created before durable
+checkpoints were available. Set `RYOKAN_POST_PROCESSING_VERIFY_CONCURRENCY` to
+run `1` to `8` read-only comparison workers per file; the default is `1` and
+all library and database mutations remain serialized.
+
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.

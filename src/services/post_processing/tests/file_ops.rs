@@ -14,7 +14,10 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use crate::services::post_processing::{do_file_op, files_have_same_contents};
+use crate::services::post_processing::{
+    do_file_op, files_have_same_contents, files_have_same_contents_with_workers,
+    parse_import_verify_concurrency,
+};
 
 fn write_src(dir: &TempDir, name: &str, body: &[u8]) -> PathBuf {
     let path = dir.path().join(name);
@@ -35,6 +38,39 @@ fn content_comparison_rejects_same_size_different_bytes() {
         !files_have_same_contents(&src, &different).unwrap(),
         "equal file size alone must not authorize checkpoint adoption"
     );
+}
+
+#[test]
+fn parallel_content_comparison_checks_every_range() {
+    let dir = TempDir::new().unwrap();
+    let payload: Vec<u8> = (0..=255).cycle().take(3 * 1024 * 1024 + 137).collect();
+    let src = write_src(&dir, "source-large.mkv", &payload);
+    let matching = write_src(&dir, "matching-large.mkv", &payload);
+
+    assert!(files_have_same_contents_with_workers(&src, &matching, 2).unwrap());
+
+    for (case, offset) in [
+        ("first", 0),
+        ("middle", payload.len() / 2),
+        ("last", payload.len() - 1),
+    ] {
+        let mut changed = payload.clone();
+        changed[offset] ^= 0xff;
+        let different = write_src(&dir, &format!("different-{case}.mkv"), &changed);
+        assert!(
+            !files_have_same_contents_with_workers(&src, &different, 2).unwrap(),
+            "worker ranges must detect a mismatch in the {case} range"
+        );
+    }
+}
+
+#[test]
+fn import_verify_concurrency_defaults_and_clamps() {
+    assert_eq!(parse_import_verify_concurrency(None), 1);
+    assert_eq!(parse_import_verify_concurrency(Some("not-a-number")), 1);
+    assert_eq!(parse_import_verify_concurrency(Some("0")), 1);
+    assert_eq!(parse_import_verify_concurrency(Some("2")), 2);
+    assert_eq!(parse_import_verify_concurrency(Some("999")), 8);
 }
 
 // ─── Hardlink mode ─────────────────────────────────────────────────
