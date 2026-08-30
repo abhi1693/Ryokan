@@ -1187,6 +1187,11 @@
 <td>Write-side floor for the DB-backed logs table (separate from <code>RUST_LOG</code>). One of <code>trace</code>, <code>debug</code>, <code>info</code>, <code>warn</code>, <code>error</code>. Read-side filtering on the System → Logs page is independent.</td>
 </tr>
 <tr>
+<td><code>RYOKAN_POST_PROCESSING_VERIFY_CONCURRENCY</code></td>
+<td><code>1</code></td>
+<td>Read-only workers used to byte-verify an existing destination before adopting it as a durable import checkpoint. Values are clamped to <code>1</code> through <code>8</code>; library and database mutations remain serialized.</td>
+</tr>
+<tr>
 <td><code>RYOKAN_ENCRYPTION_KEY</code></td>
 <td>unset (file fallback)</td>
 <td>Base64-encoded 32-byte AEAD key for encrypting OAuth tokens. Loading priority: env var, then key file, then auto-generated on first run. <strong>Key rotation isn't supported</strong>; changing it invalidates all stored OAuth tokens and you'll need to re-link external accounts.</td>
