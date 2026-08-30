@@ -77,6 +77,16 @@ static RE_HALF_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:[\s_]-[\s_]|s\d{1,2}e)(\d{1,4})[._]5(?:[\s._\[\(]|$)")
         .expect("RE_HALF_EPISODE compiles")
 });
+static RE_TRAILING_UNDERSCORE_EP: LazyLock<Regex> = LazyLock::new(|| {
+    // Some releases end with a zero-padded episode token and no dash,
+    // e.g. `[Group]_Title_01.mkv`. Keep this fallback deliberately
+    // narrow: the underscore is required, only 2-3 digits are accepted,
+    // and the token must sit immediately before a supported video
+    // extension. That excludes title years, `1080p`, codec numbers, and
+    // ordinary one-digit title/season suffixes.
+    Regex::new(r"_(\d{2,3})(?:v\d+)?\.(?:mkv|mp4|avi|wmv|flv|webm|m4v|ts)$")
+        .expect("RE_TRAILING_UNDERSCORE_EP compiles")
+});
 static RE_VERSION: LazyLock<Regex> = LazyLock::new(|| {
     // Release version: glued to the episode digits (`05v2`, `S02E10v2`,
     // `023v2`) or a standalone token (`(v2)`, `[v2]`, `.V2.`, ` v2 `).
@@ -386,6 +396,7 @@ fn parse_episode_number_inner(lower: &str) -> Option<(Option<i32>, i32)> {
     // single set of patterns handles both shapes without having to
     // dual-parse. Only allocates when an underscore is actually
     // present — most inputs skip the replace.
+    let raw_lower = lower;
     let normalized = if lower.contains('_') {
         Some(lower.replace('_', " "))
     } else {
@@ -467,6 +478,15 @@ fn parse_episode_number_inner(lower: &str) -> Option<(Option<i32>, i32)> {
         && let Some(m) = caps.get(1)
         && let Ok(e) = m.as_str().parse::<i32>()
     {
+        return Some((None, e));
+    }
+
+    // Final zero-padded underscore fallback. Run this after the established
+    // patterns so an explicit SxxExx/Ep marker always wins. It uses the raw
+    // filename because underscore normalization intentionally erases the
+    // delimiter that makes this shape safe to recognize.
+    if let Some(caps) = RE_TRAILING_UNDERSCORE_EP.captures(raw_lower) {
+        let e: i32 = caps.get(1)?.as_str().parse().ok()?;
         return Some((None, e));
     }
 
@@ -795,6 +815,22 @@ mod tests {
     fn episode_word_prefix_with_three_digit_number() {
         // Long-runner with no other tokens in the filename.
         assert_eq!(parse("Episode 039.mkv"), Some((None, 39)));
+    }
+
+    #[test]
+    fn trailing_zero_padded_underscore_episode() {
+        assert_eq!(
+            parse("[Tiasophix]_Renketsu_Houshiki_01.mkv"),
+            Some((None, 1))
+        );
+        assert_eq!(parse("Group_Title_127v2.mp4"), Some((None, 127)));
+    }
+
+    #[test]
+    fn trailing_underscore_fallback_rejects_metadata_and_title_numbers() {
+        assert_eq!(parse("Group_Title_2024.mkv"), None);
+        assert_eq!(parse("Group_Title_1080p.mkv"), None);
+        assert_eq!(parse("Group_Title_2.mkv"), None);
     }
 
     // ── NCOP/NCED non-episodic guard ─────────────────────────────────

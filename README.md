@@ -26,6 +26,10 @@ the whole batch. Set `RYOKAN_POST_PROCESSING_MAX_FILES_PER_GRAB=1` for one file
 per grab in each pass; durable checkpoints let the next pass continue without
 repeating completed file operations.
 
+Filename parsing recognizes zero-padded trailing episode tokens such as
+`Group_Title_01.mkv` while rejecting years, resolutions, and one-digit title
+suffixes.
+
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.
