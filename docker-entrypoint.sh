@@ -13,6 +13,11 @@ set -e
 
 PUID="${PUID:-1000}"
 PGID="${PGID:-1000}"
+# Keep the encryption key on the persistent data volume while still allowing
+# operators to override its location. Defining this here avoids treating the
+# path itself as secret image metadata during Dockerfile validation.
+RYOKAN_KEY_FILE_PATH="${RYOKAN_KEY_FILE_PATH:-/data/.ryokan-key}"
+export RYOKAN_KEY_FILE_PATH
 
 # --- Group ---
 if ! getent group ryokan >/dev/null 2>&1; then

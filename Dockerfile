@@ -17,6 +17,10 @@ COPY templates/ templates/
 COPY static/ static/
 RUN touch src/main.rs && cargo build --release
 
+# Supply ffprobe as a pinned, multi-architecture static binary instead of
+# installing Debian's full ffmpeg dependency tree in the runtime image.
+FROM mwader/static-ffmpeg:7.1@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ffmpeg
+
 # Runtime stage
 FROM debian:trixie-slim
 
@@ -34,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY --from=builder /app/target/release/ryokan /app/ryokan
+COPY --from=ffmpeg /ffprobe /usr/local/bin/ffprobe
 COPY static/ /app/static/
 COPY LICENSE /app/LICENSE
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
@@ -53,7 +58,8 @@ ENV RYOKAN_MEDIA_CACHE_DIR=/data/cache/artwork
 # /app and the entrypoint chowns /data not /app/data — so without
 # this override the ryokan user can't write the key file at boot
 # and `services::crypto` panics with `Permission denied (os error 13)`.
-ENV RYOKAN_KEY_FILE_PATH=/data/.ryokan-key
+# The entrypoint supplies this default so Docker's build checks do not
+# misclassify the path as secret image metadata.
 # Anibridge mappings cache — same CWD-relative footgun as the key
 # file. Without this override the ~9MB mappings blob silently
 # fails to persist on every fetch (write to /app/data/... 13s),

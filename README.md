@@ -13,6 +13,9 @@ multi-episode release as a single episode, and excludes videos beneath
 secondary-media paths such as `Extras/`, `Samples/`, and `Trailers/` from the
 episode import plan.
 
+The published container includes `ffprobe` so post-download stream metadata
+and measured resolution participate in classification without extra setup.
+
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.

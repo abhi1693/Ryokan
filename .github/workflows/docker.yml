@@ -74,6 +74,7 @@ jobs:
             -e LISTEN_ADDR=0.0.0.0:8978 \
             -p 8978:8978 \
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          docker exec ryokan-smoke ffprobe -version
           # Probe /login (matches the production HEALTHCHECK). 200 means
           # the auth UI rendered; anything else fails. Polling loop
           # rather than fixed sleep so a fast cold-boot doesn't waste a
