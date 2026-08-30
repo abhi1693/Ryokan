@@ -26,7 +26,7 @@ Add torznab indexers (typically fronted by Prowlarr) and newznab indexers (typic
 
 **Indexer** here means a search source. Ryokan ships with built-in Nyaa search; everything else lands in this tab.
 
-**Categories** controls the Torznab/Newznab category ids sent when Ryokan searches or polls that row. The default `5070` keeps the historical anime-only behavior. Enter a comma-separated list when a feed needs more than one category; for example, use `6000` on a dedicated adult-content indexer. Keeping that source in its own row avoids mixing adult results into ordinary anime indexers.
+**Categories** controls the Torznab/Newznab category ids sent when Ryokan searches or polls that row. The default `5070` keeps the historical anime behavior. Enter a comma-separated list when a feed needs more than one category.
 
 Each indexer row has an optional **download client pin** that overrides the per-protocol default for grabs from that indexer. Useful when you want one private tracker's grabs going to a specific qBit instance with stricter seed rules.
 

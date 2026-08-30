@@ -52,7 +52,7 @@
 //!   window — each Prowlarr-fronted indexer has its own budget.
 //! - **`tvsearch` with the row's configured categories and `q=<title>`
 //!   is the right path.** The default remains anime category 5070;
-//!   other feeds can opt into categories such as adult content 6000.
+//!   other feeds can opt into non-default categories.
 //!   `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.
 

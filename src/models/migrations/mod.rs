@@ -2142,7 +2142,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
 
     // Per-indexer Torznab/Newznab categories. Legacy rows retain
     // Ryokan's historical anime-only behavior; operators can opt a
-    // feed into additional categories (for example adult content)
+    // feed into additional categories
     // without broadening every configured indexer.
     sqlx::query("ALTER TABLE indexers ADD COLUMN category_ids TEXT NOT NULL DEFAULT '5070'")
         .execute(db)
