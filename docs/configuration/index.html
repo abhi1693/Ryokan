@@ -1239,7 +1239,7 @@
 <h2 id="indexers">Indexers<a class="headerlink" href="#indexers" title="Anchor link">&para;</a></h2>
 <p>Add torznab indexers (typically fronted by Prowlarr) and newznab indexers (typically Jackett or direct from NZBGeek-style services) here. Direct RSS feeds from sources like SubsPlease also live in this tab.</p>
 <p><strong>Indexer</strong> here means a search source. Ryokan ships with built-in Nyaa search; everything else lands in this tab.</p>
-<p><strong>Categories</strong> controls the Torznab/Newznab category ids sent when Ryokan searches or polls that row. The default <code>5070</code> keeps the historical anime-only behavior. Enter a comma-separated list when a feed needs more than one category; for example, use <code>6000</code> on a dedicated adult-content indexer. Keeping that source in its own row avoids mixing adult results into ordinary anime indexers.</p>
+<p><strong>Categories</strong> controls the Torznab/Newznab category ids sent when Ryokan searches or polls that row. The default <code>5070</code> keeps the historical anime behavior. Enter a comma-separated list when a feed needs more than one category.</p>
 <p>Each indexer row has an optional <strong>download client pin</strong> that overrides the per-protocol default for grabs from that indexer. Useful when you want one private tracker's grabs going to a specific qBit instance with stricter seed rules.</p>
 <h2 id="preferred-quality-releases">Preferred Quality &amp; Releases<a class="headerlink" href="#preferred-quality-releases" title="Anchor link">&para;</a></h2>
 <p>The scoring inputs that decide which release wins when several match the same episode.</p>
