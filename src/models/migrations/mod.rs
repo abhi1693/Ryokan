@@ -2122,6 +2122,7 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
             kind TEXT NOT NULL,
             url TEXT NOT NULL,
             api_key TEXT NOT NULL DEFAULT '',
+            category_ids TEXT NOT NULL DEFAULT '5070',
             priority INTEGER NOT NULL DEFAULT 25,
             enabled INTEGER NOT NULL DEFAULT 1,
             is_private_tracker INTEGER NOT NULL DEFAULT 0,
@@ -2138,6 +2139,15 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     )
     .execute(db)
     .await?;
+
+    // Per-indexer Torznab/Newznab categories. Legacy rows retain
+    // Ryokan's historical anime-only behavior; operators can opt a
+    // feed into additional categories (for example adult content)
+    // without broadening every configured indexer.
+    sqlx::query("ALTER TABLE indexers ADD COLUMN category_ids TEXT NOT NULL DEFAULT '5070'")
+        .execute(db)
+        .await
+        .ok();
 
     // Issue #28 — `grabbed_torrents.indexer_id` records which
     // indexer surfaced each grab. Nullable, no real FK: SQLite

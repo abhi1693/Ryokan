@@ -47,6 +47,7 @@ async fn indexer_stateless_test_empty_url_returns_hx_trigger() {
             kind: "torznab".to_string(),
             url: String::new(), // empty — triggers the early-fail path
             api_key: "k".to_string(),
+            category_ids: "5070".to_string(),
         }),
     )
     .await
@@ -83,6 +84,7 @@ async fn indexer_stateless_test_unknown_kind_returns_hx_trigger() {
             kind: "nonsense".to_string(),
             url: "http://example.local/torznab".to_string(),
             api_key: String::new(),
+            category_ids: "5070".to_string(),
         }),
     )
     .await

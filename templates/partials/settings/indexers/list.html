@@ -107,6 +107,10 @@
                             <dt>Priority</dt>
                             <dd>{{ idx.priority }}</dd>
                         </div>
+                        <div class="dc-card-meta-row">
+                            <dt>Categories</dt>
+                            <dd>{{ idx.category_ids }}</dd>
+                        </div>
                         {% if let Some(pin) = idx.download_client_id %}
                         <div class="dc-card-meta-row">
                             <dt>Client</dt>

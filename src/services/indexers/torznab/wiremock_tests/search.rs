@@ -4,7 +4,7 @@
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, ResponseTemplate};
 
-use super::fixture::{TEST_API_KEY, new_fixture, new_fixture_newznab};
+use super::fixture::{TEST_API_KEY, new_fixture, new_fixture_newznab, new_fixture_with_categories};
 use crate::services::indexers::{Indexer, SearchQuery};
 
 const SEARCH_BODY: &str = r#"<?xml version="1.0"?>
@@ -117,6 +117,29 @@ async fn search_uses_csv_for_multiple_categories() {
     let query = SearchQuery {
         q: "Test".to_string(),
         categories: vec![5070, 5080],
+        limit: None,
+        offset: None,
+    };
+    let _ = client.search(&query).await.expect("must succeed");
+}
+
+#[tokio::test]
+async fn search_uses_indexer_categories_when_query_omits_them() {
+    let (server, client) = new_fixture_with_categories("6000").await;
+    Mock::given(method("GET"))
+        .and(path("/api"))
+        .and(query_param("cat", "6000"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string(r#"<?xml version="1.0"?><rss><channel/></rss>"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let query = SearchQuery {
+        q: "Test".to_string(),
+        categories: Vec::new(),
         limit: None,
         offset: None,
     };

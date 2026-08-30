@@ -456,7 +456,7 @@ In Ryokan, go to **Settings → General → Media Root Path** and set it to `/me
 
 Skip this for now if you want; Nyaa is built in and works out of the box. But if you have a Prowlarr or Jackett set up with private trackers, this is the moment to wire those in.
 
-**Settings → Indexers → Add indexer**. Paste the URL Prowlarr or Jackett gave you (it ends in `/api`), the API key, and pick a name. The defaults handle the rest.
+**Settings → Indexers → Add indexer**. Paste the URL Prowlarr or Jackett gave you (it ends in `/api`), the API key, and pick a name. The category default `5070` covers anime. For a dedicated adult-content feed, use category `6000`; comma-separate ids if the same row needs more than one.
 
 Click **Test connection** to confirm Ryokan can reach it.
 

@@ -151,6 +151,10 @@ pub struct IndexerUpsertForm {
     pub kind: String,
     pub url: String,
     pub api_key: String,
+    /// Comma-separated Torznab/Newznab category ids. Blank keeps
+    /// the historical anime default (5070).
+    #[serde(default)]
+    pub category_ids: String,
     /// Sonarr-convention priority. Range 1-50; out-of-range coerces
     /// to 25. Empty string also coerces to 25.
     pub priority: Option<String>,
@@ -217,6 +221,13 @@ pub async fn settings_indexers_upsert(
     let min_seeders = parse_optional_i32(&form.min_seeders, 1).max(0);
     let request_timeout_secs = parse_optional_secs(&form.request_timeout_secs);
     let api_key = form.api_key.trim();
+    let category_ids = match crate::models::indexers::canonicalize_category_ids(&form.category_ids)
+    {
+        Ok(ids) => ids,
+        Err(message) => {
+            return error_redirect(is_htmx, &urlencoding::encode(&message));
+        }
+    };
     let download_client_id = parse_optional_i64(&form.download_client_id);
 
     // Protocol guard — torznab indexers route torrent magnets /
@@ -268,6 +279,7 @@ pub async fn settings_indexers_upsert(
         kind,
         url,
         api_key,
+        category_ids: &category_ids,
         priority,
         enabled: form.enabled.is_some(),
         is_private_tracker: form.is_private_tracker.is_some(),
@@ -295,7 +307,7 @@ pub async fn settings_indexers_upsert(
                 &state.db,
                 LogCategory::System,
                 &format!("Indexer {verb}: {name} ({kind})"),
-                &format!("id={id}, priority={priority}"),
+                &format!("id={id}, priority={priority}, categories={category_ids}"),
             )
             .await;
             // PR #107 review fix #4: rebuild the IndexerCache so
@@ -597,6 +609,8 @@ pub struct IndexerStatelessTestForm {
     pub url: String,
     #[serde(default)]
     pub api_key: String,
+    #[serde(default)]
+    pub category_ids: String,
     /// Optional — when set the response uses the matching cache
     /// entry (re-uses the warm reqwest client + cooldown state).
     /// When unset, a transient TorznabIndexer is built per request.
@@ -636,6 +650,11 @@ pub async fn settings_indexers_test_stateless(
     if reqwest::Url::parse(url).is_err() {
         return indexer_test_trigger(false, &format!("Invalid URL syntax: {url}"));
     }
+    let category_ids = match crate::models::indexers::canonicalize_category_ids(&form.category_ids)
+    {
+        Ok(ids) => ids,
+        Err(message) => return indexer_test_trigger(false, &message),
+    };
 
     // Prefer the cached client when an id is provided AND it resolves
     // to a row in the IndexerCache — keeps the warm reqwest client +
@@ -648,7 +667,7 @@ pub async fn settings_indexers_test_stateless(
         if let Some(cached) = snapshot.iter().find(|i| i.id() == id).cloned() {
             cached
         } else {
-            match build_transient_indexer(0, kind, url, form.api_key.trim()) {
+            match build_transient_indexer(0, kind, url, form.api_key.trim(), &category_ids) {
                 Ok(c) => c,
                 Err(e) => {
                     return indexer_test_trigger(
@@ -659,7 +678,7 @@ pub async fn settings_indexers_test_stateless(
             }
         }
     } else {
-        match build_transient_indexer(0, kind, url, form.api_key.trim()) {
+        match build_transient_indexer(0, kind, url, form.api_key.trim(), &category_ids) {
             Ok(c) => c,
             Err(e) => {
                 return indexer_test_trigger(
@@ -736,6 +755,7 @@ fn build_transient_indexer(
     kind: &str,
     url: &str,
     api_key: &str,
+    category_ids: &str,
 ) -> Result<std::sync::Arc<dyn crate::services::indexers::Indexer>, String> {
     let row = crate::models::indexers::Indexer {
         id,
@@ -743,6 +763,7 @@ fn build_transient_indexer(
         kind: kind.to_string(),
         url: url.to_string(),
         api_key: api_key.to_string(),
+        category_ids: category_ids.to_string(),
         priority: 25,
         enabled: true,
         is_private_tracker: false,
@@ -889,6 +910,7 @@ mod tests {
                 kind: kind.to_string(),
                 url: "https://prowlarr.local/1/api".into(),
                 api_key: "k".into(),
+                category_ids: "5070".into(),
                 priority: Some("25".into()),
                 enabled: Some("on".into()),
                 is_private_tracker: None,
@@ -1146,6 +1168,7 @@ mod tests {
                 kind: "torznab".to_string(),
                 url: "https://prowlarr.local/1/api".to_string(),
                 api_key: "k".to_string(),
+                category_ids: "5070".to_string(),
                 priority: Some("25".to_string()),
                 enabled: Some("on".to_string()),
                 is_private_tracker: None,
@@ -1188,6 +1211,7 @@ mod tests {
                     kind: KIND_TORZNAB,
                     url: "https://prowlarr.local/1/api",
                     api_key: "k",
+                    category_ids: "5070",
                     priority: 25,
                     enabled: true,
                     is_private_tracker: false,
@@ -1226,6 +1250,7 @@ mod tests {
                     kind: KIND_TORZNAB,
                     url: "https://prowlarr.local/1/api",
                     api_key: "k",
+                    category_ids: "5070",
                     priority: 25,
                     enabled: true,
                     is_private_tracker: false,

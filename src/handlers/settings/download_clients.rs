@@ -1291,6 +1291,7 @@ mod tests {
                 kind: crate::models::indexers::KIND_TORZNAB,
                 url: "https://prowlarr.local/1/api",
                 api_key: "k",
+                category_ids: "5070",
                 priority: 25,
                 enabled: true,
                 is_private_tracker: true,

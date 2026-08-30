@@ -1092,38 +1092,39 @@ async fn import_torrent(
     // grabs can predate (or have missed) batch classification; allowing a
     // multi-video import through the single-file path would reintroduce the
     // duplicate-destination overwrite that this preflight prevents.
-    let batch_episode_plan = if requires_episode_map_preflight(effective_is_batch, video_files.len()) {
-        let mut cumulative_by_series = HashMap::new();
-        let mut batch_files = Vec::with_capacity(video_files.len());
-        for (file_idx, file) in &video_files {
-            let route = routes_by_file.get(file_idx).copied();
-            let target_series_id = route
-                .map(|(series_id, _)| series_id)
-                .unwrap_or(grab.series_id);
-            let cumulative_prior_episodes =
-                if let Some(value) = cumulative_by_series.get(&target_series_id) {
-                    *value
-                } else {
-                    let value = series::get_by_id(&state.db, target_series_id)
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| format!("series {} not found", target_series_id))?
-                        .cumulative_prior_episodes;
-                    cumulative_by_series.insert(target_series_id, value);
-                    value
-                };
-            batch_files.push((
-                *file_idx,
-                target_series_id,
-                route.map(|(_, offset)| offset),
-                cumulative_prior_episodes,
-                file.name.clone(),
-            ));
-        }
-        validate_batch_episode_map(&batch_files)?
-    } else {
-        BatchPlan::default()
-    };
+    let batch_episode_plan =
+        if requires_episode_map_preflight(effective_is_batch, video_files.len()) {
+            let mut cumulative_by_series = HashMap::new();
+            let mut batch_files = Vec::with_capacity(video_files.len());
+            for (file_idx, file) in &video_files {
+                let route = routes_by_file.get(file_idx).copied();
+                let target_series_id = route
+                    .map(|(series_id, _)| series_id)
+                    .unwrap_or(grab.series_id);
+                let cumulative_prior_episodes =
+                    if let Some(value) = cumulative_by_series.get(&target_series_id) {
+                        *value
+                    } else {
+                        let value = series::get_by_id(&state.db, target_series_id)
+                            .await
+                            .map_err(|e| e.to_string())?
+                            .ok_or_else(|| format!("series {} not found", target_series_id))?
+                            .cumulative_prior_episodes;
+                        cumulative_by_series.insert(target_series_id, value);
+                        value
+                    };
+                batch_files.push((
+                    *file_idx,
+                    target_series_id,
+                    route.map(|(_, offset)| offset),
+                    cumulative_prior_episodes,
+                    file.name.clone(),
+                ));
+            }
+            validate_batch_episode_map(&batch_files)?
+        } else {
+            BatchPlan::default()
+        };
 
     // Lazily-loaded per-series context cache. The single-series case
     // fills exactly one entry; a multi-series routed batch fills one

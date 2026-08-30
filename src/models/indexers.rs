@@ -33,6 +33,9 @@ pub struct Indexer {
     pub kind: String,
     pub url: String,
     pub api_key: String,
+    /// Comma-separated Torznab/Newznab category ids used when a
+    /// search caller does not supply an explicit category list.
+    pub category_ids: String,
     /// Sonarr convention: lower = preferred. Range 1-50, default 25.
     /// Drives auto-search dedup attribution + interactive search row
     /// tiebreaks + fan-out concurrency order.
@@ -87,6 +90,7 @@ pub struct IndexerForm<'a> {
     pub kind: &'a str,
     pub url: &'a str,
     pub api_key: &'a str,
+    pub category_ids: &'a str,
     pub priority: i32,
     pub enabled: bool,
     pub is_private_tracker: bool,
@@ -103,7 +107,7 @@ pub struct IndexerForm<'a> {
     pub rss_enabled: bool,
 }
 
-const SELECT_COLUMNS: &str = "id, name, kind, url, api_key, priority, enabled, \
+const SELECT_COLUMNS: &str = "id, name, kind, url, api_key, category_ids, priority, enabled, \
     is_private_tracker, seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
     download_client_id, rss_enabled, rss_last_polled_at, rss_last_poll_error, \
     rss_last_item_count, caps_json, caps_refreshed_at, created_at, updated_at";
@@ -122,6 +126,9 @@ fn row_to_indexer(row: &sqlx::sqlite::SqliteRow) -> Indexer {
         kind: row.try_get("kind").unwrap_or_default(),
         url: row.try_get("url").unwrap_or_default(),
         api_key: row.try_get("api_key").unwrap_or_default(),
+        category_ids: row
+            .try_get("category_ids")
+            .unwrap_or_else(|_| "5070".to_string()),
         priority: row.try_get("priority").unwrap_or(25),
         enabled: row.try_get::<i64, _>("enabled").unwrap_or(0) != 0,
         is_private_tracker: row.try_get::<i64, _>("is_private_tracker").unwrap_or(0) != 0,
@@ -204,15 +211,16 @@ pub async fn get_by_id(db: &SqlitePool, id: i64) -> Result<Option<Indexer>, sqlx
 pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx::Error> {
     let result = sqlx::query(
         "INSERT INTO indexers \
-         (name, kind, url, api_key, priority, enabled, is_private_tracker, \
+         (name, kind, url, api_key, category_ids, priority, enabled, is_private_tracker, \
           seed_ratio, seed_time_minutes, min_seeders, request_timeout_secs, \
           download_client_id, rss_enabled) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(form.name)
     .bind(form.kind)
     .bind(form.url)
     .bind(form.api_key)
+    .bind(form.category_ids)
     .bind(form.priority)
     .bind(form.enabled as i64)
     .bind(form.is_private_tracker as i64)
@@ -230,7 +238,7 @@ pub async fn insert(db: &SqlitePool, form: IndexerForm<'_>) -> Result<i64, sqlx:
 pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(), sqlx::Error> {
     sqlx::query(
         "UPDATE indexers SET \
-         name = ?, kind = ?, url = ?, api_key = ?, priority = ?, enabled = ?, \
+         name = ?, kind = ?, url = ?, api_key = ?, category_ids = ?, priority = ?, enabled = ?, \
          is_private_tracker = ?, seed_ratio = ?, seed_time_minutes = ?, min_seeders = ?, \
          request_timeout_secs = ?, download_client_id = ?, rss_enabled = ?, \
          updated_at = strftime('%s','now') \
@@ -240,6 +248,7 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
     .bind(form.kind)
     .bind(form.url)
     .bind(form.api_key)
+    .bind(form.category_ids)
     .bind(form.priority)
     .bind(form.enabled as i64)
     .bind(form.is_private_tracker as i64)
@@ -253,6 +262,49 @@ pub async fn update(db: &SqlitePool, id: i64, form: IndexerForm<'_>) -> Result<(
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Validate and normalize a user-entered category list. Commas,
+/// semicolons, and ASCII whitespace are accepted as separators;
+/// duplicates are removed while preserving the user's order.
+/// Blank input preserves Ryokan's historical anime default.
+pub fn canonicalize_category_ids(input: &str) -> Result<String, String> {
+    let mut ids = Vec::new();
+    for token in input.split(|c: char| c == ',' || c == ';' || c.is_ascii_whitespace()) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let id = token
+            .parse::<i32>()
+            .map_err(|_| format!("Invalid category id: {token}"))?;
+        if id <= 0 {
+            return Err(format!("Category ids must be positive: {token}"));
+        }
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    if ids.is_empty() {
+        ids.push(5070);
+    }
+    Ok(ids.iter().map(i32::to_string).collect::<Vec<_>>().join(","))
+}
+
+/// Parse a persisted list for runtime use. Invalid legacy or
+/// manually-edited values fail safely to the anime default.
+pub fn parse_category_ids(input: &str) -> Vec<i32> {
+    canonicalize_category_ids(input)
+        .ok()
+        .and_then(|value| {
+            value
+                .split(',')
+                .map(str::parse::<i32>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+        })
+        .filter(|ids| !ids.is_empty())
+        .unwrap_or_else(|| vec![5070])
 }
 
 /// PR #107 round-3 review fix #3: delete the indexer row and
@@ -347,6 +399,7 @@ mod tests {
             kind: KIND_TORZNAB,
             url: "https://prowlarr.local/1/api",
             api_key: "secret",
+            category_ids: "5070,6000",
             priority: 25,
             enabled: true,
             is_private_tracker: false,
@@ -368,11 +421,24 @@ mod tests {
         assert_eq!(row.kind, KIND_TORZNAB);
         assert_eq!(row.url, "https://prowlarr.local/1/api");
         assert_eq!(row.api_key, "secret");
+        assert_eq!(row.category_ids, "5070,6000");
         assert_eq!(row.priority, 25);
         assert!(row.enabled);
         assert!(!row.is_private_tracker);
         assert_eq!(row.seed_ratio, None);
         assert_eq!(row.min_seeders, 1);
+    }
+
+    #[test]
+    fn category_ids_are_canonicalized_and_validated() {
+        assert_eq!(canonicalize_category_ids("").unwrap(), "5070");
+        assert_eq!(
+            canonicalize_category_ids("5070, 6000;5070").unwrap(),
+            "5070,6000"
+        );
+        assert!(canonicalize_category_ids("adult").is_err());
+        assert!(canonicalize_category_ids("0").is_err());
+        assert_eq!(parse_category_ids("broken"), vec![5070]);
     }
 
     #[tokio::test]

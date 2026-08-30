@@ -12,9 +12,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 
-use super::super::{
-    DEFAULT_REQUEST_TIMEOUT_SECS, Indexer, IndexerCaps, Release, SearchQuery, TORZNAB_CAT_ANIME,
-};
+use super::super::{DEFAULT_REQUEST_TIMEOUT_SECS, Indexer, IndexerCaps, Release, SearchQuery};
 use super::parser::{TorznabError, parse_caps_response, parse_search_response};
 use crate::models::indexers as model;
 
@@ -37,6 +35,9 @@ pub struct TorznabIndexer {
     /// parse or reconstruct the prefix.
     base_url: String,
     api_key: String,
+    /// Per-indexer categories used by automatic and interactive
+    /// searches unless the caller explicitly supplies its own.
+    category_ids: Vec<i32>,
     priority: i32,
     is_private_tracker: bool,
     /// Pre-grab seeder filter. Releases below this threshold
@@ -75,6 +76,7 @@ impl TorznabIndexer {
             kind: row.kind.clone(),
             base_url: row.url.trim_end_matches('/').to_string(),
             api_key: row.api_key.trim().to_string(),
+            category_ids: model::parse_category_ids(&row.category_ids),
             priority: row.priority,
             is_private_tracker: row.is_private_tracker,
             min_seeders: row.min_seeders,
@@ -127,7 +129,10 @@ impl TorznabIndexer {
             .get(url)
             .send()
             .await
-            .map_err(|e| format!("indexer request failed: {e}"))?;
+            // reqwest errors include the request URL by default.
+            // Torznab puts the API key in that URL, so strip it
+            // before the error reaches logs or persisted RSS status.
+            .map_err(|e| format!("indexer request failed: {}", e.without_url()))?;
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             // Surface the upstream Retry-After so the caller can
@@ -213,7 +218,7 @@ impl Indexer for TorznabIndexer {
 
     async fn search(&self, query: &SearchQuery) -> Result<Vec<Release>, String> {
         // Build the parameter set. For anime searches we always
-        // use `t=tvsearch` with `cat=5070` per protocol research:
+        // use `t=tvsearch` with the indexer's configured categories:
         // anime trackers key on absolute episode numbers in the
         // release title, so `season`/`ep` params don't translate.
         let mut params: Vec<(&str, String)> = Vec::new();
@@ -221,7 +226,7 @@ impl Indexer for TorznabIndexer {
             params.push(("q", query.q.clone()));
         }
         let cats = if query.categories.is_empty() {
-            vec![TORZNAB_CAT_ANIME]
+            self.category_ids.clone()
         } else {
             query.categories.clone()
         };
@@ -311,6 +316,7 @@ mod tests {
             kind: model::KIND_TORZNAB.to_string(),
             url: "https://prowlarr.local/1/api".to_string(),
             api_key: "secret".to_string(),
+            category_ids: "5070".to_string(),
             priority: 25,
             enabled: true,
             is_private_tracker: false,
@@ -367,6 +373,22 @@ mod tests {
         let idx = TorznabIndexer::from_row(&row).unwrap();
         let url = idx.build_url("caps", &[]);
         assert!(!url.contains("apikey="), "must omit empty apikey: {url}");
+    }
+
+    #[test]
+    fn from_row_parses_multiple_default_categories() {
+        let mut row = sample_row();
+        row.category_ids = "5070,6000".to_string();
+        let idx = TorznabIndexer::from_row(&row).unwrap();
+        assert_eq!(idx.category_ids, vec![5070, 6000]);
+    }
+
+    #[test]
+    fn from_row_falls_back_when_categories_are_invalid() {
+        let mut row = sample_row();
+        row.category_ids = "invalid".to_string();
+        let idx = TorznabIndexer::from_row(&row).unwrap();
+        assert_eq!(idx.category_ids, vec![5070]);
     }
 
     #[test]

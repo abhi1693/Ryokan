@@ -36,6 +36,7 @@ async fn seed_indexer(db: &SqlitePool, name: &str) -> i64 {
             kind: "torznab",
             url: "https://example.com/torznab",
             api_key: "k",
+            category_ids: "5070",
             priority: 25,
             enabled: true,
             is_private_tracker: false,

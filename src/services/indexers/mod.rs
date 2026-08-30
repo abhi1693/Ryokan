@@ -50,8 +50,10 @@
 //!   `fetch()` until the window lifts. Per-id rather than global
 //!   so a 429 on AB doesn't silence a healthy NZBGeek for the same
 //!   window — each Prowlarr-fronted indexer has its own budget.
-//! - **`tvsearch` with `cat=5070&q=<title>` is the right anime
-//!   path.** `season`/`ep` params don't translate cleanly because
+//! - **`tvsearch` with the row's configured categories and `q=<title>`
+//!   is the right path.** The default remains anime category 5070;
+//!   other feeds can opt into categories such as adult content 6000.
+//!   `season`/`ep` params don't translate cleanly because
 //!   anime trackers key on absolute episode numbers in titles.
 
 pub mod cooldown;
@@ -88,8 +90,9 @@ pub const CAPS_TTL_SECONDS: i64 = 7 * 24 * 60 * 60;
 #[derive(Debug, Clone, Default)]
 pub struct SearchQuery {
     pub q: String,
-    /// Torznab category ids. Defaults to `[5070]` (anime) when
-    /// empty. Multiple ids OR together on the wire (`cat=5070,5080`).
+    /// Torznab category ids. An empty list delegates to the
+    /// indexer's configured defaults (historically `[5070]`).
+    /// Multiple ids OR together on the wire (`cat=5070,6000`).
     pub categories: Vec<i32>,
     /// Page size. None lets the impl pick (typically the indexer's
     /// caps-reported default). Must be ≤ caps `max_limit`.
@@ -699,11 +702,9 @@ fn format_publish_date(unix_ts: i64) -> String {
 /// sync tick actually needs but consistent with existing search
 /// behavior).
 ///
-/// `categories` is empty — both `torznab/client.rs` and the
-/// newznab path fall through to `[TORZNAB_CAT_ANIME]` (5070) on
-/// an empty list. The 5070 category id is shared between the two
-/// protocols (newznab's anime category is also 5070 in mainline
-/// schemas); no protocol-aware branching needed here.
+/// `categories` is empty so the indexer's configured category list
+/// is used. Existing rows default to anime category 5070, while a
+/// dedicated feed can opt into another category such as 6000.
 pub async fn fetch_indexer_rss(
     indexer: &dyn Indexer,
 ) -> Result<Vec<crate::services::rss::RssItem>, String> {
@@ -996,6 +997,7 @@ mod tests {
             kind: KIND_TORZNAB,
             url: Box::leak(url.to_string().into_boxed_str()),
             api_key: "k",
+            category_ids: "5070",
             priority,
             enabled: true,
             is_private_tracker: false,

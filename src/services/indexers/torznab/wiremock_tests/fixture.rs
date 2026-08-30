@@ -14,7 +14,11 @@ pub const TEST_API_KEY: &str = "wiremock-key-01234567";
 /// `TorznabIndexer` configured to talk to it. The base URL points
 /// at `<server>/api` so tests register `Mock`s on `path("/api")`.
 pub async fn new_fixture() -> (MockServer, TorznabIndexer) {
-    new_fixture_with_kind(KIND_TORZNAB, "Wiremock").await
+    new_fixture_with_kind(KIND_TORZNAB, "Wiremock", "5070").await
+}
+
+pub async fn new_fixture_with_categories(category_ids: &str) -> (MockServer, TorznabIndexer) {
+    new_fixture_with_kind(KIND_TORZNAB, "Wiremock", category_ids).await
 }
 
 /// Newznab variant — same wire format and same `TorznabIndexer`
@@ -24,10 +28,14 @@ pub async fn new_fixture() -> (MockServer, TorznabIndexer) {
 /// "Indexer" column on interactive search verifiably attributes
 /// usenet-side hits the same way it attributes torrent-side ones.
 pub async fn new_fixture_newznab() -> (MockServer, TorznabIndexer) {
-    new_fixture_with_kind(KIND_NEWZNAB, "WiremockUsenet").await
+    new_fixture_with_kind(KIND_NEWZNAB, "WiremockUsenet", "5070").await
 }
 
-async fn new_fixture_with_kind(kind: &str, display_name: &str) -> (MockServer, TorznabIndexer) {
+async fn new_fixture_with_kind(
+    kind: &str,
+    display_name: &str,
+    category_ids: &str,
+) -> (MockServer, TorznabIndexer) {
     let server = MockServer::start().await;
     let row = IndexerRow {
         id: 7,
@@ -35,6 +43,7 @@ async fn new_fixture_with_kind(kind: &str, display_name: &str) -> (MockServer, T
         kind: kind.to_string(),
         url: format!("{}/api", server.uri()),
         api_key: TEST_API_KEY.to_string(),
+        category_ids: category_ids.to_string(),
         priority: 25,
         enabled: true,
         is_private_tracker: false,
