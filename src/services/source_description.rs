@@ -78,7 +78,7 @@ pub async fn classify_description(
     info_hash: &str,
     view_url: &str,
 ) -> Vec<SourceEvidence> {
-    if info_hash.trim().is_empty() || view_url.trim().is_empty() {
+    if info_hash.trim().is_empty() || view_url.trim().is_empty() || !is_nyaa_view_url(view_url) {
         return Vec::new();
     }
 
@@ -93,7 +93,7 @@ pub async fn classify_description(
                 Err(err) => {
                     tracing::warn!(
                         target: "ryokan::classify",
-                        url = view_url,
+                        url = %url_without_query(view_url),
                         error = %err,
                         "Nyaa description fetch failed"
                     );
@@ -118,12 +118,39 @@ async fn fetch_description(view_url: &str) -> Result<String, String> {
         .get(view_url)
         .send()
         .await
-        .map_err(|e| format!("request failed: {}", e))?
+        .map_err(|e| format!("request failed: {}", e.without_url()))?
         .text()
         .await
-        .map_err(|e| format!("read body failed: {}", e))?;
+        .map_err(|e| format!("read body failed: {}", e.without_url()))?;
 
     Ok(extract_description_text(&html))
+}
+
+/// Description scraping only understands Nyaa listing pages. Generic
+/// indexers expose download-proxy URLs here, often with credentials in the
+/// query string; fetching one cannot yield listing HTML and must be skipped.
+fn is_nyaa_view_url(value: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(value) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && matches!(url.host_str(), Some("nyaa.si" | "www.nyaa.si"))
+        && url.path().starts_with("/view/")
+}
+
+/// Preserve enough location context for diagnostics without ever logging
+/// query parameters or fragments, which may contain indexer credentials.
+fn url_without_query(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return value
+            .split(['?', '#'])
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    };
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
 }
 
 /// Sleep until at least `MIN_FETCH_INTERVAL` has elapsed since the previous
@@ -403,6 +430,29 @@ mod tests {
     fn empty_description_emits_no_evidence() {
         assert!(scan_description_for_signals("").is_empty());
         assert!(scan_description_for_signals("   \n \t ").is_empty());
+    }
+
+    #[test]
+    fn description_fetch_accepts_only_nyaa_view_pages() {
+        assert!(is_nyaa_view_url("https://nyaa.si/view/12345"));
+        assert!(is_nyaa_view_url("https://www.nyaa.si/view/12345"));
+        assert!(!is_nyaa_view_url(
+            "http://prowlarr.media.svc.cluster.local:9696/31/download?apikey=secret"
+        ));
+        assert!(!is_nyaa_view_url("https://nyaa.si/download/12345.torrent"));
+        assert!(!is_nyaa_view_url("not a URL"));
+    }
+
+    #[test]
+    fn logged_url_drops_query_and_fragment() {
+        let safe = url_without_query(
+            "http://prowlarr.media.svc.cluster.local:9696/31/download?apikey=secret&link=value#part",
+        );
+        assert_eq!(
+            safe,
+            "http://prowlarr.media.svc.cluster.local:9696/31/download"
+        );
+        assert!(!safe.contains("secret"));
     }
 
     #[test]

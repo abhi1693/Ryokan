@@ -14,6 +14,7 @@
 
 use std::sync::{LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::Mutex as AsyncMutex;
 
 /// How long to treat AniList as unavailable after a 429/5xx. If AniList sends a
 /// `Retry-After` header we use that value instead (capped at 5 minutes).
@@ -76,6 +77,12 @@ static RATE_LIMIT_STATE: LazyLock<StdMutex<Option<RateLimitState>>> =
 /// a relation walk that fires N back-to-back AL calls can't burst over
 /// AL's burst limiter (which is documented but not header-exposed).
 static LAST_AL_REQUEST: LazyLock<StdMutex<Option<Instant>>> = LazyLock::new(|| StdMutex::new(None));
+
+/// Serializes the pacing decision and request-slot reservation across every
+/// AniList caller in the process. Without this gate, concurrent callers all
+/// observed the same `LAST_AL_REQUEST`, slept for the same duration, and woke
+/// together, turning the intended 2.2-second spacing into a request burst.
+static ANILIST_THROTTLE_GATE: LazyLock<AsyncMutex<()>> = LazyLock::new(|| AsyncMutex::new(()));
 
 /// Monotonically-set "AniList is in cooldown until Instant". Consulted at the
 /// top of every search so that once we've learned AniList is rate-limiting us,
@@ -233,7 +240,16 @@ fn decide_wait(
 /// seconds — even when N is well under the per-minute limit, AL's
 /// burst limiter trips and we eat a full minute of cooldown for what
 /// would've been a 1-second pause if we'd just paced ourselves.
-pub(super) async fn throttle_before_anilist_request() {
+pub(super) async fn throttle_before_anilist_request() -> Result<(), String> {
+    let _gate = ANILIST_THROTTLE_GATE.lock().await;
+
+    // Callers check cooldown before joining the queue, but another request can
+    // receive a 429 while they wait. Re-check under the gate so queued work is
+    // cancelled instead of draining into an already-known cooldown window.
+    if anilist_cooldown_active() {
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
+    }
+
     let snap = RATE_LIMIT_STATE.lock().ok().and_then(|g| *g);
     let last = LAST_AL_REQUEST.lock().ok().and_then(|g| *g);
     let wait = decide_wait(snap, last, Instant::now());
@@ -255,11 +271,16 @@ pub(super) async fn throttle_before_anilist_request() {
         tokio::time::sleep(wait).await;
     }
 
+    if anilist_cooldown_active() {
+        return Err("AniList rate-limit cooldown active; skipping AniList request".to_string());
+    }
+
     let now = Instant::now();
     if let Ok(mut guard) = LAST_AL_REQUEST.lock() {
         *guard = Some(now);
     }
     record_recent_al_request(now);
+    Ok(())
 }
 
 /// Append `at` to the recent-requests deque and prune entries older
@@ -528,6 +549,12 @@ pub fn reset_state_for_tests() {
     if let Ok(mut g) = RATE_LIMIT_STATE.lock() {
         *g = None;
     }
+    if let Ok(mut g) = LAST_AL_REQUEST.lock() {
+        *g = None;
+    }
+    if let Ok(mut g) = RECENT_AL_REQUESTS.lock() {
+        g.clear();
+    }
 }
 
 /// Extract the first GraphQL-level error message from an AniList response
@@ -666,13 +693,13 @@ mod tests {
     /// just takes the wrong branch and a sweep eats more 429s.
     ///
     /// Touches process-global state, so this test serializes itself
-    /// behind `COOLDOWN_TEST_LOCK` to avoid cross-test pollution
+    /// behind `GLOBAL_STATE_TEST_LOCK` to avoid cross-test pollution
     /// with any future global-state-touching test that adopts the
     /// same lock. Other tests in this file are pure (compute_* /
     /// decide_wait) and don't touch these globals.
-    #[test]
-    fn set_cooldown_clears_rate_limit_state() {
-        let _g = COOLDOWN_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_cooldown_clears_rate_limit_state() {
+        let _g = GLOBAL_STATE_TEST_LOCK.lock().await;
         // Seed state to a known non-None value.
         if let Ok(mut g) = RATE_LIMIT_STATE.lock() {
             *g = Some(RateLimitState {
@@ -698,7 +725,7 @@ mod tests {
         }
     }
 
-    static COOLDOWN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static GLOBAL_STATE_TEST_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 
     fn state(limit: u32, remaining: u32, reset_at: Option<Instant>) -> RateLimitState {
         RateLimitState {
@@ -712,6 +739,65 @@ mod tests {
     fn decide_wait_no_state_no_last_request_is_zero() {
         let now = Instant::now();
         assert_eq!(decide_wait(None, None, now), Duration::ZERO);
+    }
+
+    /// Regression for the live metadata sweep where concurrent callers all
+    /// passed the throttle together and emitted a burst of 429s at the exact
+    /// same timestamp. The async gate must reserve two request slots at least
+    /// one degraded-limit interval apart.
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_throttle_calls_are_serialized() {
+        let _g = GLOBAL_STATE_TEST_LOCK.lock().await;
+        reset_state_for_tests();
+
+        let (first, second) = tokio::join!(
+            throttle_before_anilist_request(),
+            throttle_before_anilist_request()
+        );
+        assert!(first.is_ok(), "first throttle failed: {first:?}");
+        assert!(second.is_ok(), "second throttle failed: {second:?}");
+
+        let issued = RECENT_AL_REQUESTS
+            .lock()
+            .map(|g| g.iter().copied().collect::<Vec<_>>())
+            .unwrap_or_default();
+        assert_eq!(issued.len(), 2, "expected two reserved request slots");
+        let spacing = issued[1].saturating_duration_since(issued[0]);
+        assert!(
+            spacing >= min_inter_request(ANILIST_LIMIT_FALLBACK),
+            "concurrent requests were only {spacing:?} apart"
+        );
+
+        reset_state_for_tests();
+    }
+
+    /// A request may enter the pacing queue before an earlier in-flight call
+    /// receives a 429. It must observe the newly-set cooldown after its wait
+    /// and leave without reserving another outbound request slot.
+    #[tokio::test(flavor = "current_thread")]
+    async fn queued_throttle_call_stops_when_cooldown_starts() {
+        let _g = GLOBAL_STATE_TEST_LOCK.lock().await;
+        reset_state_for_tests();
+        throttle_before_anilist_request()
+            .await
+            .expect("initial request slot");
+
+        let (queued, ()) = tokio::join!(throttle_before_anilist_request(), async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            set_cooldown_until_now_plus(Duration::from_secs(5));
+        });
+        assert!(
+            queued
+                .expect_err("queued request must stop during cooldown")
+                .contains("cooldown active")
+        );
+        assert_eq!(
+            recent_al_request_count_60s(),
+            1,
+            "cooldown must prevent a second request reservation"
+        );
+
+        reset_state_for_tests();
     }
 
     #[test]

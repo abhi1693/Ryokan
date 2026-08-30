@@ -132,7 +132,7 @@ async fn fetch_page(
         },
     });
 
-    throttle_before_anilist_request().await;
+    throttle_before_anilist_request().await?;
     let resp = match HTTP_CLIENT
         .post(anilist_api_base())
         .header("User-Agent", "Ryokan/0.1")

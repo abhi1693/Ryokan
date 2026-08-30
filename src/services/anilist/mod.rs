@@ -263,7 +263,7 @@ pub async fn fetch_media_list_collection(
         "variables": { "userId": user_id },
     });
 
-    throttle_before_anilist_request().await;
+    throttle_before_anilist_request().await?;
 
     let resp = HTTP_CLIENT
         .post(anilist_api_base())
@@ -595,7 +595,11 @@ pub async fn search_anime_with_options(
     // Pace via the same shared rate-limit state that fetch_anime_detail
     // uses — search-path 429s would otherwise leave the detail-path
     // throttle decisions working off a stale `remaining`.
-    throttle_before_anilist_request().await;
+    if let Err(reason) = throttle_before_anilist_request().await {
+        let results = fallback_jikan(query, Some(reason)).await?;
+        search_cache_put(cache_key, results.clone());
+        return Ok(results);
+    }
 
     let client = &*HTTP_CLIENT;
     let resp = match client
@@ -1103,7 +1107,7 @@ async fn fetch_media_detail(selector: MediaSelector) -> Result<Option<AnimeDetai
     // 429s — by the time AL hands back a 429 we've already wasted the
     // round trip; throttling proactively keeps the sweep inside AL's
     // window and burst limits.
-    throttle_before_anilist_request().await;
+    throttle_before_anilist_request().await?;
 
     let client = &*HTTP_CLIENT;
     let resp = client
@@ -1445,7 +1449,7 @@ pub async fn get_anime_details_batch(ids: &[i64]) -> Result<HashMap<i64, AnimeDe
             "variables": { "ids": chunk }
         });
 
-        throttle_before_anilist_request().await;
+        throttle_before_anilist_request().await?;
 
         let resp = client
             .post(anilist_api_base())
