@@ -1192,6 +1192,11 @@
 <td>Read-only workers used to byte-verify an existing destination before adopting it as a durable import checkpoint. Values are clamped to <code>1</code> through <code>8</code>; library and database mutations remain serialized.</td>
 </tr>
 <tr>
+<td><code>RYOKAN_POST_PROCESSING_MAX_FILES_PER_GRAB</code></td>
+<td>unset</td>
+<td>Optional per-pass file budget for each completed grab. Set it to <code>1</code> to let every pending grab make progress before a large batch receives another turn. Durable per-file checkpoints preserve completed work between passes.</td>
+</tr>
+<tr>
 <td><code>RYOKAN_ENCRYPTION_KEY</code></td>
 <td>unset (file fallback)</td>
 <td>Base64-encoded 32-byte AEAD key for encrypting OAuth tokens. Loading priority: env var, then key file, then auto-generated on first run. <strong>Key rotation isn't supported</strong>; changing it invalidates all stored OAuth tokens and you'll need to re-link external accounts.</td>
