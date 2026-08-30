@@ -20,6 +20,8 @@
 //!   6. An upgrade lands the new file before the old one is retired,
 //!      so a failed placement leaves the library and the old grab
 //!      untouched (issue #202).
+//!   7. A staging file left by an interrupted upgrade is overwritten
+//!      and swapped in instead of being retired as an old library file.
 
 use crate::models::grabbed_torrents;
 use crate::services::download_client::{
@@ -607,6 +609,60 @@ async fn live_upgrade_swaps_new_file_in_after_placement() {
         "the old torrent leaves the client after the swap"
     );
     assert_eq!(grab_state(&db, grab_id).await, "imported");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn live_upgrade_recovers_from_stale_staging_file() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("upgrade-stale-stage");
+
+    let db = in_memory_pool().await;
+    seed_config(&db, &media).await;
+    let series_id = seed_series(&db, 9011, "Show").await;
+    let (dest, old_grab_id) = seed_imported_e05(&db, &media, series_id).await;
+    let staging = post_processing::staging_path(&dest);
+    std::fs::write(&staging, b"partial bytes from interrupted copy")
+        .expect("write stale staging file");
+
+    std::fs::write(downloads.join("Show - 05v2 (1080p).mkv"), b"new bytes").expect("write source");
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "livehash-upgrade-stale-stage",
+        "Show - 05v2 (1080p)",
+        series_id,
+        &[5],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("livehash-upgrade-stale-stage", &downloads),
+        vec![complete_file("Show - 05v2 (1080p).mkv")],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client.clone()));
+
+    post_processing::run_once(&state).await;
+
+    assert_eq!(
+        std::fs::read(&dest).expect("new file readable"),
+        b"new bytes",
+        "the stale staging file is overwritten and swapped into place"
+    );
+    assert!(
+        !staging.exists(),
+        "the staging path is consumed by the swap"
+    );
+    assert_eq!(grab_state(&db, old_grab_id).await, "replaced");
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+    assert_eq!(
+        client.deleted.load(Ordering::SeqCst),
+        1,
+        "the old torrent leaves the client only after the swap"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

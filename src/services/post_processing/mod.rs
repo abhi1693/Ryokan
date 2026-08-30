@@ -544,13 +544,23 @@ pub(crate) async fn do_file_op(mode: &str, src: &Path, dst: &Path) -> std::io::R
 /// takes everything prefixed `<stem>.`, and a `<dest>.ryokan-new` name
 /// would be swept away with the file it is about to replace. Not a
 /// video extension, so library scans ignore a leftover from a crash
-/// mid-swap; the next upgrade of the same slot lists it with the old
-/// files and retires it.
+/// mid-swap; the next upgrade of the same slot overwrites it before
+/// retiring the old library file.
 pub(crate) fn staging_path(dest: &Path) -> PathBuf {
     let mut name = std::ffi::OsString::from(".");
     name.push(dest.file_name().unwrap_or_default());
     name.push(".ryokan-new");
     dest.with_file_name(name)
+}
+
+/// Whether a season-directory entry is one of our hidden upgrade
+/// landing files. These names still contain a parseable SxxExx token,
+/// so they must contribute to upgrade detection but must never enter
+/// the list of old library files that gets retired before the swap.
+fn is_upgrade_staging_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with('.') && name.ends_with(".ryokan-new"))
 }
 
 /// Undo a staged placement after the old file could not be retired
@@ -1455,7 +1465,7 @@ async fn import_torrent(
         // an NFS mount can make the sync read_dir/stat calls block for
         // hundreds of ms. The filter logic is cheap CPU, so we also move
         // it into the spawned task.
-        let existing_for_ep: Vec<PathBuf> = {
+        let matched_for_ep: Vec<PathBuf> = {
             let season_dir = ctx.season_dir.clone();
             tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
                 std::fs::read_dir(&season_dir)
@@ -1480,6 +1490,18 @@ async fn import_torrent(
             .unwrap_or_default()
         };
 
+        // A crash or rollout can leave the hidden landing file beside
+        // the old library file. It still makes this an upgrade (so the
+        // incoming source overwrites the staging path and completes the
+        // atomic swap), but it is not an old library file. Retiring it
+        // here would delete the freshly placed file immediately before
+        // the rename and leave the episode missing.
+        let is_upgrade = !matched_for_ep.is_empty();
+        let existing_for_ep: Vec<PathBuf> = matched_for_ep
+            .into_iter()
+            .filter(|path| !is_upgrade_staging_path(path))
+            .collect();
+
         // Issue #202: on an upgrade, land the new file beside the
         // destination FIRST and only then retire the old one. The
         // previous order (recycle old, delete old torrent, then place)
@@ -1492,7 +1514,6 @@ async fn import_torrent(
         // before the old file is touched. The swap itself is a
         // same-directory rename, and the old torrent leaves the client
         // only after the swap.
-        let is_upgrade = !existing_for_ep.is_empty();
         let landing = if is_upgrade {
             staging_path(&dest_video)
         } else {
