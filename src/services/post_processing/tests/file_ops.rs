@@ -16,7 +16,7 @@ use tempfile::TempDir;
 
 use crate::services::post_processing::{
     do_file_op, files_have_same_contents, files_have_same_contents_with_workers,
-    parse_import_verify_concurrency,
+    parse_import_verify_concurrency, parse_max_files_per_grab,
 };
 
 fn write_src(dir: &TempDir, name: &str, body: &[u8]) -> PathBuf {
@@ -71,6 +71,15 @@ fn import_verify_concurrency_defaults_and_clamps() {
     assert_eq!(parse_import_verify_concurrency(Some("0")), 1);
     assert_eq!(parse_import_verify_concurrency(Some("2")), 2);
     assert_eq!(parse_import_verify_concurrency(Some("999")), 8);
+}
+
+#[test]
+fn max_files_per_grab_is_optional_and_rejects_zero() {
+    assert_eq!(parse_max_files_per_grab(None), None);
+    assert_eq!(parse_max_files_per_grab(Some("not-a-number")), None);
+    assert_eq!(parse_max_files_per_grab(Some("0")), None);
+    assert_eq!(parse_max_files_per_grab(Some("1")), Some(1));
+    assert_eq!(parse_max_files_per_grab(Some("24")), Some(24));
 }
 
 // ─── Hardlink mode ─────────────────────────────────────────────────

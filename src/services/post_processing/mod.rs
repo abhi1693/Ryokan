@@ -460,9 +460,14 @@ const IMPORT_VERIFY_BUFFER_SIZE: usize = 1024 * 1024;
 const DEFAULT_IMPORT_VERIFY_CONCURRENCY: usize = 1;
 const MAX_IMPORT_VERIFY_CONCURRENCY: usize = 8;
 const IMPORT_VERIFY_CONCURRENCY_ENV: &str = "RYOKAN_POST_PROCESSING_VERIFY_CONCURRENCY";
+const MAX_FILES_PER_GRAB_ENV: &str = "RYOKAN_POST_PROCESSING_MAX_FILES_PER_GRAB";
 
 static IMPORT_VERIFY_CONCURRENCY: LazyLock<usize> = LazyLock::new(|| {
     parse_import_verify_concurrency(std::env::var(IMPORT_VERIFY_CONCURRENCY_ENV).ok().as_deref())
+});
+
+static MAX_FILES_PER_GRAB: LazyLock<Option<usize>> = LazyLock::new(|| {
+    parse_max_files_per_grab(std::env::var(MAX_FILES_PER_GRAB_ENV).ok().as_deref())
 });
 
 fn parse_import_verify_concurrency(raw: Option<&str>) -> usize {
@@ -472,6 +477,11 @@ fn parse_import_verify_concurrency(raw: Option<&str>) -> usize {
             DEFAULT_IMPORT_VERIFY_CONCURRENCY,
             MAX_IMPORT_VERIFY_CONCURRENCY,
         )
+}
+
+fn parse_max_files_per_grab(raw: Option<&str>) -> Option<usize> {
+    raw.and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
 }
 
 fn compare_file_range(src: &Path, dest: &Path, start: u64, len: u64) -> std::io::Result<bool> {
@@ -1043,11 +1053,23 @@ async fn load_series_import_ctx(
 ///   pending forever — the previous Ok(false) collapse meant a disk-
 ///   full pack would re-attempt every tick, generating duplicate
 ///   error logs without ever escalating to a user-visible failure.
+/// - `Deferred` — this grab consumed its configured per-pass file budget.
+///   Its completed files already have durable receipts; leave the grab
+///   pending and continue to the next grab so one large batch cannot starve
+///   every other completed download.
 pub(crate) enum ImportOutcome {
     NotReady,
     Imported,
-    PartiallyImported { failed_episodes: Vec<i32> },
-    AllFailed { failed_episodes: Vec<i32> },
+    PartiallyImported {
+        failed_episodes: Vec<i32>,
+    },
+    AllFailed {
+        failed_episodes: Vec<i32>,
+    },
+    Deferred {
+        processed_files: usize,
+        remaining_files: usize,
+    },
 }
 
 /// Phase 2: if the grab has routing rows in `grabbed_torrent_series`
@@ -1067,6 +1089,7 @@ async fn import_torrent(
     // re-fetched here as `default_download_client()`, which silently
     // routed `get_files` to the wrong client for any pinned grab.
     client: &std::sync::Arc<dyn DownloadClient>,
+    max_files_per_grab: Option<usize>,
 ) -> Result<ImportOutcome, String> {
     let mut files = client
         .get_files(torrent_hash)
@@ -1436,6 +1459,12 @@ async fn import_torrent(
     // those paths already log their own warning and aren't retryable
     // by re-running the file op.
     let mut failed_episodes: Vec<i32> = Vec::new();
+    // A durable receipt makes replay cheap and does not consume the slice.
+    // New copies and pre-receipt destination adoptions do consume it because
+    // those are the expensive operations that previously let one batch hold
+    // the entire post-processing pass for hours.
+    let mut slice_files_processed = 0_usize;
+    let mut deferred_remaining = None;
 
     // Old grab ids we've marked as replaced during this import pass,
     // paired with the new `grab.id` that superseded them. Deduped via
@@ -1445,7 +1474,7 @@ async fn import_torrent(
     let mut grabs_to_mark_replaced: std::collections::HashSet<i64> =
         std::collections::HashSet::new();
 
-    for (file_idx, file) in &video_files {
+    for (video_position, (file_idx, file)) in video_files.iter().enumerate() {
         debug_assert!(!unsafe_video_indices.contains(file_idx));
         // Route this file: prefer the routes table (Phase 2 batch
         // auto-expansion), fall back to `grab.series_id` for legacy
@@ -2265,6 +2294,17 @@ async fn import_torrent(
                     .entry(target_series_id)
                     .or_default()
                     .push((ep_num, file.size, dest_basename));
+
+                if !matches!(import_reuse, Some(ImportReuse::Receipt)) {
+                    slice_files_processed += 1;
+                }
+                if failed_episodes.is_empty()
+                    && max_files_per_grab.is_some_and(|limit| slice_files_processed >= limit)
+                    && video_position + 1 < video_files.len()
+                {
+                    deferred_remaining = Some(video_files.len() - video_position - 1);
+                    break;
+                }
             }
             Err(e) => {
                 logger::error(
@@ -2458,7 +2498,12 @@ async fn import_torrent(
         }
     }
 
-    if failed_episodes.is_empty() {
+    if let Some(remaining_files) = deferred_remaining {
+        Ok(ImportOutcome::Deferred {
+            processed_files: slice_files_processed,
+            remaining_files,
+        })
+    } else if failed_episodes.is_empty() {
         Ok(ImportOutcome::Imported)
     } else {
         Ok(ImportOutcome::PartiallyImported { failed_episodes })
@@ -2553,6 +2598,10 @@ pub async fn write_series_sidecars(state: &AppState, series_id: i64) -> Result<(
 
 /// Run one post-processing cycle. Called by the background task every minute.
 pub async fn run_once(state: &AppState) {
+    run_once_with_file_budget(state, *MAX_FILES_PER_GRAB).await;
+}
+
+pub(crate) async fn run_once_with_file_budget(state: &AppState, max_files_per_grab: Option<usize>) {
     let _guard = match POST_PROC_LOCK.try_lock() {
         Ok(g) => g,
         Err(_) => return, // already running
@@ -2915,7 +2964,17 @@ pub async fn run_once(state: &AppState) {
         );
         let _ = grabbed_torrents::stamp_client_content_path(&state.db, grab.id, &client_path).await;
 
-        match import_torrent(state, &cfg, grab, &torrent.hash, &local_save_path, &client).await {
+        match import_torrent(
+            state,
+            &cfg,
+            grab,
+            &torrent.hash,
+            &local_save_path,
+            &client,
+            max_files_per_grab,
+        )
+        .await
+        {
             Ok(ImportOutcome::Imported) => {
                 any_imported = true;
                 let _ = grabbed_torrents::mark_imported(&state.db, grab.id).await;
@@ -2988,6 +3047,22 @@ pub async fn run_once(state: &AppState) {
                 )
                 .await;
                 let _ = grabbed_torrents::mark_failed(&state.db, grab.id).await;
+            }
+            Ok(ImportOutcome::Deferred {
+                processed_files,
+                remaining_files,
+            }) => {
+                any_imported = true;
+                logger::info(
+                    &state.db,
+                    LogCategory::PostProcess,
+                    &format!("Yielded batch import for '{}'", grab.torrent_name),
+                    &format!(
+                        "processed_files={} remaining_files={} next=next_pending_grab",
+                        processed_files, remaining_files
+                    ),
+                )
+                .await;
             }
             Ok(ImportOutcome::NotReady) => {
                 // Torrent complete but no video files yet — leave as pending.

@@ -21,6 +21,11 @@ checkpoints were available. Set `RYOKAN_POST_PROCESSING_VERIFY_CONCURRENCY` to
 run `1` to `8` read-only comparison workers per file; the default is `1` and
 all library and database mutations remain serialized.
 
+Large batches can yield between files so other completed grabs do not wait for
+the whole batch. Set `RYOKAN_POST_PROCESSING_MAX_FILES_PER_GRAB=1` for one file
+per grab in each pass; durable checkpoints let the next pass continue without
+repeating completed file operations.
+
 ## Documentation
 
 - [Getting Started](https://johnthreekay.github.io/Ryokan/docs/#get-started): install via Docker, configuration, FAQ.

@@ -975,6 +975,55 @@ struct ImportingClient {
     files: Vec<DownloadFile>,
 }
 
+struct MultiImportingClient {
+    torrents: Vec<DownloadItem>,
+    files_by_hash: std::collections::HashMap<String, Vec<DownloadFile>>,
+}
+
+#[async_trait]
+impl DownloadClient for MultiImportingClient {
+    async fn test(&self) -> Result<String, String> {
+        Ok("mock".into())
+    }
+    async fn add_torrent(&self, _url: &str, _hash: &str) -> Result<AddOutcome, String> {
+        Ok(AddOutcome::Added)
+    }
+    async fn add_torrent_with_file_filter(
+        &self,
+        _url: &str,
+        _hash: &str,
+        _pick: &mut (dyn for<'a> FnMut(&'a [String]) -> Option<Vec<usize>> + Send),
+    ) -> Result<SelectiveOutcome, String> {
+        Ok(SelectiveOutcome::FullDownload)
+    }
+    async fn list_scoped(&self) -> Result<Vec<DownloadItem>, String> {
+        Ok(self.torrents.clone())
+    }
+    async fn get_files(&self, hash: &str) -> Result<Vec<DownloadFile>, String> {
+        Ok(self.files_by_hash.get(hash).cloned().unwrap_or_default())
+    }
+    async fn pause(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn resume(&self, _hash: &str) -> Result<(), String> {
+        Ok(())
+    }
+    async fn delete(&self, _hash: &str, _delete_files: bool) -> Result<(), String> {
+        Ok(())
+    }
+    async fn set_file_wanted(
+        &self,
+        _hash: &str,
+        _files: &[usize],
+        _wanted: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+    fn sonarr_impl_name(&self) -> &'static str {
+        "QBittorrent"
+    }
+}
+
 #[async_trait]
 impl DownloadClient for ImportingClient {
     async fn test(&self) -> Result<String, String> {
@@ -1234,5 +1283,186 @@ async fn run_once_rejects_malicious_filelist_entries_but_imports_legit_siblings(
         final_state, "imported",
         "grab should land in 'imported' once the legit sibling completes; \
          a 'pending' or 'failed' here means rejection blocked the legit file too"
+    );
+}
+
+#[tokio::test]
+async fn run_once_file_budget_yields_large_grab_to_next_pending_grab() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+
+    let root = tempfile::TempDir::new().expect("test root");
+    let media_root = root.path().join("media");
+    let first_source = root.path().join("first-source");
+    let second_source = root.path().join("second-source");
+    std::fs::create_dir_all(&media_root).unwrap();
+    std::fs::create_dir_all(&first_source).unwrap();
+    std::fs::create_dir_all(&second_source).unwrap();
+
+    let first_files = vec![
+        DownloadFile {
+            name: "First Show - 01.mkv".into(),
+            size: 5,
+            progress: 1.0,
+            wanted: true,
+        },
+        DownloadFile {
+            name: "First Show - 02.mkv".into(),
+            size: 5,
+            progress: 1.0,
+            wanted: true,
+        },
+    ];
+    let second_files = vec![DownloadFile {
+        name: "Second Show - 01.mkv".into(),
+        size: 6,
+        progress: 1.0,
+        wanted: true,
+    }];
+    std::fs::write(first_source.join(&first_files[0].name), b"one-a").unwrap();
+    std::fs::write(first_source.join(&first_files[1].name), b"one-b").unwrap();
+    std::fs::write(second_source.join(&second_files[0].name), b"two-ok").unwrap();
+
+    let db = in_memory_pool().await;
+    sqlx::query(
+        "INSERT INTO config (id, post_processing_enabled, media_root, post_processing_mode) \
+         VALUES (1, 1, ?, 'hardlink')",
+    )
+    .bind(media_root.to_string_lossy().as_ref())
+    .execute(&db)
+    .await
+    .unwrap();
+    let first_series = seed_series(&db, 1, "First Show").await;
+    let second_series = seed_series(&db, 2, "Second Show").await;
+    let first_grab = grabbed_torrents::record_grab(
+        &db,
+        "first-hash",
+        "First Show batch",
+        first_series,
+        &[1, 2],
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let second_grab = grabbed_torrents::record_grab(
+        &db,
+        "second-hash",
+        "Second Show - 01",
+        second_series,
+        &[1],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET grabbed_at = ? WHERE id = ?")
+        .bind("2024-01-01T00:00:00Z")
+        .bind(first_grab)
+        .execute(&db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE grabbed_torrents SET grabbed_at = ? WHERE id = ?")
+        .bind("2024-01-01T00:00:01Z")
+        .bind(second_grab)
+        .execute(&db)
+        .await
+        .unwrap();
+
+    insert_dc(
+        &db,
+        DownloadClientForm {
+            name: "default",
+            kind: "qbittorrent",
+            url: "http://q",
+            username: "",
+            password: "",
+            label: "",
+            download_path: "",
+            enabled: true,
+            is_default: true,
+        },
+    )
+    .await
+    .unwrap();
+    grabbed_torrents::set_download_client(&db, first_grab, Some(1))
+        .await
+        .unwrap();
+    grabbed_torrents::set_download_client(&db, second_grab, Some(1))
+        .await
+        .unwrap();
+
+    let complete_torrent = |hash: &str, name: &str, path: &std::path::Path| DownloadItem {
+        hash: hash.into(),
+        name: name.into(),
+        size: 10,
+        progress: 1.0,
+        dlspeed: 0,
+        state: "seeding".into(),
+        category: "anime".into(),
+        eta: 0,
+        save_path: path.to_string_lossy().into_owned(),
+        content_path: path.to_string_lossy().into_owned(),
+        state_kind: DownloadItemState::Seeding,
+    };
+    let client = Arc::new(MultiImportingClient {
+        torrents: vec![
+            complete_torrent("first-hash", "First Show batch", &first_source),
+            complete_torrent("second-hash", "Second Show - 01", &second_source),
+        ],
+        files_by_hash: std::collections::HashMap::from([
+            ("first-hash".into(), first_files),
+            ("second-hash".into(), second_files),
+        ]),
+    });
+    let state = build_test_app_state(db.clone(), None);
+    install_pool(&state, vec![(1, client as Arc<dyn DownloadClient>, true)]).await;
+
+    post_processing::run_once_with_file_budget(&state, Some(1)).await;
+
+    let first_state: String = sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+        .bind(first_grab)
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    let second_state: String =
+        sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+            .bind(second_grab)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(first_state, "pending", "large grab must remain resumable");
+    assert_eq!(
+        second_state, "imported",
+        "next ready grab must receive a turn"
+    );
+
+    let count_videos = |series_title: &str| {
+        std::fs::read_dir(media_root.join(series_title).join("Season 01"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("mkv"))
+            })
+            .count()
+    };
+    assert_eq!(count_videos("First Show"), 1);
+    assert_eq!(count_videos("Second Show"), 1);
+
+    post_processing::run_once_with_file_budget(&state, Some(1)).await;
+    let first_state_after_resume: String =
+        sqlx::query_scalar("SELECT state FROM grabbed_torrents WHERE id = ?")
+            .bind(first_grab)
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(first_state_after_resume, "imported");
+    assert_eq!(
+        count_videos("First Show"),
+        2,
+        "next pass must resume the receipt-backed prefix and finish the batch"
     );
 }
