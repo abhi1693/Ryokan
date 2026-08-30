@@ -450,6 +450,163 @@ pub(crate) fn files_share_inode(a: &Path, b: &Path) -> bool {
     a == b
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImportReuse {
+    Receipt,
+    Adopted,
+}
+
+/// Byte-compare two regular files without loading either one into memory.
+/// This is the conservative bridge for grabs that were already mid-import
+/// when per-file receipts were introduced: a same-size destination is not
+/// enough evidence to skip an upgrade, but identical bytes are.
+fn files_have_same_contents(src: &Path, dest: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    let src_meta = std::fs::metadata(src)?;
+    let dest_meta = std::fs::metadata(dest)?;
+    if !src_meta.is_file() || !dest_meta.is_file() || src_meta.len() != dest_meta.len() {
+        return Ok(false);
+    }
+    if files_share_inode(src, dest) {
+        return Ok(true);
+    }
+
+    const BUFFER_SIZE: usize = 1024 * 1024;
+    let mut src_file = std::io::BufReader::with_capacity(BUFFER_SIZE, std::fs::File::open(src)?);
+    let mut dest_file = std::io::BufReader::with_capacity(BUFFER_SIZE, std::fs::File::open(dest)?);
+    let mut src_buf = vec![0_u8; BUFFER_SIZE];
+    let mut dest_buf = vec![0_u8; BUFFER_SIZE];
+
+    loop {
+        let src_read = src_file.read(&mut src_buf)?;
+        let dest_read = dest_file.read(&mut dest_buf)?;
+        if src_read != dest_read || src_buf[..src_read] != dest_buf[..dest_read] {
+            return Ok(false);
+        }
+        if src_read == 0 {
+            return Ok(true);
+        }
+    }
+}
+
+/// Return a verified restart checkpoint for this source file, or adopt an
+/// identical destination left by a pre-receipt process. Invalid receipts are
+/// removed so the normal import/upgrade path can repair the destination.
+async fn reusable_import(
+    db: &sqlx::SqlitePool,
+    grab_id: i64,
+    source_path: &str,
+    src: &Path,
+    dest: &Path,
+) -> Result<Option<ImportReuse>, String> {
+    if let Some(receipt) = grabbed_torrents::get_import_receipt(db, grab_id, source_path)
+        .await
+        .map_err(|e| format!("read import receipt: {e}"))?
+    {
+        let destination_matches = Path::new(&receipt.destination_path) == dest;
+        let dest_matches = tokio::fs::metadata(dest)
+            .await
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| i64::try_from(m.len()).ok())
+            == Some(receipt.file_size);
+        // A move-mode import legitimately has no source after placement.
+        // For copy/hardlink, a missing source can also be benign if the user
+        // removed the completed download after the receipt was committed.
+        // When the source still exists, a size change invalidates the receipt.
+        let source_matches = tokio::fs::metadata(src)
+            .await
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| i64::try_from(m.len()).ok())
+            .is_none_or(|size| size == receipt.file_size);
+
+        if destination_matches && dest_matches && source_matches {
+            return Ok(Some(ImportReuse::Receipt));
+        }
+
+        grabbed_torrents::delete_import_receipt(db, grab_id, source_path)
+            .await
+            .map_err(|e| format!("delete stale import receipt: {e}"))?;
+    }
+
+    let compare_src = src.to_path_buf();
+    let compare_dest = dest.to_path_buf();
+    let same =
+        tokio::task::spawn_blocking(move || files_have_same_contents(&compare_src, &compare_dest))
+            .await
+            .map_err(|e| format!("compare completed import: {e}"))?
+            .unwrap_or(false);
+    if !same {
+        return Ok(None);
+    }
+
+    let file_size = tokio::fs::metadata(dest)
+        .await
+        .ok()
+        .and_then(|m| i64::try_from(m.len()).ok())
+        .ok_or_else(|| "read adopted import size".to_string())?;
+    grabbed_torrents::upsert_import_receipt(
+        db,
+        grab_id,
+        source_path,
+        &dest.display().to_string(),
+        file_size,
+    )
+    .await
+    .map_err(|e| format!("persist adopted import receipt: {e}"))?;
+    Ok(Some(ImportReuse::Adopted))
+}
+
+/// Preserve upgrade bookkeeping when a restarted pass reuses a completed
+/// destination. The media placement can finish before the parent grab or the
+/// deferred `mark_replaced` updates commit; replaying these idempotent side
+/// effects closes that crash window without touching the library file again.
+async fn track_replaced_grabs(
+    state: &AppState,
+    old_grabs: &[grabbed_torrents::GrabbedTorrent],
+    target_series_id: i64,
+    episode_number: i32,
+    grabs_to_mark_replaced: &mut HashSet<i64>,
+) {
+    for old_grab in old_grabs {
+        if !old_grab.hash.is_empty() {
+            // Preserve PT seed rules across upgrade-replace. The old row is
+            // still marked replaced below so the upgrade sweep does not
+            // re-grab it, but the client keeps seeding its data.
+            if grabbed_torrents::respects_seed_rules(&state.db, &old_grab.hash).await {
+                logger::info(
+                    &state.db,
+                    LogCategory::DownloadClient,
+                    &format!(
+                        "Skipping client delete for upgraded torrent {} (respect_seed_rules)",
+                        old_grab.torrent_name
+                    ),
+                    &old_grab.hash,
+                )
+                .await;
+            } else {
+                // Route the old grab's delete through the client it landed
+                // on. `resolve_grab_client` also handles legacy NULL stamps.
+                let target = state
+                    .resolve_grab_client(old_grab.download_client_id, &old_grab.hash)
+                    .await;
+                if let Some(target) = target {
+                    let _ = target.delete(&old_grab.hash, true).await;
+                }
+            }
+        }
+        grabs_to_mark_replaced.insert(old_grab.id);
+    }
+
+    if !old_grabs.is_empty() {
+        let _ =
+            episode_tags::mark_grab_history_replaced(&state.db, target_series_id, episode_number)
+                .await;
+    }
+}
+
 /// Hardlink → copy fallback. For "move" mode: rename → copy+delete fallback.
 ///
 /// Runs the whole operation under `spawn_blocking` because a Blu-ray
@@ -1454,6 +1611,43 @@ async fn import_torrent(
         let dest_video = ctx.season_dir.join(&episode_name.file_name);
         let dest_nfo = ctx.season_dir.join(format!("{}.nfo", episode_name.stem));
 
+        // Resume a file completed by an earlier process before looking for
+        // existing episode files. Without this gate, a still-pending batch
+        // sees its own earlier destinations as orphan upgrades, copies every
+        // episode again, and recycles the prior copies after each restart.
+        let import_reuse =
+            match reusable_import(&state.db, grab.id, &file.name, &src, &dest_video).await {
+                Ok(reuse) => reuse,
+                Err(e) => {
+                    logger::warn(
+                        &state.db,
+                        LogCategory::PostProcess,
+                        &format!("Could not verify import checkpoint for '{}'", filename_only),
+                        &e,
+                    )
+                    .await;
+                    None
+                }
+            };
+        if import_reuse.is_some() {
+            // A prior process may have completed the filesystem swap and
+            // receipt, then exited before the end-of-batch replacement-state
+            // flush. Rediscover the old grabs while they are still imported
+            // and replay the idempotent bookkeeping.
+            let old_grabs =
+                grabbed_torrents::find_imported_for_episode(&state.db, target_series_id, ep_num)
+                    .await
+                    .unwrap_or_default();
+            track_replaced_grabs(
+                state,
+                &old_grabs,
+                target_series_id,
+                ep_num,
+                &mut grabs_to_mark_replaced,
+            )
+            .await;
+        }
+
         // Existing files for this episode slot (any extension). Matched
         // by parsing each name back through `parse_episode_number`
         // rather than by a fixed `SxxExx` substring, so the check works
@@ -1465,7 +1659,9 @@ async fn import_torrent(
         // an NFS mount can make the sync read_dir/stat calls block for
         // hundreds of ms. The filter logic is cheap CPU, so we also move
         // it into the spawned task.
-        let matched_for_ep: Vec<PathBuf> = {
+        let matched_for_ep: Vec<PathBuf> = if import_reuse.is_some() {
+            Vec::new()
+        } else {
             let season_dir = ctx.season_dir.clone();
             tokio::task::spawn_blocking(move || -> Vec<PathBuf> {
                 std::fs::read_dir(&season_dir)
@@ -1519,7 +1715,11 @@ async fn import_torrent(
         } else {
             dest_video.clone()
         };
-        let placed = do_file_op(&cfg.post_processing_mode, &src, &landing).await;
+        let placed = if import_reuse.is_some() {
+            Ok(())
+        } else {
+            do_file_op(&cfg.post_processing_mode, &src, &landing).await
+        };
 
         if placed.is_ok() && is_upgrade {
             // Check if this is an upgrade replacing a previously imported file.
@@ -1685,85 +1885,64 @@ async fn import_torrent(
             )
             .await;
 
-            // Clean up old torrents from the download client and mark old
-            // grabs as replaced. Reuse the `client` binding cloned at the
-            // top of this function instead of re-taking
-            // `state.download_client.read()` each iteration — under a big
-            // upgrade with many old grabs the per-iteration lock acquire
-            // was serializing against any other task touching
-            // `state.download_client`.
-            //
-            // `mark_replaced` (not `mark_removed`) so the Downloads
-            // history keeps the upgrade chain: state='replaced' with
-            // `replaced_by_grab_id = grab.id`. Without this distinction
-            // users who got their existing SubsPlease episodes silently
-            // swapped out by a Kaizoku batch had no way to tell the
-            // upgrade actually happened — old rows looked identical to
-            // user-cancelled grabs.
-            // `client.delete` still runs inside the per-episode loop
-            // because it's cheap-ish (one RPC per torrent) and the old
-            // hash may repeat across per-episode finds — but qBit's
-            // delete is idempotent on an already-removed hash, so the
-            // repeat is harmless. The expensive SQL UPDATE for
-            // `mark_replaced` is deferred to a post-loop flush so a
-            // batch grab that covers 12 episodes doesn't UPDATE the
-            // same old grab 12 times.
-            for old_grab in &old_grabs {
-                if !old_grab.hash.is_empty() {
-                    // Issue #28 — preserve PT seed rules
-                    // across upgrade-replace. The old torrent has
-                    // imported and is seeding to its per-tracker
-                    // ratio; deleting it mid-seed could ding the
-                    // user's tracker ratio. The grab row still
-                    // gets `mark_replaced` below so the upgrade
-                    // sweep doesn't re-grab.
-                    if grabbed_torrents::respects_seed_rules(&state.db, &old_grab.hash).await {
-                        logger::info(
-                            &state.db,
-                            LogCategory::DownloadClient,
-                            &format!(
-                                "Skipping client delete for upgraded torrent {} (respect_seed_rules)",
-                                old_grab.torrent_name
-                            ),
-                            &old_grab.hash,
-                        )
-                        .await;
-                    } else {
-                        // Route the OLD grab's delete to the OLD
-                        // grab's client — not the NEW grab's client
-                        // bound above. A cross-protocol upgrade
-                        // (SAB→qBit or qBit→SAB) would otherwise
-                        // hit a client that doesn't know the old
-                        // hash and silently leave the old job behind.
-                        // `resolve_grab_client` also rescues legacy
-                        // NULL-stamped SAB grabs via the nzo_id-shape
-                        // heuristic.
-                        let target = state
-                            .resolve_grab_client(old_grab.download_client_id, &old_grab.hash)
-                            .await;
-                        if let Some(target) = target {
-                            let _ = target.delete(&old_grab.hash, true).await;
-                        }
-                    }
-                }
-                grabs_to_mark_replaced.insert(old_grab.id);
-            }
-
-            // Per-episode history counterpart: flip the old grab's
-            // episode_grab_history row for this specific ep from
-            // 'completed' to 'replaced' so the episode detail modal
-            // mirrors what the Downloads tab shows. Without this the
-            // old Kaizoku row and the new SubsPlease row both read
-            // 'completed' in grab history, hiding the upgrade chain.
-            // Stays inside the loop since episode_grab_history is
-            // keyed on (series_id, episode_number) — one UPDATE per
-            // episode is correct, not redundant.
-            let _ =
-                episode_tags::mark_grab_history_replaced(&state.db, target_series_id, ep_num).await;
+            // Client cleanup and replacement-state writes are idempotent and
+            // also replayed by the receipt-resume path if a process exits
+            // before the deferred end-of-batch state flush.
+            track_replaced_grabs(
+                state,
+                &old_grabs,
+                target_series_id,
+                ep_num,
+                &mut grabs_to_mark_replaced,
+            )
+            .await;
         }
 
         match placed {
             Ok(()) => {
+                // Commit the restart checkpoint immediately after the final
+                // destination exists. NFO/classification/tag work below is
+                // idempotent and is deliberately replayed after a restart;
+                // the expensive media copy/recycle operation is not.
+                if import_reuse.is_none() {
+                    match tokio::fs::metadata(&dest_video).await {
+                        Ok(metadata) => {
+                            let file_size = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
+                            if let Err(e) = grabbed_torrents::upsert_import_receipt(
+                                &state.db,
+                                grab.id,
+                                &file.name,
+                                &dest_video.display().to_string(),
+                                file_size,
+                            )
+                            .await
+                            {
+                                logger::error(
+                                    &state.db,
+                                    LogCategory::PostProcess,
+                                    &format!(
+                                        "Failed to persist import checkpoint for '{}'",
+                                        filename_only
+                                    ),
+                                    &e.to_string(),
+                                )
+                                .await;
+                            }
+                        }
+                        Err(e) => {
+                            logger::error(
+                                &state.db,
+                                LogCategory::PostProcess,
+                                &format!(
+                                    "Failed to verify imported destination for '{}'",
+                                    filename_only
+                                ),
+                                &e.to_string(),
+                            )
+                            .await;
+                        }
+                    }
+                }
                 let _ = nfo::write_episode_nfo(
                     &dest_nfo,
                     &ctx.series_title,
@@ -1784,10 +1963,23 @@ async fn import_torrent(
                 logger::info(
                     &state.db,
                     LogCategory::PostProcess,
-                    &format!(
-                        "Imported S{:02}E{:02} of '{}'",
-                        season, ep_num, ctx.series.title
-                    ),
+                    &if let Some(reuse) = import_reuse {
+                        format!(
+                            "Resumed S{:02}E{:02} of '{}' from {}",
+                            season,
+                            ep_num,
+                            ctx.series.title,
+                            match reuse {
+                                ImportReuse::Receipt => "checkpoint",
+                                ImportReuse::Adopted => "verified existing file",
+                            }
+                        )
+                    } else {
+                        format!(
+                            "Imported S{:02}E{:02} of '{}'",
+                            season, ep_num, ctx.series.title
+                        )
+                    },
                     &format!(
                         "mode={} dest={}",
                         cfg.post_processing_mode,

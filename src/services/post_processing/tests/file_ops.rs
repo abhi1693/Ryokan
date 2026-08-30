@@ -14,13 +14,27 @@ use std::path::PathBuf;
 
 use tempfile::TempDir;
 
-use crate::services::post_processing::do_file_op;
+use crate::services::post_processing::{do_file_op, files_have_same_contents};
 
 fn write_src(dir: &TempDir, name: &str, body: &[u8]) -> PathBuf {
     let path = dir.path().join(name);
     let mut f = fs::File::create(&path).expect("create src");
     f.write_all(body).expect("write src body");
     path
+}
+
+#[test]
+fn content_comparison_rejects_same_size_different_bytes() {
+    let dir = TempDir::new().unwrap();
+    let src = write_src(&dir, "source.mkv", b"new payload");
+    let matching = write_src(&dir, "matching.mkv", b"new payload");
+    let different = write_src(&dir, "different.mkv", b"old payload");
+
+    assert!(files_have_same_contents(&src, &matching).unwrap());
+    assert!(
+        !files_have_same_contents(&src, &different).unwrap(),
+        "equal file size alone must not authorize checkpoint adoption"
+    );
 }
 
 // ─── Hardlink mode ─────────────────────────────────────────────────

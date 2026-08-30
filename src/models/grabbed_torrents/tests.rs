@@ -1,6 +1,93 @@
 use super::*;
 use crate::models::series;
 
+#[tokio::test]
+async fn import_receipt_round_trip_updates_and_cascades_with_grab() {
+    let db = SqlitePool::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+    crate::models::migrate(&db).await.expect("migrate");
+
+    let (series_id, _) = series::upsert(
+        &db,
+        series::SeriesCore {
+            anilist_id: 999_001,
+            mal_id: None,
+            title: "Receipt Show",
+            title_romaji: "Receipt Show",
+            title_english: "Receipt Show",
+            title_native: "",
+            cover_url: "",
+            format: "TV",
+            status: "FINISHED",
+            episodes: Some(2),
+            season_year: Some(2026),
+            end_year: Some(2026),
+        },
+    )
+    .await
+    .expect("series upsert");
+    let grab_id = record_grab(
+        &db,
+        "receipt-round-trip-hash",
+        "Receipt Show 01-02",
+        series_id,
+        &[1, 2],
+        true,
+    )
+    .await
+    .expect("record grab")
+    .expect("grab inserted");
+
+    upsert_import_receipt(
+        &db,
+        grab_id,
+        "Receipt Show - 01.mkv",
+        "/media/Receipt Show/Season 01/Receipt Show - S01E01.mkv",
+        123,
+    )
+    .await
+    .expect("insert receipt");
+    assert_eq!(
+        get_import_receipt(&db, grab_id, "Receipt Show - 01.mkv")
+            .await
+            .expect("read receipt"),
+        Some(ImportReceipt {
+            destination_path: "/media/Receipt Show/Season 01/Receipt Show - S01E01.mkv".to_string(),
+            file_size: 123,
+        })
+    );
+
+    upsert_import_receipt(
+        &db,
+        grab_id,
+        "Receipt Show - 01.mkv",
+        "/media/Receipt Show/S01/Receipt Show - 01.mkv",
+        456,
+    )
+    .await
+    .expect("update receipt");
+    assert_eq!(
+        get_import_receipt(&db, grab_id, "Receipt Show - 01.mkv")
+            .await
+            .expect("read updated receipt"),
+        Some(ImportReceipt {
+            destination_path: "/media/Receipt Show/S01/Receipt Show - 01.mkv".to_string(),
+            file_size: 456,
+        })
+    );
+
+    remove(&db, grab_id).await.expect("remove grab");
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM grabbed_torrent_import_receipts WHERE grab_id = ?",
+    )
+    .bind(grab_id)
+    .fetch_one(&db)
+    .await
+    .expect("count receipts");
+    assert_eq!(remaining, 0, "receipt must cascade with its parent grab");
+}
+
 /// Round-trip a GrabSeriesRoute through record_grab_series_routes
 /// + get_series_routes to verify the new episode_offset column is
 /// written and read correctly. Covers Commit 3's schema plumbing

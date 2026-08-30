@@ -318,6 +318,7 @@ async fn migrate_creates_core_tables() {
         "config",
         "series",
         "grabbed_torrents",
+        "grabbed_torrent_import_receipts",
         "grabbed_torrent_series",
         "episode_quality_tags",
         "episode_grab_history",

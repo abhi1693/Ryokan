@@ -376,6 +376,78 @@ pub async fn mark_imported(db: &SqlitePool, id: i64) -> Result<(), sqlx::Error> 
     Ok(())
 }
 
+/// Durable proof that one source file from a still-pending grab has
+/// already landed at its final library path. The filesystem operation
+/// and SQLite cannot share a transaction, so callers must still verify
+/// the destination before trusting a receipt after restart.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ImportReceipt {
+    pub destination_path: String,
+    pub file_size: i64,
+}
+
+pub async fn get_import_receipt(
+    db: &SqlitePool,
+    grab_id: i64,
+    source_path: &str,
+) -> Result<Option<ImportReceipt>, sqlx::Error> {
+    let row = sqlx::query(
+        "SELECT destination_path, file_size
+         FROM grabbed_torrent_import_receipts
+         WHERE grab_id = ? AND source_path = ?",
+    )
+    .bind(grab_id)
+    .bind(source_path)
+    .fetch_optional(db)
+    .await?;
+
+    Ok(row.map(|row| ImportReceipt {
+        destination_path: row.get("destination_path"),
+        file_size: row.get("file_size"),
+    }))
+}
+
+pub async fn upsert_import_receipt(
+    db: &SqlitePool,
+    grab_id: i64,
+    source_path: &str,
+    destination_path: &str,
+    file_size: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO grabbed_torrent_import_receipts
+             (grab_id, source_path, destination_path, file_size)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(grab_id, source_path) DO UPDATE SET
+             destination_path = excluded.destination_path,
+             file_size = excluded.file_size,
+             completed_at = CURRENT_TIMESTAMP",
+    )
+    .bind(grab_id)
+    .bind(source_path)
+    .bind(destination_path)
+    .bind(file_size)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_import_receipt(
+    db: &SqlitePool,
+    grab_id: i64,
+    source_path: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "DELETE FROM grabbed_torrent_import_receipts
+         WHERE grab_id = ? AND source_path = ?",
+    )
+    .bind(grab_id)
+    .bind(source_path)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 /// Mark a grab as finalized without recording an actual import. Used by
 /// `advance_state_without_import` when post-processing is disabled: the
 /// torrent is complete on qBit's side and we want to stop polling it

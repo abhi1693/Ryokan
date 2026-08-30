@@ -22,6 +22,10 @@
 //!      untouched (issue #202).
 //!   7. A staging file left by an interrupted upgrade is overwritten
 //!      and swapped in instead of being retired as an old library file.
+//!   8. Per-file receipts resume a pending batch without recopying or
+//!      recycling files completed by an earlier process.
+//!   9. A receipt committed after an upgrade swap resumes the deferred
+//!      predecessor bookkeeping without replacing the media again.
 
 use crate::models::grabbed_torrents;
 use crate::services::download_client::{
@@ -153,6 +157,19 @@ async fn seed_config(db: &sqlx::SqlitePool, media_root: &Path) {
     .expect("seed config row");
 }
 
+async fn seed_copy_config(db: &sqlx::SqlitePool, media_root: &Path, recycle_root: &Path) {
+    seed_config(db, media_root).await;
+    sqlx::query(
+        "UPDATE config
+         SET post_processing_mode = 'copy', recycle_bin_path = ?
+         WHERE id = 1",
+    )
+    .bind(recycle_root.to_string_lossy().as_ref())
+    .execute(db)
+    .await
+    .expect("configure copy mode and recycle bin");
+}
+
 /// Recursively collect basenames of files with the given extension.
 fn collect_files(root: &Path, ext: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -180,6 +197,100 @@ async fn grab_state(db: &sqlx::SqlitePool, id: i64) -> String {
         .fetch_one(db)
         .await
         .expect("fetch grab state")
+}
+
+#[tokio::test]
+async fn live_pending_batch_resumes_without_recopying_completed_files() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("restart-receipts");
+    let recycle = root.join("recycle");
+    let names = ["Show - 01.mkv", "Show - 02.mkv"];
+    let episode_one = b"episode-one-payload";
+    let episode_two = b"episode-two-payload";
+    std::fs::write(downloads.join(names[0]), episode_one).expect("write E01 source");
+    std::fs::write(downloads.join(names[1]), episode_two).expect("write E02 source");
+
+    // Simulate the state left by a pre-receipt process: E01 reached its
+    // final destination, then the process died while the parent grab was
+    // still pending. The first fixed run must adopt it byte-for-byte rather
+    // than treating it as an orphan upgrade.
+    let season_dir = media.join("Show").join("Season 01");
+    std::fs::create_dir_all(&season_dir).expect("season dir");
+    let episode_one_dest = season_dir.join("Show - S01E01.mkv");
+    std::fs::write(&episode_one_dest, episode_one).expect("write completed E01 destination");
+
+    let db = in_memory_pool().await;
+    seed_copy_config(&db, &media, &recycle).await;
+    let series_id = seed_series(&db, 9011, "Show").await;
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "livehash-restart-receipts",
+        "Show 01-02 pack",
+        series_id,
+        &[1, 2],
+        true,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("livehash-restart-receipts", &downloads),
+        names.iter().map(|name| complete_file(name)).collect(),
+    ));
+    let state = build_test_app_state(db.clone(), Some(client));
+
+    post_processing::run_once(&state).await;
+
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+    assert_eq!(std::fs::read(&episode_one_dest).unwrap(), episode_one);
+    assert_eq!(
+        std::fs::read(season_dir.join("Show - S01E02.mkv")).unwrap(),
+        episode_two
+    );
+    let receipt_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM grabbed_torrent_import_receipts WHERE grab_id = ?",
+    )
+    .bind(grab_id)
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        receipt_count, 2,
+        "both completed files need durable receipts"
+    );
+    assert!(
+        collect_files(&recycle, "mkv").is_empty(),
+        "adopting the existing E01 must not recycle it as an orphan upgrade"
+    );
+
+    // Simulate another process restart before the parent-state commit. Both
+    // receipts already exist, so the second pass must perform no media
+    // replacements and simply finish the parent grab again.
+    sqlx::query("UPDATE grabbed_torrents SET state = 'pending', imported_at = NULL WHERE id = ?")
+        .bind(grab_id)
+        .execute(&db)
+        .await
+        .unwrap();
+    post_processing::run_once(&state).await;
+
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+    assert!(
+        collect_files(&recycle, "mkv").is_empty(),
+        "checkpoint resume must not recycle or recopy earlier episodes"
+    );
+    let resumed_logs: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM logs
+         WHERE category = 'post_process' AND message LIKE 'Resumed S01E%'",
+    )
+    .fetch_one(&db)
+    .await
+    .unwrap();
+    assert_eq!(
+        resumed_logs, 3,
+        "first pass adopts E01; second pass resumes both files from receipts"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
@@ -609,6 +720,69 @@ async fn live_upgrade_swaps_new_file_in_after_placement() {
         "the old torrent leaves the client after the swap"
     );
     assert_eq!(grab_state(&db, grab_id).await, "imported");
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn live_upgrade_receipt_resumes_deferred_replacement_bookkeeping() {
+    let _serializer = POST_PROC_TEST_SERIALIZER.lock().await;
+    let (root, downloads, media) = temp_dirs("upgrade-receipt-resume");
+    let recycle = root.join("recycle");
+
+    let db = in_memory_pool().await;
+    seed_copy_config(&db, &media, &recycle).await;
+    let series_id = seed_series(&db, 9012, "Show").await;
+    let (dest, old_grab_id) = seed_imported_e05(&db, &media, series_id).await;
+
+    let source_name = "Show - 05v2 (1080p).mkv";
+    let new_bytes = b"new bytes from completed swap";
+    std::fs::write(downloads.join(source_name), new_bytes).expect("write source");
+    // Simulate a process that completed the atomic upgrade swap and committed
+    // its per-file receipt, then exited before the end-of-batch predecessor
+    // state flush. The old grab is deliberately still `imported` here.
+    std::fs::write(&dest, new_bytes).expect("write completed destination");
+    let grab_id = grabbed_torrents::record_grab(
+        &db,
+        "livehash-upgrade-receipt-resume",
+        "Show - 05v2 (1080p)",
+        series_id,
+        &[5],
+        false,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    grabbed_torrents::upsert_import_receipt(
+        &db,
+        grab_id,
+        source_name,
+        &dest.to_string_lossy(),
+        i64::try_from(new_bytes.len()).unwrap(),
+    )
+    .await
+    .expect("seed completed import receipt");
+
+    let client = Arc::new(BatchClient::new(
+        complete_torrent("livehash-upgrade-receipt-resume", &downloads),
+        vec![complete_file(source_name)],
+    ));
+    let state = build_test_app_state(db.clone(), Some(client.clone()));
+
+    post_processing::run_once(&state).await;
+
+    assert_eq!(std::fs::read(&dest).unwrap(), new_bytes);
+    assert!(
+        collect_files(&recycle, "mkv").is_empty(),
+        "receipt resume must not recycle the already-swapped destination"
+    );
+    assert_eq!(grab_state(&db, old_grab_id).await, "replaced");
+    assert_eq!(grab_state(&db, grab_id).await, "imported");
+    assert_eq!(
+        client.deleted.load(Ordering::SeqCst),
+        1,
+        "resume completes the deferred predecessor cleanup"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }

@@ -696,6 +696,28 @@ pub async fn migrate(db: &SqlitePool) -> Result<(), sqlx::Error> {
     .execute(db)
     .await?;
 
+    // Durable per-file checkpoints for restart-safe post-processing.
+    // A grabbed_torrents row stays `pending` until its whole batch has
+    // finished, so the parent row alone cannot distinguish files that
+    // landed before a process restart from files that still need work.
+    // Receipts let the next pass verify and reuse completed destinations
+    // without copying/recycling every earlier episode again.
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS grabbed_torrent_import_receipts (
+            grab_id INTEGER NOT NULL,
+            source_path TEXT NOT NULL,
+            destination_path TEXT NOT NULL,
+            file_size INTEGER NOT NULL,
+            completed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (grab_id, source_path),
+            FOREIGN KEY (grab_id) REFERENCES grabbed_torrents(id) ON DELETE CASCADE
+        )
+        "#,
+    )
+    .execute(db)
+    .await?;
+
     // Per-file series routing for multi-series batch releases. A
     // megapack that covers e.g. JoJo S1-S5 gets one row per sibling
     // in this table, each carrying the file indices (into the
