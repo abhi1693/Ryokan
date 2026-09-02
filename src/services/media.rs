@@ -42,6 +42,14 @@ static RE_BARE_NUM_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
     // `something 99 (extra) 12 (...)` still resolves to 12, not 99.
     Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+[\(\[]").expect("RE_BARE_NUM_BRACKET compiles")
 });
+static RE_BRACKETED_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
+    // Some releases put a zero-padded episode in its own bracket before
+    // codec/quality tags, e.g. `[01][HEVC][GB][4K]`. This is only used by
+    // the series-aware library scanner below; it must not become a global
+    // fallback because unrelated bracketed metadata is common.
+    Regex::new(r"(?:^|[\s._\-\]])\[(\d{2,3})\](?:[\s._\-\[(]|$)")
+        .expect("RE_BRACKETED_EPISODE compiles")
+});
 static RE_NCOP_NCED: LazyLock<Regex> = LazyLock::new(|| {
     // Creditless OP/ED marker that must NOT be a substring of an
     // unrelated word. Plain `contains("nced")` trips on any filename
@@ -318,7 +326,8 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
     let basename = path.file_name()?.to_str()?.to_string();
     let lower = basename.to_lowercase();
 
-    let (season, episode) = parse_episode_number(&lower)?;
+    let folder_name = series_root.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let (season, episode) = parse_episode_number_for_series(&lower, folder_name)?;
 
     let quality = parse_quality(&lower);
 
@@ -341,6 +350,41 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
         size_bytes,
         size_display,
     })
+}
+
+/// Parse an episode for a library folder, allowing bracketed episode tokens
+/// only when the release also contains the folder's meaningful title tokens.
+/// This prevents a mis-mapped release such as `Golden Curse [01]` from being
+/// imported into an unrelated folder such as `Dragon Ball DAIMA`.
+fn parse_episode_number_for_series(
+    lower: &str,
+    series_folder_name: &str,
+) -> Option<(Option<i32>, i32)> {
+    if let Some(parsed) = parse_episode_number(lower) {
+        return Some(parsed);
+    }
+
+    let title_tokens: Vec<String> = series_folder_name
+        .to_lowercase()
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| token.len() >= 2 && token.chars().any(|character| !character.is_ascii_digit()))
+        .map(ToOwned::to_owned)
+        .collect();
+    if title_tokens.is_empty() || !title_tokens.iter().all(|token| lower.contains(token)) {
+        return None;
+    }
+
+    let episode = RE_BRACKETED_EPISODE
+        .captures_iter(lower)
+        .last()?
+        .get(1)?
+        .as_str()
+        .parse::<i32>()
+        .ok()?;
+    if is_non_episodic_extra(lower) {
+        return None;
+    }
+    Some((None, episode))
 }
 
 /// Parse episode (and optionally season) number from a filename.
@@ -641,7 +685,7 @@ fn format_size(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_episode_number;
+    use super::{parse_episode_number, parse_episode_number_for_series};
 
     // Fixtures here are real-world filenames captured verbatim from
     // an actual library, lower-cased to match the parser's input. They
@@ -653,6 +697,35 @@ mod tests {
 
     fn parse(name: &str) -> Option<(Option<i32>, i32)> {
         parse_episode_number(&name.to_lowercase())
+    }
+
+    fn parse_for_series(name: &str, series: &str) -> Option<(Option<i32>, i32)> {
+        parse_episode_number_for_series(&name.to_lowercase(), series)
+    }
+
+    #[test]
+    fn bracketed_episode_requires_matching_series_title() {
+        assert_eq!(
+            parse_for_series(
+                "[gm-team][golden curse][2026][01][hevc][gb][4k].mp4",
+                "Golden Curse"
+            ),
+            Some((None, 1))
+        );
+        assert_eq!(
+            parse_for_series(
+                "[gm-team][golden curse][2026][01][hevc][gb][4k].mp4",
+                "Dragon Ball DAIMA"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_for_series(
+                "[judas] dragon ball daima [2026][01][hevc].mp4",
+                "Dragon Ball DAIMA"
+            ),
+            Some((None, 1))
+        );
     }
 
     // ── SxxExx (RE_SXEX) ─────────────────────────────────────────────
