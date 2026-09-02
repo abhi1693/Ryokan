@@ -42,14 +42,6 @@ static RE_BARE_NUM_BRACKET: LazyLock<Regex> = LazyLock::new(|| {
     // `something 99 (extra) 12 (...)` still resolves to 12, not 99.
     Regex::new(r"(?:^|\s)(\d{1,3})(?:v\d)?\s+[\(\[]").expect("RE_BARE_NUM_BRACKET compiles")
 });
-static RE_BRACKETED_EPISODE: LazyLock<Regex> = LazyLock::new(|| {
-    // Some Chinese releases put the zero-padded episode in its own square
-    // bracket before codec/quality brackets, e.g. `[01][HEVC][GB][4K]`.
-    // Require two or three digits and a following delimiter so release
-    // ranges such as `[001~131]` and hash/quality tags are not episodes.
-    Regex::new(r"(?:^|[\s._\-\]])\[(\d{2,3})\](?:[\s._\-\[(]|$)")
-        .expect("RE_BRACKETED_EPISODE compiles")
-});
 static RE_NCOP_NCED: LazyLock<Regex> = LazyLock::new(|| {
     // Creditless OP/ED marker that must NOT be a substring of an
     // unrelated word. Plain `contains("nced")` trips on any filename
@@ -489,14 +481,6 @@ fn parse_episode_number_inner(lower: &str) -> Option<(Option<i32>, i32)> {
         return Some((None, e));
     }
 
-    // Bracket-delimited zero-padded episode numbers used by some releases.
-    if let Some(caps) = RE_BRACKETED_EPISODE.captures_iter(lower).last()
-        && let Some(m) = caps.get(1)
-        && let Ok(e) = m.as_str().parse::<i32>()
-    {
-        return Some((None, e));
-    }
-
     // Final zero-padded underscore fallback. Run this after the established
     // patterns so an explicit SxxExx/Ep marker always wins. It uses the raw
     // filename because underscore normalization intentionally erases the
@@ -840,19 +824,6 @@ mod tests {
             Some((None, 1))
         );
         assert_eq!(parse("Group_Title_127v2.mp4"), Some((None, 127)));
-    }
-
-    #[test]
-    fn bracketed_zero_padded_episode_before_codec_tags() {
-        assert_eq!(
-            parse("[gm-team] golden curse [2026][01][hevc][gb][4k].mp4"),
-            Some((None, 1))
-        );
-        assert_eq!(
-            parse("[gm-team] golden curse [2026][05][hevc][gb][4k].mp4"),
-            Some((None, 5))
-        );
-        assert_eq!(parse("Show [001~131] [BD 1080p].mkv"), None);
     }
 
     #[test]
