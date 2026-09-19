@@ -87,12 +87,17 @@ fn resolve_episode(
     raw_episode: i32,
     route_offset: Option<i32>,
     cumulative_prior_episodes: i32,
+    current_series_episodes: i32,
 ) -> Result<ResolvedEpisode, String> {
     let episode_offset = route_offset.unwrap_or_else(|| {
         if parsed_season.is_some() {
             0
         } else {
-            fallback_ep_offset(raw_episode, cumulative_prior_episodes)
+            fallback_ep_offset(
+                raw_episode,
+                cumulative_prior_episodes,
+                current_series_episodes,
+            )
         }
     });
     let episode = raw_episode - episode_offset;
@@ -137,8 +142,20 @@ pub(crate) struct BatchPlan {
 /// mis-parse) still fail the whole batch before any mutation — that
 /// ambiguity has no safe per-file answer, and importing either file could
 /// destroy the other.
+#[cfg(test)]
 pub(crate) fn validate_batch_episode_map(
     files: &[(usize, i64, Option<i32>, i32, String)],
+) -> Result<BatchPlan, String> {
+    validate_batch_episode_map_with_series_counts(files, &HashMap::new())
+}
+
+/// Variant of [`validate_batch_episode_map`] that supplies the current
+/// episode count for each target series. The count is needed to distinguish
+/// a complete series pack (relative 1..N numbering) from a seasonal release
+/// using absolute franchise numbering.
+pub(crate) fn validate_batch_episode_map_with_series_counts(
+    files: &[(usize, i64, Option<i32>, i32, String)],
+    series_episode_counts: &HashMap<i64, i32>,
 ) -> Result<BatchPlan, String> {
     // (series, episode) → candidates in file order. BTreeMap so the
     // error names a deterministic slot when several collide.
@@ -165,6 +182,10 @@ pub(crate) fn validate_batch_episode_map(
             raw_episode,
             *route_offset,
             *cumulative_prior_episodes,
+            series_episode_counts
+                .get(series_id)
+                .copied()
+                .unwrap_or_default(),
         ) else {
             continue;
         };
@@ -1380,24 +1401,27 @@ async fn import_torrent(
     let batch_episode_plan =
         if requires_episode_map_preflight(effective_is_batch, video_files.len()) {
             let mut cumulative_by_series = HashMap::new();
+            let mut episode_count_by_series = HashMap::new();
             let mut batch_files = Vec::with_capacity(video_files.len());
             for (file_idx, file) in &video_files {
                 let route = routes_by_file.get(file_idx).copied();
                 let target_series_id = route
                     .map(|(series_id, _)| series_id)
                     .unwrap_or(grab.series_id);
-                let cumulative_prior_episodes =
-                    if let Some(value) = cumulative_by_series.get(&target_series_id) {
-                        *value
-                    } else {
-                        let value = series::get_by_id(&state.db, target_series_id)
-                            .await
-                            .map_err(|e| e.to_string())?
-                            .ok_or_else(|| format!("series {} not found", target_series_id))?
-                            .cumulative_prior_episodes;
-                        cumulative_by_series.insert(target_series_id, value);
-                        value
-                    };
+                let cumulative_prior_episodes = if let Some(value) =
+                    cumulative_by_series.get(&target_series_id)
+                {
+                    *value
+                } else {
+                    let row = series::get_by_id(&state.db, target_series_id)
+                        .await
+                        .map_err(|e| e.to_string())?
+                        .ok_or_else(|| format!("series {} not found", target_series_id))?;
+                    cumulative_by_series.insert(target_series_id, row.cumulative_prior_episodes);
+                    episode_count_by_series
+                        .insert(target_series_id, row.episodes.unwrap_or_default());
+                    row.cumulative_prior_episodes
+                };
                 batch_files.push((
                     *file_idx,
                     target_series_id,
@@ -1406,7 +1430,7 @@ async fn import_torrent(
                     file.name.clone(),
                 ));
             }
-            validate_batch_episode_map(&batch_files)?
+            validate_batch_episode_map_with_series_counts(&batch_files, &episode_count_by_series)?
         } else {
             BatchPlan::default()
         };
@@ -1647,6 +1671,7 @@ async fn import_torrent(
                 raw_episode,
                 routes_by_file.get(file_idx).map(|(_, offset)| *offset),
                 ctx.series.cumulative_prior_episodes,
+                ctx.series.episodes.unwrap_or_default(),
             ) {
                 Ok(resolved) => resolved,
                 Err(reason) => {
