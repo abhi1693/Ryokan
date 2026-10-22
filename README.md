@@ -77,3 +77,6 @@ See [CHANGELOG.md](CHANGELOG.md) and the browser dependency
 [provenance](static/vendor/README.md). Run the canonical `cargo t` / nextest
 suite with `test-support` when checking dependency upgrades so test fixtures run
 in separate processes.
+
+The Rust pull-request workflow audits locked dependencies with read-only
+permissions.

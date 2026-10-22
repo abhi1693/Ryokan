@@ -6,3 +6,4 @@
 - Update vendored HTMX to 2.0.11 and Zensical to 0.0.71, with verified browser-asset provenance and its retained license.
 - Update ffprobe to 9.0.2-1 and pin the Rust 1.99.1 builder, ffprobe source, and Debian runtime to registry-verified multi-platform image digests. Keep the declared Rust 1.95 minimum.
 - Preserve the already shipped 1.9.9–1.9.12 episode-parsing and complete-series import fixes that are ahead of the fork's default branch.
+- Add a read-only locked-dependency audit to the active PR workflow, covering forks where the inherited audit workflow is disabled.
