@@ -326,7 +326,10 @@ fn parse_episode_file(path: &Path, series_root: &Path) -> Option<EpisodeFile> {
     let basename = path.file_name()?.to_str()?.to_string();
     let lower = basename.to_lowercase();
 
-    let folder_name = series_root.file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let folder_name = series_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
     let (season, episode) = parse_episode_number_for_series(&lower, folder_name)?;
 
     let quality = parse_quality(&lower);
@@ -367,7 +370,9 @@ fn parse_episode_number_for_series(
     let title_tokens: Vec<String> = series_folder_name
         .to_lowercase()
         .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|token| token.len() >= 2 && token.chars().any(|character| !character.is_ascii_digit()))
+        .filter(|token| {
+            token.len() >= 2 && token.chars().any(|character| !character.is_ascii_digit())
+        })
         .map(ToOwned::to_owned)
         .collect();
     if title_tokens.is_empty() || !title_tokens.iter().all(|token| lower.contains(token)) {

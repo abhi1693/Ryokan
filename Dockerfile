@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1-trixie AS builder
+FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS builder
 
 WORKDIR /app
 
@@ -19,10 +19,10 @@ RUN touch src/main.rs && cargo build --release
 
 # Supply ffprobe as a pinned, multi-architecture static binary instead of
 # installing Debian's full ffmpeg dependency tree in the runtime image.
-FROM mwader/static-ffmpeg:7.1@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ffmpeg
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg
 
 # Runtime stage
-FROM debian:trixie-slim
+FROM debian:trixie-slim@sha256:62bd423aeee912639ca8ee681c2b762cb3e25137e0a92b20be455898a9f034ad
 
 # ca-certificates: outbound HTTPS to AniList / Jikan / Kitsu / Nyaa.
 # curl:            used by the compose healthcheck.

@@ -67,3 +67,13 @@ Please report security issues privately. See [SECURITY.md](SECURITY.md).
 Ryokan is licensed under [GPL-3.0-or-later](LICENSE).
 
 Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`licenses/THIRD_PARTY_LICENSES.html`](licenses/THIRD_PARTY_LICENSES.html).
+
+## Next patch release
+
+Version 1.9.13 refreshes all Rust dependencies, HTMX 2.0.11, Zensical 0.0.71,
+and ffprobe 9.0.2-1. The Rust 1.99.1 builder and runtime image sources use
+verified multi-platform digests. The declared minimum remains Rust 1.95.
+See [CHANGELOG.md](CHANGELOG.md) and the browser dependency
+[provenance](static/vendor/README.md). Run the canonical `cargo t` / nextest
+suite with `test-support` when checking dependency upgrades so test fixtures run
+in separate processes.

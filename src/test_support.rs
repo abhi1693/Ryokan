@@ -303,7 +303,7 @@ mod e2e {
 <head>
 <meta charset="utf-8">
 <title>Browser-e2e fixture</title>
-<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/vendor/htmx-2.0.11.min.js"></script>
 </head>
 <body>
 <button class="ep-mon-btn {% if monitored %}ep-mon-yes{% else %}ep-mon-no{% endif %}"
@@ -339,7 +339,7 @@ mod e2e {
 <head>
 <meta charset="utf-8">
 <title>Connection-test fixture</title>
-<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/vendor/htmx-2.0.11.min.js"></script>
 </head>
 <body>
 <form id="jellyfin-form">
@@ -404,7 +404,7 @@ mod e2e {
 <head>
 <meta charset="utf-8">
 <title>Progress-toast fixture</title>
-<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/vendor/htmx-2.0.11.min.js"></script>
 <script src="/static/js/page_lifecycle.js"></script>
 <script src="/static/js/base.js"></script>
 </head>
@@ -494,7 +494,7 @@ window.addEventListener('DOMContentLoaded', function () {
 <head>
 <meta charset="utf-8">
 <title>Episode-delete listener fixture</title>
-<script src="/static/vendor/htmx-2.0.9.min.js"></script>
+<script src="/static/vendor/htmx-2.0.11.min.js"></script>
 <script src="/static/js/page_lifecycle.js"></script>
 <script src="/static/js/base.js"></script>
 </head>
