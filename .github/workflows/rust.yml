@@ -42,7 +42,15 @@ jobs:
       # 3-5x — pays for itself many times over across the four cargo
       # invocations below.
       - name: Install mold + clang
-        run: sudo apt-get update && sudo apt-get install -y mold clang
+        # These Ubuntu packages must not depend on unrelated runner feeds.
+        run: |
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=/dev/null
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends mold clang
       # nextest is the parallel test runner pinned in `.config/nextest.toml`
       # — runs ~1900 tests roughly 2x faster than `cargo test` thanks
       # to a process-per-test scheduler and a less serialized fixture
@@ -103,7 +111,14 @@ jobs:
       # on linux targets; this job inherits that config and would fail
       # at link-time without them.
       - name: Install mold + clang
-        run: sudo apt-get update && sudo apt-get install -y mold clang
+        run: |
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=/dev/null
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends mold clang
       - name: Build on MSRV
         run: cargo build --workspace --locked --verbose
 

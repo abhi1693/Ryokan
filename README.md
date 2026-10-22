@@ -50,7 +50,13 @@ Actively developed. Expect occasional bugs. See [Releases](https://github.com/jo
 
 ## Contributing
 
-Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions. Quick version:
+Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions.
+
+Both Rust CI jobs and weekly mutation testing install `mold` and `clang` using only the runner's official Ubuntu
+`ubuntu.sources` repositories. These commands preserve normal package signature verification and
+fail if an Ubuntu index fails, while leaving unrelated preconfigured package feeds unchanged.
+
+To run the application locally:
 
 ```bash
 git clone https://github.com/johnthreekay/Ryokan.git
