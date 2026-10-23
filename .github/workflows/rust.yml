@@ -1,6 +1,15 @@
 name: Rust
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ''
+    outputs:
+      version:
+        value: ${{ jobs.version.outputs.version }}
   push:
     branches: [ "main", "dev" ]
   pull_request:
@@ -21,6 +30,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check Cargo source, lock and release versions
+        id: version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/check_image_version.py
+      - name: Test image version guards
+        run: python3 -m unittest discover -s scripts -p 'test_image_version.py'
+      - name: Test immutable publication source guards
+        run: python3 -m unittest discover -s scripts -p 'test_release_identity.py'
+
   build:
     runs-on: ubuntu-latest
     # GitHub's per-job default is 6h; the verify pass should never
@@ -137,3 +164,21 @@ jobs:
           tool: cargo-audit@0.22.2
       - name: Audit the locked dependency graph
         run: cargo audit
+
+  container:
+    name: Native runtime images
+    needs: [version, build, msrv, dependency-audit]
+    uses: abhi1693/actions/.github/workflows/container-images.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      manifest: .github/images.json
+      publish: false
+      version: ${{ needs.version.outputs.version }}
+      changed-only: false
+      scan: true
+      scan-ignore-unfixed: false
+      artifact-scope: ci-images
