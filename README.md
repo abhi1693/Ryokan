@@ -82,6 +82,8 @@ and static ffprobe sources use verified multi-platform digests. The image
 rebuilds the exact upstream gosu 1.19 source with Go 1.27.3 and explicitly
 includes the C++ runtime needed by the native title parser. The declared
 minimum remains Rust 1.95.
+The locked graph includes ctutils 0.4.4 for the upstream constant-time mask and
+comparison fixes in [RUSTSEC-2026-0385](https://github.com/RustSec/advisory-db/blob/main/crates/ctutils/RUSTSEC-2026-0385.md).
 See [CHANGELOG.md](CHANGELOG.md) and the browser dependency
 [provenance](static/vendor/README.md). Run the canonical `cargo t` / nextest
 suite with `test-support` when checking dependency upgrades so test fixtures run

@@ -2,6 +2,7 @@
 
 ## 1.9.13 (2026-10-23)
 
+- Update ctutils to 0.4.4 for RUSTSEC-2026-0385, including upstream constant-time mask and `u128` comparison fixes; retain the Rust 1.95 minimum and normal audit gate.
 - Refresh all 42 direct Rust dependencies and compatible transitive packages, including Utoipa 6, Swagger UI 10, Scraper 0.29, Nix 0.31, and rstest 0.28.
 - Update vendored HTMX to 2.0.11 and Zensical to 0.0.71, with verified browser-asset provenance and its retained license.
 - Update ffprobe to 9.0.2-1 and pin the Rust 1.99.1 builder, ffprobe source, and Ubuntu 26.04 LTS runtime to registry-verified multi-platform image digests. Keep the declared Rust 1.95 minimum.
