@@ -72,7 +72,7 @@ Please report security issues privately. See [SECURITY.md](SECURITY.md).
 
 Ryokan is licensed under [GPL-3.0-or-later](LICENSE).
 
-Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`licenses/THIRD_PARTY_LICENSES.html`](licenses/THIRD_PARTY_LICENSES.html).
+Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`licenses/THIRD_PARTY_LICENSES.html`](licenses/THIRD_PARTY_LICENSES.html). Dependency changes targeting `main` must carry matching notices; see the [notice workflow and membership check](licenses/README.md).
 
 ## Next patch release
 

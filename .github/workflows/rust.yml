@@ -38,6 +38,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Check listed license notices against Cargo.lock
+        run: python3 scripts/check_license_notices.py
+      - name: Test license notice guards
+        run: python3 -m unittest discover -s scripts -p 'test_license_notices.py'
       - name: Check Cargo source, lock and release versions
         id: version
         env:
@@ -89,11 +93,9 @@ jobs:
           tool: cargo-nextest
       - name: Format check
         run: cargo fmt --all -- --check
-      # `licenses/THIRD_PARTY_LICENSES.html` is regenerated and
-      # auto-committed by `.github/workflows/license-notices.yml` on
-      # push to `dev` when Cargo.lock changes. No freshness check
-      # here — contributors never need to run `cargo about generate`
-      # locally; the dedicated workflow keeps the file current.
+      # Dev notice regeneration remains in license-notices.yml. Main PRs
+      # carry their matching notices; the version job checks listed pairs
+      # against Cargo.lock without installing cargo-about or claiming coverage.
       - name: Clippy
         # `--features test-support` enables the `ryokan::test_support`
         # re-export that integration tests under `tests/` depend on.
