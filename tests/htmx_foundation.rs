@@ -33,7 +33,7 @@
 //! strictly more robust — it catches a missing file regardless of
 //! what the router happens to mount.
 
-const HTMX_CORE_PATH: &str = "static/vendor/htmx-2.0.9.min.js";
+const HTMX_CORE_PATH: &str = "static/vendor/htmx-2.0.11.min.js";
 const HTMX_SSE_PATH: &str = "static/vendor/htmx-ext-sse-2.2.4.min.js";
 const HTMX_HEAD_SUPPORT_PATH: &str = "static/vendor/htmx-ext-head-support-2.0.5.min.js";
 
@@ -121,7 +121,7 @@ fn base_template_wires_htmx_correctly() {
     // custom JS can reference the `htmx.*` global. Verify by finding
     // both positions and asserting the htmx one comes first.
     let htmx_pos = body
-        .find("htmx-2.0.9.min.js")
+        .find("htmx-2.0.11.min.js")
         .expect("htmx core tag present");
     let base_js_pos = body
         .find("/static/js/base.js")

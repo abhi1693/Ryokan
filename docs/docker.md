@@ -47,7 +47,53 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
 
 The probe targets `/login` because that's the canonical "is Ryokan up" endpoint. There is no `/healthz`. `/login` returns 200 once the auth UI is live, or 303 redirecting to `/setup` on a fresh container with no users yet. Both are valid "up" signals.
 
-`start-period=30s` covers cold-boot work: idempotent migrations, password-hash warmup, the multi-client cache rebuild, and optional Jellyfin client init. ARM64 first-runs occasionally bumped against an earlier 10-second budget; 30 seconds matches the CI smoke-test poll window.
+`start-period=30s` covers cold-boot work: idempotent migrations, password-hash warmup, the multi-client cache rebuild, and optional Jellyfin client init. ARM64 first-runs occasionally bumped against an earlier 10-second budget. The isolated CI smoke allows a bounded 60-second startup window.
+
+## Building and verifying this fork
+
+This fork publishes `ghcr.io/abhi1693/ryokan`. Its source version comes from
+`Cargo.toml` and must match the application entry in `Cargo.lock` and any release
+tag or manual version. The image starts as root so the unchanged entrypoint can
+create the requested PUID/PGID user and prepare `/data`, then gosu execs Ryokan
+as that user. It does not change ownership of download or media mounts.
+
+```sh
+version=$(python3 scripts/check_image_version.py)
+docker build --build-arg APP_VERSION="$version" \
+  --build-arg REVISION="$(git rev-parse HEAD)" -t ryokan:verify .
+bash scripts/smoke-runtime.sh ryokan:verify linux/amd64 "$version"
+```
+
+Use a native ARM64 runner and `linux/arm64` for ARM64 verification. The smoke
+uses a disposable local data volume and a container with no external network.
+It checks fresh setup, authenticated version rendering, authentication boundaries,
+static assets, persistent account/session state after restart, native libraries,
+real ffprobe WAV decoding, trust roots, PID 1 privilege dropping, alternate
+PUID/PGID values and unchanged read-only media fixtures. It never contacts a
+download client or changes an existing library.
+
+Pull requests and branch pushes run both native image builds through the shared
+image workflow, requiring SBOM generation and scans for secrets and all
+HIGH/CRITICAL vulnerabilities, including those without a published fix. Version
+tags and explicit manual releases repeat these checks before candidate promotion
+and attestation. Branch builds do not publish images. The default GitHub-hosted
+ARM64 runner is used; no private runner is required.
+
+Publication requires its exact `vVERSION` Git tag, including manual dispatch.
+The resolved tag commit, checked-out HEAD and workflow source SHA must agree,
+and the full workflow ref must identify that tag. Moving branch dispatches are
+rejected before CI and image builds. The source guard has disposable local
+Git-history tests in the existing version-check CI job; tags are never moved.
+
+The runtime uses the maintained GNU libraries in Ubuntu 26.04 LTS. Static ffprobe
+is supplied separately, and `libstdc++6` supports the native anitomy parser. The
+official gosu 1.19 release embeds an older Go compiler, so its exact upstream
+commit `6456aaa0f3c854d199d0f037f068eb97515b7513` is rebuilt with the pinned
+official Go 1.27.3 image and module checksum verification. The resulting tool
+replaces the distribution gosu package and keeps its CLI and third-party notices.
+The distribution package database remains intact for scanning. Ubuntu's unowned
+Pebble supervisor binary is removed because this image uses its own single-process
+entrypoint; the build fails if that binary becomes package-owned.
 
 ## Updating
 
@@ -82,4 +128,4 @@ The [Stack builder](stack-builder.md) generates Caddy / Traefik / nginx config w
 
 ---
 
-*Last updated: 2026-05-07.*
+*Last updated: 2026-10-23.*

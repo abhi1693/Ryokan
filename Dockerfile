@@ -1,12 +1,19 @@
 # Build stage
-FROM rust:1-trixie AS builder
+FROM rust:1.99.1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS builder
 
+ARG APP_VERSION
+ARG CARGO_BUILD_JOBS=2
 WORKDIR /app
 
+RUN apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get install -y --no-install-recommends cmake \
+    && rm -rf /var/lib/apt/lists/*
+
 # Cache dependency builds: copy manifests first, build deps, then copy source.
-COPY Cargo.toml Cargo.lock* ./
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main() {}' > src/main.rs
-RUN cargo build --release
+RUN test "$(cargo pkgid --locked | sed 's/.*@//')" = "$APP_VERSION" \
+    && cargo build --release --locked
 
 # Now copy the real source and build.
 # static/ is needed at compile time: src/handlers/settings.rs uses
@@ -15,25 +22,60 @@ RUN cargo build --release
 COPY src/ src/
 COPY templates/ templates/
 COPY static/ static/
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && cargo build --release --locked
 
 # Supply ffprobe as a pinned, multi-architecture static binary instead of
 # installing Debian's full ffmpeg dependency tree in the runtime image.
-FROM mwader/static-ffmpeg:7.1@sha256:a8090df5f5608daef387e1b2e93b98aaacb4d92153ad904e7d715c725724fca4 AS ffmpeg
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg
+
+# The official gosu 1.19 release embeds Go 1.24.6. Rebuild that exact
+# upstream commit with the security-patched compiler, without changing its CLI.
+FROM golang:1.27.3-alpine3.24@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS gosu-builder
+ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOBIN=/out
+RUN go install -trimpath -ldflags='-s -w' \
+      github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8 \
+    && /out/gosu --version | grep -F '1.19 (go1.27.3 on ' \
+    && /out/gosu nobody true \
+    && mkdir -p /out/licenses \
+    && cp /usr/local/go/LICENSE /out/licenses/Go-LICENSE \
+    && cp /go/pkg/mod/github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8/LICENSE /out/licenses/gosu-LICENSE \
+    && cp /go/pkg/mod/github.com/moby/sys/user@v0.1.0/LICENSE /out/licenses/moby-sys-user-LICENSE \
+    && cp /go/pkg/mod/golang.org/x/sys@v0.1.0/LICENSE /out/licenses/golang-x-sys-LICENSE
 
 # Runtime stage
-FROM debian:trixie-slim
+# Ubuntu LTS supplies maintained GNU runtime libraries for the Trixie-built binary.
+FROM ubuntu:26.04@sha256:c098726dd9b9733f3e885f8de0ef375206a311b0a317eadc40d347b1115fb944 AS runtime-base
+
+# This image execs Ryokan through its own entrypoint, without Ubuntu's optional
+# Pebble service supervisor. Remove that unused, unowned binary while retaining
+# the complete distribution package database and failing if ownership changes.
+RUN test -s /var/lib/dpkg/status \
+    && ! dpkg-query -S /usr/bin/pebble 2>/dev/null \
+    && rm -f /usr/bin/pebble
 
 # ca-certificates: outbound HTTPS to AniList / Jikan / Kitsu / Nyaa.
 # curl:            used by the compose healthcheck.
-# gosu:            drops privileges from root to the ryokan user in the entrypoint.
+# gosu:            copied from the pinned source build above; drops privileges.
 # passwd:          provides useradd/groupadd/usermod/groupmod for the entrypoint.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# libstdc++6:      supports the native C++ anitomy title parser.
+RUN export DEBIAN_FRONTEND=noninteractive \
+    && apt-get -o APT::Update::Error-Mode=any update \
+    && apt-get dist-upgrade -y --no-install-recommends \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    gosu \
     passwd \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
+COPY --from=gosu-builder /out/gosu /usr/local/bin/gosu
+COPY --from=gosu-builder /out/licenses/ /usr/share/licenses/gosu/
+
+FROM runtime-base AS runtime
+ARG APP_VERSION
+ARG REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/abhi1693/Ryokan" \
+    org.opencontainers.image.version="${APP_VERSION}" \
+    org.opencontainers.image.revision="${REVISION}"
 
 WORKDIR /app
 

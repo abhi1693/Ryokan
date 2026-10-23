@@ -1,6 +1,6 @@
 [package]
 name = "ryokan"
-version = "1.9.8"
+version = "1.9.13"
 edition = "2024"
 authors = ["John K"]
 license = "GPL-3.0-or-later"
@@ -157,15 +157,15 @@ required-features = ["test-support", "browser-e2e"]
 
 [dependencies]
 # Web framework + async runtime
-axum = { version = "0.8", features = ["macros"] }
+axum = { version = "0.8.9", features = ["macros"] }
 # HTMX request detection — provides the `HxRequest` extractor so handlers
 # can return either full pages (regular nav) or HTML fragments
 # (HTMX swap target) based on the `HX-Request: true` header. Lives at
 # `services/htmx_response.rs` for the project's helper conventions.
-axum-htmx = "0.8"
-tokio = { version = "1", features = ["full"] }
-tower = "0.5"
-tower-http = { version = "0.7", features = ["fs", "trace", "compression-br", "compression-gzip", "set-header"] }
+axum-htmx = "0.8.1"
+tokio = { version = "1.54.1", features = ["full"] }
+tower = "0.5.3"
+tower-http = { version = "0.7.1", features = ["fs", "trace", "compression-br", "compression-gzip", "set-header"] }
 
 # Templating
 # askama 0.13 merged back with the rinja fork and dropped the
@@ -173,7 +173,7 @@ tower-http = { version = "0.7", features = ["fs", "trace", "compression-br", "co
 # call `template.render()` directly and wrap the result in `Html(..)`
 # themselves, which is what this codebase already does — so the axum
 # integration just vanishes on the bump.
-askama = "0.16"
+askama = "0.16.1"
 
 # Database
 # default-features = false drops sqlx's `any`/`migrate`/`json` defaults
@@ -197,7 +197,7 @@ askama = "0.16"
 # strings in models/ (placeholder-count splicing for `IN (?, ?, ..)`
 # and `SELECT {COLS}` const interpolation — never user input) are
 # wrapped in `sqlx::AssertSqlSafe(..)` after a manual injection audit.
-sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 
 # HTTP client
 # 0.13 moved `.query()` and `.form()` behind their own crate features
@@ -206,7 +206,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 # for us (we only talk to public HTTPS endpoints) and removes the
 # OpenSSL headers dependency on Linux builds; we just have to opt back
 # into `query` + `form`.
-reqwest = { version = "0.13", features = ["json", "cookies", "query", "form", "multipart"] }
+reqwest = { version = "0.13.5", features = ["json", "cookies", "query", "form", "multipart"] }
 
 # Async trait support. Rust's native async-fn-in-traits (stable since
 # 1.75) does not yet produce Send-bound futures by default, which is
@@ -214,68 +214,68 @@ reqwest = { version = "0.13", features = ["json", "cookies", "query", "form", "m
 # tokio's multi-threaded runtime. async_trait's boxed-future macro
 # sidesteps that and is the idiomatic choice for object-safe async
 # traits. Added for the DownloadClient trait (#63).
-async-trait = "0.1"
+async-trait = "0.1.92"
 
 # Bounded-concurrency stream combinators (`StreamExt::buffer_unordered`)
 # used by the Nyaa search fan-out to run two queries concurrently under
 # the `NYAA_CONCURRENCY` semaphore. `futures-util` is already in the
 # transitive dep tree via reqwest/tokio; listing it directly is a ~zero-
 # size addition that keeps the import stable against transitive churn.
-futures-util = "0.3"
+futures-util = "0.3.34"
 
 # HTML scraping
-scraper = "0.27"
+scraper = "0.29.0"
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
 # `preserve_order` switches the backing type of `serde_json::Map`
 # from `BTreeMap` (alphabetical) to `indexmap::IndexMap` (insertion-
 # ordered). Webhook custom-headers persistence depends on this so
 # `Authorization: Bearer ...` doesn't get shuffled past convention-
 # prefix headers on every save. Indexmap is already a transitive
 # dep, so this is a flag flip rather than a new crate.
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
 
 # Auth
-bcrypt = "0.19"
-rand = "0.10"
-hex = "0.4"
-subtle = "2"
+bcrypt = "0.19.3"
+rand = "0.10.3"
+hex = "0.4.3"
+subtle = "2.6.1"
 # AEAD encryption for OAuth tokens stored in `external_accounts`
 # (issue #62). Pure-Rust, no system deps, ~50 KB compiled.
 # ChaCha20-Poly1305 picked over AES-GCM because it has no hardware-
 # acceleration dependency — runs identically on a Raspberry Pi and an
 # x86_64 server, and the performance difference doesn't matter for
 # encrypting a handful of tokens per sync tick.
-chacha20poly1305 = "0.11"
+chacha20poly1305 = "0.11.0"
 # Base64 encoding. Originally added as a dev-only dep for the
 # download-client smokes; promoted to a prod dep in #62 because
 # the `RYOKAN_ENCRYPTION_KEY` env var is base64-encoded and
 # `services::crypto` decodes it at startup. Kept a single declaration
 # here rather than duplicating into `[dev-dependencies]` — prod code
 # and the smokes share one version.
-base64 = "0.23"
+base64 = "0.23.1"
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 # API documentation
-utoipa = { version = "5.5", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa = { version = "6.0.0", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 
 # Misc
-chrono = { version = "0.4", features = ["serde"] }
-urlencoding = "2"
-regex-lite = "0.1"
+chrono = { version = "0.4.45", features = ["serde"] }
+urlencoding = "2.1.3"
+regex-lite = "0.1.9"
 # fancy-regex is used only by the Custom Formats parser (Sonarr-v4
 # compat). Trash-guides anime CFs rely on look-around and nested
 # character classes, which regex-lite (and even the main `regex` crate)
 # do not support — fancy-regex adds PCRE-style backtracking. We keep
 # regex-lite as the default for Ryokan's own internal regexes because
 # they don't need look-around and we want the linear-time guarantee.
-fancy-regex = "0.19"
-sha2 = "0.11"
+fancy-regex = "0.19.2"
+sha2 = "0.11.1"
 # HMAC-SHA256 for outbound webhook signatures (issue #119). Tracks
 # the same `digest = 0.11` crate `sha2 = "0.11"` already uses — using
 # `hmac = "0.12"` would pull in the older `digest = 0.10` and produce
@@ -283,25 +283,25 @@ sha2 = "0.11"
 # Project decision: don't hand-roll the
 # H(K ⊕ opad || H(K ⊕ ipad || msg)) shape — well-audited tiny crate
 # is the right tradeoff over a few dozen lines of error-prone manual code.
-hmac = "0.13"
-ammonia = "4"
+hmac = "0.13.0"
+ammonia = "4.2.4"
 
 # Anime release title tokenization (wraps bundled anitomy C++ lib, compiled via cc)
-anitomy = "0.2"
+anitomy = "0.2.0"
 
 # Recursive directory walk for the manual-import wizard (#122). Already
 # in the lock as a transitive dep; promoted to a direct one because the
 # import walker needs its depth cap, follow-links toggle, sorted
 # traversal, and per-entry error reporting — a hand-rolled `read_dir`
 # recursion loses all four.
-walkdir = "2"
+walkdir = "2.5.0"
 
 # Backup / restore (#126). `tar` + `flate2` (miniz_oxide backend, pure
 # Rust) build and read the `.tar.gz` backups; `nix` gives a safe
 # `statvfs` for the free-disk-space precheck before a backup runs.
-tar = "0.4"
-flate2 = "1"
-nix = { version = "0.30", features = ["fs"] }
+tar = "0.4.46"
+flate2 = "1.1.10"
+nix = { version = "0.31.3", features = ["fs"] }
 
 # fantoccini: WebDriver client for browser-driven e2e tests of HTMX
 # UI flows. `optional = true` + the `browser-e2e` feature gate means
@@ -315,7 +315,7 @@ nix = { version = "0.30", features = ["fs"] }
 # `openssl` (and `native-tls`) from the lock at the source instead of
 # carrying a phantom advisory only the browser-e2e feature could ever
 # build (same approach as the sqlx default-features opt-out above).
-fantoccini = { version = "0.22", optional = true, default-features = false, features = ["rustls-tls"] }
+fantoccini = { version = "0.22.1", optional = true, default-features = false, features = ["rustls-tls"] }
 
 [dev-dependencies]
 # Used only by the env-gated live_smoke tests for the DownloadClient
@@ -323,12 +323,12 @@ fantoccini = { version = "0.22", optional = true, default-features = false, feat
 # tempdir (via shell-out to transmission-create) to get deterministic
 # file-list testing without depending on DHT metadata fetch landing
 # during the test window.
-tempfile = "3"
+tempfile = "3.27.0"
 # SHA-1 for computing a .torrent's v1 infohash from its bencoded
 # `info` dict — needed by the rtorrent smoke since `load.raw_start_verbose`
 # returns 0 on success rather than echoing back the hash. Test-only;
 # BitTorrent's v1 spec mandates SHA-1 here so we can't swap to sha2.
-sha1_smol = "1"
+sha1_smol = "1.0.1"
 
 # ── Test-coverage-expansion (issue-# to be filed) infrastructure ──
 #
@@ -338,17 +338,17 @@ sha1_smol = "1"
 # DI refactor — the mocks run on a real tokio listener that reqwest
 # talks to normally. Sonarr's Mock<IHttpClient> pattern maps here
 # almost directly.
-wiremock = "0.6"
+wiremock = "0.6.5"
 # insta: snapshot testing with `cargo insta review` for explicit
 # updates. Target use is the Sonarr/Radarr compat JSON responses,
 # whose shape is a contract Seerr depends on and silently-drifting
 # fields are one of the most user-visible regressions the suite can
 # catch.
-insta = { version = "1", features = ["json"] }
+insta = { version = "1.49.0", features = ["json"] }
 # rstest: parameterized tests via #[case] attributes, flattening the
 # existing one-fn-per-case pattern in the classification pipeline
 # into tabular data. Equivalent to C#'s [TestCase].
-rstest = "0.26"
+rstest = "0.28.0"
 # proptest: property-based testing. Generates randomized inputs against
 # invariant assertions. Used for fuzzing pure-function invariants like
 # scoring's sum-of-deltas property and the source classifier's
@@ -356,7 +356,7 @@ rstest = "0.26"
 # behaviors but a fuzzed sweep is what catches the "I didn't think of
 # that input" class of bugs. Default 256 cases per `proptest!` block,
 # tunable via `PROPTEST_CASES` env var when iterating on a flake.
-proptest = "1"
+proptest = "1.12.0"
 
 # Test-runtime profile. opt-level = 1 on dependencies (not the test
 # crate itself, which stays unoptimized for fast incremental builds)

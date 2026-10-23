@@ -1,187 +1,63 @@
+---
 name: Publish Docker image
 
 on:
   push:
-    branches:
-      - main
-      - dev
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Application version; run only from its matching vVERSION tag
+        type: string
+        required: true
 
-env:
-  REGISTRY: ghcr.io
-  # Lowercased because GHCR requires lowercase image names and the repo is "Ryokan".
-  IMAGE_NAME: abhi1693/ryokan
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Per-platform job: builds the image on a native runner for its target
-  # architecture and pushes a digest-only reference to GHCR. No tags are
-  # attached yet — that happens in the merge job below.
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+  release-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require the exact release tag and source
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: bash scripts/check_release_identity.sh
+  ci:
+    needs: release-identity
+    name: Required CI
+    uses: ./.github/workflows/rust.yml
+    with:
+      version: ${{ inputs.version }}
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
-    steps:
-      - name: Prepare platform pair
-        run: |
-          platform=${{ matrix.platform }}
-          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
-
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract image name/labels
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-
-      - name: Build and push by digest
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: ${{ matrix.platform }}
-          labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha,scope=${{ env.PLATFORM_PAIR }}
-          cache-to: type=gha,mode=max,scope=${{ env.PLATFORM_PAIR }}
-
-      - name: Smoke test amd64 image
-        if: matrix.platform == 'linux/amd64'
-        run: |
-          docker run -d --name ryokan-smoke \
-            -e LISTEN_ADDR=0.0.0.0:8978 \
-            -p 8978:8978 \
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
-          docker exec ryokan-smoke ffprobe -version
-          # Probe /login (matches the production HEALTHCHECK). 200 means
-          # the auth UI rendered; anything else fails. Polling loop
-          # rather than fixed sleep so a fast cold-boot doesn't waste a
-          # full minute on every CI run.
-          #
-          # `|| code=000` is load-bearing: GitHub Actions runs `run`
-          # blocks under `set -eo pipefail`, so a curl error inside a
-          # command substitution (connection refused = 7, broken
-          # response = 56, etc.) propagates through and kills the
-          # whole loop before the next sleep. Cold-boot races
-          # naturally produce both — the kernel accepts the TCP
-          # connection the moment Axum binds, but a few hundred ms
-          # before the router is actually serving, curl can get an
-          # incomplete response. Without the swallow we observed exit
-          # 56 on run 25254999207 even though the container came up
-          # fine ~2-3s later. The `000` sentinel keeps the loop
-          # iterating; a real "never came up" still falls out the
-          # bottom and reports the last code.
-          # Accept 200 OR 303 as "up": a fresh container with no
-          # users yet redirects `/login` → `/setup` (303), which is
-          # correct behavior on first boot. The previous strict
-          # 200-only check failed every fresh-image smoke test and
-          # masked the actual question we want to answer ("did
-          # Ryokan boot and start serving?"). 4xx/5xx still fall
-          # through to the failure path.
-          for i in {1..30}; do
-            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 http://localhost:8978/login || echo 000)
-            case "$code" in
-              200|303)
-                echo "Ryokan /login responded $code (Ryokan is up)"
-                exit 0
-                ;;
-            esac
-            sleep 1
-          done
-          echo "Ryokan never came up (last code: $code)"
-          docker logs ryokan-smoke
-          exit 1
-
-      - name: Tear down smoke-test container
-        if: always() && matrix.platform == 'linux/amd64'
-        run: docker rm -f ryokan-smoke || true
-
-      - name: Export digest
-        run: |
-          mkdir -p ${{ runner.temp }}/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-      - name: Upload digest
-        uses: actions/upload-artifact@v7
-        with:
-          name: digests-${{ env.PLATFORM_PAIR }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # Merge job: pulls the per-platform digests and stitches them into a
-  # single multi-arch manifest list under the real tags (branch, semver,
-  # latest). Docker pulls on amd64 and arm64 hosts pick the matching
-  # platform transparently.
-  merge:
-    runs-on: ubuntu-latest
-    needs: build
+  images:
+    needs: ci
+    uses: abhi1693/actions/.github/workflows/container-images.yml@v1
     permissions:
       contents: read
       packages: write
-
-    steps:
-      - name: Download digests
-        # Pinned to v7 to match `upload-artifact@v7` above. v8 of
-        # download-artifact exists but there's no v8 of upload-artifact
-        # yet, and v7↔v8 mixing has produced ambiguous archives in the
-        # past (compression-default change between majors).
-        uses: actions/download-artifact@v7
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: digests-*
-          merge-multiple: true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable={{is_default_branch}}
-
-      - name: Create manifest list and push
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
-
-      - name: Inspect image
-        run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+      id-token: write
+      attestations: write
+    with:
+      manifest: .github/images.json
+      publish: true
+      version: ${{ needs.ci.outputs.version }}
+      scan: true
+      scan-ignore-unfixed: false
+      release-aliases: '["minor"]'

@@ -50,7 +50,13 @@ Actively developed. Expect occasional bugs. See [Releases](https://github.com/jo
 
 ## Contributing
 
-Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions. Quick version:
+Bug reports, feature requests, and PRs are welcome. PRs target the `dev` branch and run a verify chain (`cargo fmt`/`clippy -D warnings`/`cargo t`). See [`CLAUDE.md`](CLAUDE.md) for the build prerequisites (`mold` + `clang`, `cmake`, `cargo-nextest`) and the code conventions.
+
+Both Rust CI jobs and weekly mutation testing install `mold` and `clang` using only the runner's official Ubuntu
+`ubuntu.sources` repositories. These commands preserve normal package signature verification and
+fail if an Ubuntu index fails, while leaving unrelated preconfigured package feeds unchanged.
+
+To run the application locally:
 
 ```bash
 git clone https://github.com/johnthreekay/Ryokan.git
@@ -67,3 +73,26 @@ Please report security issues privately. See [SECURITY.md](SECURITY.md).
 Ryokan is licensed under [GPL-3.0-or-later](LICENSE).
 
 Third-party crate notices (MIT / Apache-2.0 / BSD / ISC) are bundled in [`licenses/THIRD_PARTY_LICENSES.html`](licenses/THIRD_PARTY_LICENSES.html).
+
+## Next patch release
+
+Version 1.9.13 refreshes all Rust dependencies, HTMX 2.0.11, Zensical 0.0.71,
+and ffprobe 9.0.2-1. The Rust 1.99.1 builder, Ubuntu 26.04 LTS runtime,
+and static ffprobe sources use verified multi-platform digests. The image
+rebuilds the exact upstream gosu 1.19 source with Go 1.27.3 and explicitly
+includes the C++ runtime needed by the native title parser. The declared
+minimum remains Rust 1.95.
+See [CHANGELOG.md](CHANGELOG.md) and the browser dependency
+[provenance](static/vendor/README.md). Run the canonical `cargo t` / nextest
+suite with `test-support` when checking dependency upgrades so test fixtures run
+in separate processes.
+
+The Rust pull-request workflow audits locked dependencies and requires native
+AMD64 and ARM64 image builds, SBOMs, strict vulnerability/secret scans (including
+unfixed HIGH/CRITICAL vulnerabilities), and the real runtime smoke test before
+release. Tag/manual publication reuses these gates and checks Cargo source,
+lockfile, image and release versions. Branch pushes verify without publishing.
+Publication requires the exact `vVERSION` Git tag, including manual dispatch.
+The full tag ref, resolved tag commit, checked-out HEAD and workflow source SHA
+must agree before CI or image builds; moving branch dispatches fail closed.
+See the [image verification instructions](docs/docker.md#building-and-verifying-this-fork).

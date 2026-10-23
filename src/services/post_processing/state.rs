@@ -29,8 +29,20 @@ pub fn grab_is_stale(grabbed_at: &str, max_age_secs: i64) -> bool {
     elapsed > max_age_secs
 }
 
-pub(super) fn fallback_ep_offset(raw_ep_num: i32, cumulative_prior_episodes: i32) -> i32 {
-    if cumulative_prior_episodes > 0 && raw_ep_num > cumulative_prior_episodes {
+pub(super) fn fallback_ep_offset(
+    raw_ep_num: i32,
+    cumulative_prior_episodes: i32,
+    current_series_episodes: i32,
+) -> i32 {
+    // A franchise offset is only needed when the filename number cannot be
+    // a relative episode of the current series. Complete-series packs such
+    // as Naruto: Shippuden have a prior franchise entry but still use their
+    // own 1..N numbering; subtracting the prior entry count would map 221 to
+    // E01 and collide with the real 001 file.
+    if cumulative_prior_episodes > 0
+        && raw_ep_num > cumulative_prior_episodes
+        && (current_series_episodes <= 0 || raw_ep_num > current_series_episodes)
+    {
         cumulative_prior_episodes
     } else {
         0
@@ -459,22 +471,22 @@ mod tests {
         // Motivating case: [SubsPlease] Jujutsu Kaisen - 56 → S3 E9.
         // S1 (24) + S2 (23) = 47 prior-cour episodes. Parsed 56 > 47,
         // so the filename is absolute-numbered and offset = 47.
-        assert_eq!(fallback_ep_offset(56, 47), 47);
+        assert_eq!(fallback_ep_offset(56, 47, 23), 47);
     }
 
     #[test]
     fn fallback_offset_relative_release_within_cour() {
         // Erai-raws / cour-specific releases number from 1: raw 9 is
         // relative, 9 ≤ 47, offset = 0. Subtracting zero leaves E9.
-        assert_eq!(fallback_ep_offset(9, 47), 0);
+        assert_eq!(fallback_ep_offset(9, 47, 23), 0);
     }
 
     #[test]
     fn fallback_offset_zero_for_first_season_entry() {
         // First-season entry has no prior cours (cumulative = 0), so
         // the legacy behavior is preserved regardless of parsed number.
-        assert_eq!(fallback_ep_offset(56, 0), 0);
-        assert_eq!(fallback_ep_offset(1, 0), 0);
+        assert_eq!(fallback_ep_offset(56, 0, 500), 0);
+        assert_eq!(fallback_ep_offset(1, 0, 500), 0);
     }
 
     #[test]
@@ -484,7 +496,7 @@ mod tests {
         // S3. S3 doesn't have E25 so the subsequent rename step fails
         // — the right loud failure rather than silently translating to
         // a plausible-looking E-22.
-        assert_eq!(fallback_ep_offset(25, 47), 0);
+        assert_eq!(fallback_ep_offset(25, 47, 12), 0);
     }
 
     #[test]
@@ -495,7 +507,22 @@ mod tests {
         // signal we keep it as relative (offset 0) — the alternative
         // (offset = cumulative) would silently map legitimate E47
         // releases of a 48-episode show to E0.
-        assert_eq!(fallback_ep_offset(47, 47), 0);
+        assert_eq!(fallback_ep_offset(47, 47, 47), 0);
+    }
+
+    #[test]
+    fn fallback_offset_keeps_complete_series_numbering() {
+        // Naruto: Shippuden has 500 episodes and a 220-episode prequel. A
+        // complete pack's 221 must remain E221, not become E01.
+        assert_eq!(fallback_ep_offset(221, 220, 500), 0);
+        assert_eq!(fallback_ep_offset(500, 220, 500), 0);
+    }
+
+    #[test]
+    fn fallback_offset_still_handles_absolute_numbered_cour() {
+        // Jujutsu Kaisen S3 has 23 episodes after 47 prior episodes, so
+        // absolute release number 56 must resolve to relative E09.
+        assert_eq!(fallback_ep_offset(56, 47, 23), 47);
     }
 
     // ── grab_is_stale ────────────────────────────────────────────────

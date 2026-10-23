@@ -2,6 +2,7 @@ use crate::services::download_client::DownloadFile;
 use crate::services::post_processing::{
     effective_batch_shape, is_secondary_video_path, ready_wanted_video_indices,
     requires_episode_map_preflight, validate_batch_episode_map,
+    validate_batch_episode_map_with_series_counts,
 };
 
 #[test]
@@ -30,6 +31,46 @@ fn accepts_unique_dot_delimited_complete_series_batch() {
         ),
     ];
     assert!(validate_batch_episode_map(&files).is_ok());
+}
+
+#[test]
+fn complete_series_pack_does_not_apply_franchise_offset() {
+    let files = vec![
+        (
+            0,
+            164,
+            None,
+            220,
+            "[JySzE] Naruto Shippuden - 001 [v2].mkv".to_string(),
+        ),
+        (
+            1,
+            164,
+            None,
+            220,
+            "[JySzE] Naruto Shippuden - 221 [v2].mkv".to_string(),
+        ),
+        (
+            2,
+            164,
+            None,
+            220,
+            "[JySzE] Naruto Shippuden - 500 [v2].mkv".to_string(),
+        ),
+    ];
+    let counts = std::collections::HashMap::from([(164_i64, 500_i32)]);
+
+    let plan = validate_batch_episode_map_with_series_counts(&files, &counts).unwrap();
+
+    assert_eq!(plan.slots.get(&0).map(|resolved| resolved.episode), Some(1));
+    assert_eq!(
+        plan.slots.get(&1).map(|resolved| resolved.episode),
+        Some(221)
+    );
+    assert_eq!(
+        plan.slots.get(&2).map(|resolved| resolved.episode),
+        Some(500)
+    );
 }
 
 #[test]

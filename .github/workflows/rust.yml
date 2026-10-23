@@ -1,6 +1,15 @@
 name: Rust
 
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: false
+        default: ''
+    outputs:
+      version:
+        value: ${{ jobs.version.outputs.version }}
   push:
     branches: [ "main", "dev" ]
   pull_request:
@@ -21,6 +30,24 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check Cargo source, lock and release versions
+        id: version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/check_image_version.py
+      - name: Test image version guards
+        run: python3 -m unittest discover -s scripts -p 'test_image_version.py'
+      - name: Test immutable publication source guards
+        run: python3 -m unittest discover -s scripts -p 'test_release_identity.py'
+
   build:
     runs-on: ubuntu-latest
     # GitHub's per-job default is 6h; the verify pass should never
@@ -42,7 +69,15 @@ jobs:
       # 3-5x — pays for itself many times over across the four cargo
       # invocations below.
       - name: Install mold + clang
-        run: sudo apt-get update && sudo apt-get install -y mold clang
+        # These Ubuntu packages must not depend on unrelated runner feeds.
+        run: |
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=/dev/null
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends mold clang
       # nextest is the parallel test runner pinned in `.config/nextest.toml`
       # — runs ~1900 tests roughly 2x faster than `cargo test` thanks
       # to a process-per-test scheduler and a less serialized fixture
@@ -103,6 +138,47 @@ jobs:
       # on linux targets; this job inherits that config and would fail
       # at link-time without them.
       - name: Install mold + clang
-        run: sudo apt-get update && sudo apt-get install -y mold clang
+        run: |
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_options=(
+            -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+            -o Dir::Etc::sourceparts=/dev/null
+          )
+          sudo apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo apt-get "${apt_options[@]}" install -y --no-install-recommends mold clang
       - name: Build on MSRV
         run: cargo build --workspace --locked --verbose
+
+  dependency-audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+      - name: Audit the locked dependency graph
+        run: cargo audit
+
+  container:
+    name: Native runtime images
+    needs: [version, build, msrv, dependency-audit]
+    uses: abhi1693/actions/.github/workflows/container-images.yml@v1
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      manifest: .github/images.json
+      publish: false
+      version: ${{ needs.version.outputs.version }}
+      changed-only: false
+      scan: true
+      scan-ignore-unfixed: false
+      artifact-scope: ci-images
