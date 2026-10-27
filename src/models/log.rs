@@ -309,13 +309,73 @@ pub async fn query(db: &SqlitePool, params: &LogQuery) -> Result<Vec<LogEntry>, 
         .collect())
 }
 
-/// Delete logs older than `days` days. Returns number of deleted rows.
+/// Retain at most 30 days (at the normal call sites), 100,000 non-error
+/// entries and 10,000 errors. Separate caps preserve rare diagnostics during
+/// a repeated-warning storm. Small commits let SQLite checkpoint its WAL and
+/// release the writer lock instead of deleting millions of rows at once.
 pub async fn cleanup(db: &SqlitePool, days: i64) -> Result<u64, sqlx::Error> {
-    let result = sqlx::query("DELETE FROM logs WHERE timestamp < datetime('now', ?)")
+    cleanup_with_limits(db, days, 100_000, 10_000).await
+}
+
+async fn cleanup_with_limits(
+    db: &SqlitePool,
+    days: i64,
+    non_error_limit: i64,
+    error_limit: i64,
+) -> Result<u64, sqlx::Error> {
+    const BATCH: i64 = 5_000;
+    let age_cutoff: String = sqlx::query_scalar("SELECT datetime('now', ?)")
         .bind(format!("-{} days", days))
-        .execute(db)
+        .fetch_one(db)
         .await?;
-    Ok(result.rows_affected())
+    let mut removed = 0;
+    loop {
+        let count = sqlx::query(
+            "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE timestamp < ? LIMIT ?)",
+        )
+        .bind(&age_cutoff)
+        .bind(BATCH)
+        .execute(db)
+        .await?
+        .rows_affected();
+        removed += count;
+        if count < BATCH as u64 {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    for (find, delete, keep) in [
+        (
+            "SELECT id FROM logs WHERE level != 'error' ORDER BY id DESC LIMIT 1 OFFSET ?",
+            "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE level != 'error' AND id < ? ORDER BY id LIMIT ?)",
+            non_error_limit,
+        ),
+        (
+            "SELECT id FROM logs WHERE level = 'error' ORDER BY id DESC LIMIT 1 OFFSET ?",
+            "DELETE FROM logs WHERE id IN (SELECT id FROM logs WHERE level = 'error' AND id < ? ORDER BY id LIMIT ?)",
+            error_limit,
+        ),
+    ] {
+        let cutoff: Option<i64> = sqlx::query_scalar(find)
+            .bind(keep - 1)
+            .fetch_optional(db)
+            .await?;
+        let Some(cutoff) = cutoff else { continue };
+        loop {
+            let count = sqlx::query(delete)
+                .bind(cutoff)
+                .bind(BATCH)
+                .execute(db)
+                .await?
+                .rows_affected();
+            removed += count;
+            if count < BATCH as u64 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+    Ok(removed)
 }
 
 /// Get total log count (for the UI).
@@ -798,6 +858,55 @@ mod tests {
         let remaining = query(&db, &LogQuery::default()).await.unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].message, "fresh");
+    }
+
+    #[tokio::test]
+    async fn cleanup_bounds_a_warning_storm_without_discarding_errors() {
+        let db = in_memory_pool().await;
+        insert(&db, LogLevel::Error, LogCategory::System, "keep error", "")
+            .await
+            .unwrap();
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n < 100007)              INSERT INTO logs(timestamp,level,category,message,detail)              SELECT datetime('now'),'warn','post_process',CAST(n AS TEXT),'' FROM seq",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        assert_eq!(cleanup(&db, 30).await.unwrap(), 7);
+        let counts: Vec<(String, i64)> =
+            sqlx::query_as("SELECT level,COUNT(*) FROM logs GROUP BY level ORDER BY level")
+                .fetch_all(&db)
+                .await
+                .unwrap();
+        assert_eq!(counts, vec![("error".into(), 1), ("warn".into(), 100000)]);
+        let oldest_warning: String =
+            sqlx::query_scalar("SELECT message FROM logs WHERE level='warn' ORDER BY id LIMIT 1")
+                .fetch_one(&db)
+                .await
+                .unwrap();
+        assert_eq!(oldest_warning, "8");
+        assert_eq!(cleanup(&db, 30).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_batches_aged_rows_and_caps_errors_independently() {
+        let db = in_memory_pool().await;
+        sqlx::query(
+            "WITH RECURSIVE seq(n) AS (VALUES(1) UNION ALL SELECT n+1 FROM seq WHERE n < 10001)              INSERT INTO logs(timestamp,level,category,message,detail)              SELECT datetime('now','-60 days'),'warn','post_process','old','' FROM seq",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        for _ in 0..5 {
+            insert(&db, LogLevel::Error, LogCategory::System, "error", "")
+                .await
+                .unwrap();
+        }
+        insert(&db, LogLevel::Info, LogCategory::System, "fresh", "")
+            .await
+            .unwrap();
+        assert_eq!(cleanup_with_limits(&db, 30, 3, 2).await.unwrap(), 10004);
+        assert_eq!(count(&db).await.unwrap(), 3);
     }
 
     // ── levels_at_or_above ──────────────────────────────────────────
