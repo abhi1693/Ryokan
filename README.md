@@ -98,3 +98,13 @@ Publication requires the exact `vVERSION` Git tag, including manual dispatch.
 The full tag ref, resolved tag commit, checked-out HEAD and workflow source SHA
 must agree before CI or image builds; moving branch dispatches fail closed.
 See the [image verification instructions](docs/docker.md#building-and-verifying-this-fork).
+
+### Operational log retention
+
+Hourly cleanup and the manual cleanup action retain at most 30 days of
+operational logs, with separate ceilings of 100,000 non-error entries and
+10,000 errors. This prevents repeated parse warnings from filling the media
+database while preserving recent error diagnostics. Pruning commits in bounded
+batches. Library records, download history and import receipts are unaffected.
+Existing oversized database files require an operator-reviewed, backed-up
+compaction; normal cleanup does not run VACUUM against the live app.

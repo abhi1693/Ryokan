@@ -1165,7 +1165,7 @@ pub async fn api_force_airing_refresh(
     path = "/api/tasks/cleanup",
     tag = "System",
     summary = "Trigger cleanup",
-    description = "Manually trigger cleanup of old log entries and RSS decisions (older than 30 days).",
+    description = "Manually trigger age- and size-bounded log cleanup and remove RSS decisions older than 30 days.",
     responses(
         (status = 200, description = "Cleanup report", body = serde_json::Value),
     ),
